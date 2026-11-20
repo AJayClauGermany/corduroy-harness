@@ -1,0 +1,101 @@
+[package]
+name = "corduroy-harness"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "A minimal agent harness: a model proposes actions, tools execute them, results feed back until done."
+license = "BSL-1.0"
+repository = "https://github.com/AJayClauGermany/corduroy-harness"
+readme = "README.md"
+keywords = ["agent", "llm", "harness"]
+categories = ["development-tools"]
+publish = false
+
+[dependencies]
+
+# -----------------------------------------------------------------------------
+# Lints
+#
+# Policy: as strict as Clippy gets. Everything is `warn` here so day-to-day
+# `cargo check` stays quick; `cargo lint` (and CI) promote warnings to errors.
+# Do not blanket-allow a lint. Where a single exception is justified, use
+# `#[expect(lint, reason = "...")]` at the narrowest scope so it is removed
+# automatically once it stops being needed.
+# -----------------------------------------------------------------------------
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+unused_qualifications = "warn"
+unused_lifetimes = "warn"
+single_use_lifetimes = "warn"
+trivial_casts = "warn"
+trivial_numeric_casts = "warn"
+let_underscore_drop = "warn"
+non_ascii_idents = "warn"
+unit_bindings = "warn"
+redundant_imports = "warn"
+explicit_outlives_requirements = "warn"
+meta_variable_misuse = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+future_incompatible = { level = "warn", priority = -1 }
+
+[lints.rustdoc]
+broken_intra_doc_links = "warn"
+private_intra_doc_links = "warn"
+missing_crate_level_docs = "warn"
+
+[lints.clippy]
+# Whole lint groups (lowest priority so the individual entries below win).
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+
+# Hand-picked `restriction` lints. This group is never enabled wholesale because
+# it contains contradictory lints; these are the ones that fit an agent harness.
+# -- Failure handling: surface errors, never panic in library paths.
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+panic_in_result_fn = "warn"
+unwrap_in_result = "warn"
+todo = "warn"
+unimplemented = "warn"
+unreachable = "warn"
+indexing_slicing = "warn"
+string_slice = "warn"
+exit = "warn"
+# -- Output goes through the writer we are handed, not stray prints.
+dbg_macro = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+use_debug = "warn"
+# -- Explicitness.
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+error_impl_error = "warn"
+clone_on_ref_ptr = "warn"
+let_underscore_must_use = "warn"
+let_underscore_untyped = "warn"
+rest_pat_in_fully_bound_structs = "warn"
+str_to_string = "warn"
+string_add = "warn"
+get_unwrap = "warn"
+if_then_some_else_none = "warn"
+infinite_loop = "warn"
+lossy_float_literal = "warn"
+mem_forget = "warn"
+mixed_read_write_in_expression = "warn"
+mod_module_files = "warn"
+partial_pub_fields = "warn"
+rc_buffer = "warn"
+rc_mutex = "warn"
+renamed_function_params = "warn"
+try_err = "warn"
+undocumented_unsafe_blocks = "warn"
+unnecessary_self_imports = "warn"
+unneeded_field_pattern = "warn"
+unused_result_ok = "warn"
+verbose_file_reads = "warn"

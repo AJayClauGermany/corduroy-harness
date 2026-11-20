@@ -1,0 +1,22 @@
+# Clippy thresholds. Lint levels live in Cargo.toml under [lints.clippy].
+
+# Tests may use the shortcuts that are banned in library code.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true
+allow-print-in-tests = true
+allow-dbg-in-tests = true
+
+# Pre-1.0 and unpublished: let Clippy suggest API-breaking fixes.
+avoid-breaking-exported-api = false
+
+# Tighter than the defaults, to keep functions small and reviewable.
+cognitive-complexity-threshold = 15
+too-many-arguments-threshold = 5
+too-many-lines-threshold = 60
+type-complexity-threshold = 150
+excessive-nesting-threshold = 4
+
+# Identifiers that look like code in docs but should not need backticks.
+doc-valid-idents = ["LLM", "LLMs", "CorduroyHarness", ".."]

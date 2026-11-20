@@ -1,0 +1,22 @@
+# cargo-nextest configuration. Run with `cargo t` (alias for `cargo nextest run`).
+# NOTE: nextest does not run doctests; use `cargo test --doc` (scripts/check.sh does).
+
+[profile.default]
+# Show everything that failed, again, at the end of the run.
+failure-output = "immediate-final"
+status-level = "fail"
+final-status-level = "slow"
+# An agent loop that never terminates is a bug: flag slow tests at 5s, kill at 15s.
+slow-timeout = { period = "5s", terminate-after = 3 }
+
+[profile.ci]
+# Run every test even after a failure so one CI run reports everything.
+fail-fast = false
+retries = 0
+failure-output = "immediate-final"
+status-level = "fail"
+final-status-level = "slow"
+slow-timeout = { period = "5s", terminate-after = 3 }
+
+[profile.ci.junit]
+path = "junit.xml"

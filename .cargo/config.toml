@@ -1,0 +1,9 @@
+[alias]
+# Fast test run (cargo-nextest). Does not run doctests.
+t = "nextest run --all-features"
+# Strictest lint pass: warnings become errors. Same command CI uses.
+lint = "clippy --all-targets --all-features -- -D warnings"
+# Formatting check without modifying files.
+fmtc = "fmt --all -- --check"
+# Run the demo agent loop.
+demo = "run --quiet --"
