@@ -21,6 +21,18 @@ If `cargo nextest` is missing: `cargo install cargo-nextest --locked` (slow, ~3 
 
 `scripts/check.sh` passes. Fix lint findings; do not silence them.
 
+## Automation (Claude Code hooks)
+
+Configured in `.claude/settings.json`, scripts in `.claude/hooks/`.
+
+- **After every Edit/Write/MultiEdit** of a `*.rs`, `Cargo.toml` or `clippy.toml` file,
+  `lint-after-edit.sh` runs `cargo lint` and returns the findings as feedback on that edit. Treat
+  them as instructions to fix, not noise. A failure partway through a multi-file change is
+  expected; finish the change, then fix what remains.
+- **On cloud session start**, `session-start.sh` makes sure clippy, rustfmt and cargo-nextest are
+  installed. The first start in a fresh container builds nextest from crates.io (~4 min, the
+  prebuilt binaries at `get.nexte.st` are blocked by the egress policy); later starts skip it.
+
 ## Lint policy
 
 Clippy runs with `all`, `pedantic`, `nursery`, `cargo` plus a curated set of `restriction`
