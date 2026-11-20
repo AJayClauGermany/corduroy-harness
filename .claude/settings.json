@@ -1,0 +1,29 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/session-start.sh",
+            "timeout": 900,
+            "statusMessage": "Setting up Rust tooling (first run builds cargo-nextest, ~4 min)..."
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/lint-after-edit.sh",
+            "timeout": 180,
+            "statusMessage": "Running cargo lint..."
+          }
+        ]
+      }
+    ]
+  }
+}
