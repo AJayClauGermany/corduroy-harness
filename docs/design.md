@@ -6,6 +6,10 @@ It takes one mechanism from each of six existing harnesses. This document record
 of those mechanisms is (checked against the projects' sources in November 2026), what was
 borrowed, where it lives here, and what was left out.
 
+The second half records where the design is going. The core is being hardened before any
+further plugins are written, so that plugins build on a surface that does not shift under
+them. Sections and table rows marked *planned* describe that target, not the code as it is.
+
 ## The shape
 
 ```
@@ -108,6 +112,21 @@ among others rather than a built-in: the harness has no tools of its own.
 prompt snippets, and the session tree. Pi's gate-style hooks have an equivalent in
 `Harness::with_operation` (see `tests/agent_loop.rs`), but only for native code so far.
 
+**Pi Durable.** `@earendil-works/pi-durable` (`packages/durable`, marked experimental) stores
+each step of a run so that the run survives a crash. It is a separate runtime with its own
+loop, not an extension of Pi's agent core, which is the lesson taken here: durability is a
+property of the loop and the log, so it belongs in the core. Its mechanisms:
+
+- Every change is one atomic commit, and nothing is shown before its commit is stored.
+- A tool call's intent is committed before the tool runs. After a crash the call runs again
+  only if the tool declared `replay: "safe"`; otherwise the model receives an `interrupted`
+  error result and decides what to do.
+- Tasks can sleep or wait for a signal, and the wait survives a restart.
+- A restart limit (default 5) turns a crash loop into an error.
+- Storage is pluggable (memory, JSONL, SQLite) and single-writer.
+
+See [Durability](#durability-planned) for what is adopted.
+
 ### OpenHands: event stream and programmable loop
 
 **What it is.** OpenHands V0 was a threaded pub/sub `EventStream` of actions and observations
@@ -148,6 +167,10 @@ synchronous and dependency-free.
 **Left out.** Real providers (`oi-kit-providers`), MCP extensions, compaction, tool approval
 and sub-agents. All exist as oi-kit operations and slot into `Harness::with_operation`.
 
+**The baseline.** Goose is also the measure for the plugins shipped with the harness: what a
+user gets from Goose out of the box should be reachable here with shipped plugins alone. See
+[Shipped plugins](#shipped-plugins-the-goose-baseline-planned).
+
 ## Capabilities
 
 The plugin world in `wit/corduroy.wit` imports four host interfaces and nothing else. There is
@@ -175,14 +198,188 @@ A new capability is a new WIT interface, a `Host` implementation, and an entry i
 `CAPABILITIES`. Sandboxes layer on top of this: a kernel that runs in a container is still
 just a kernel name in a scope.
 
+## The core boundary
+
+The core provides primitives and nothing built from them. Something belongs in the core only
+if one of these holds:
+
+1. **It is on a path every effect passes through**: the log, the capability check, a step of
+   the loop. A plugin cannot enforce what other plugins can route around.
+2. **It is a kind of thing plugins contribute**: a tool, a prompt part, a kernel, a gate.
+3. **Plugins must agree on it to work together**: event shapes, session identity, the calling
+   convention between plugins.
+
+Everything else is a plugin, and a plugin may itself offer primitives to other plugins (see
+[Plugins extending plugins](#plugins-extending-plugins-planned)).
+
+| Primitive | Status | Target |
+| --- | --- | --- |
+| Plugin tree (`App`, `Context`, effects, `inject`) | built | Add a restart limit so a plugin that keeps faulting is suspended, not retried forever. |
+| Event log | in memory | A fallible `Log` trait. A step's events are one atomic commit, stored before any listener or the model sees them. |
+| Sessions | one, hardcoded | Many sessions, each with an id and an optional parent. Every event names its session. |
+| Tool lifecycle | derived from messages | `tool/call` committed before the tool runs, `tool/result` after. `ToolSpec` gains `replay` (safe or not) and `read-only`. Results are content blocks, not one string; tools can report progress and be cancelled. |
+| Gates | native `Operation` only | A fourth registry. A gate sees a tool call before it runs and answers allow, deny or ask. Reachable from WebAssembly through a world export. |
+| Waits and signals | none | A step can end by waiting for a named signal (a user's answer, a child session finishing). The wait is an event, so it survives a restart. |
+| Services | native only | Calls between plugins across the WebAssembly boundary, as a capability scoped by service name. |
+| Capabilities | four | The mechanism is settled; the set grows (below). |
+| Kernels | built | The trait and registry stay. `ShellKernel` is an implementation, not a primitive, and moves out to a plugin crate. |
+| Conversation projection | messages only | Understands a `compaction` event (a summary and the first message kept). Producing the summary is a plugin's job. |
+| Model access | constructor argument | A `provider` service that a plugin supplies, so the model is swappable like everything else. |
+| Versioning | WIT package version | A schema version in each log's header, a version on each plugin's stored state, and a rule for what a minor version of the world may change. |
+
+Capabilities to add, each a WIT interface with a scope:
+
+| Capability | Grants | Scoped by | Needed by |
+| --- | --- | --- | --- |
+| `llm` | one model request | model name | compaction, summaries, the skills reviewer |
+| `session` | start a child session and await it | recipe or agent name | sub-agents |
+| `service` | call another plugin's service | service name | plugins extending plugins |
+| `state` | a durable key-value store private to the plugin | (none: always its own) | todo, memory, any counter |
+| `log-read` | read events of other sessions | session and topic | chat recall |
+| `plugins` | load, unload and list plugins | plugin name | an extension manager |
+| `http` | make a request | host | web fetch, remote MCP |
+| `secret` | read a named credential | secret name | providers, MCP servers |
+| `clock` | read the time | (none) | schedulers, timestamps in output |
+
+Two rules follow from adding these:
+
+- **Secrets never enter the log.** A secret is handed to a plugin as an opaque value, and host
+  functions that take one (an HTTP header, say) record that it was used, not what it was.
+- **Time and randomness are host calls.** A WebAssembly plugin has no clock of its own, so
+  given the same host-call results it computes the same thing. That is what makes
+  [replaying a plugin](#durability-planned) possible, and WASI stays out of the linker to
+  keep it true.
+
+## Durability (*planned*)
+
+The oi-kit state machine already has the right shape: an operation reads the persisted
+conversation and returns effects for the host to persist. One step is therefore one commit.
+
+- **Commit, then deliver.** `Journal::apply_effects` turns a step's effects into one batch.
+  The batch is written to the `Log`; only then are listeners called and is the next step
+  allowed to start. A failed write is a broken pipeline and returns `Err` from `Harness::run`.
+- **Stores are plugins of the log.** The core carries the trait, the in-memory log and an
+  append-only JSONL log (std only, so the core stays dependency-free). SQLite and anything
+  else live in their own crates. A log has one writer.
+- **Tool intent first.** `tool/call` is committed before the tool is invoked. On resume, a call
+  with no result is run again if its tool is `replay: safe`; otherwise the harness records an
+  `interrupted` error result and the model recovers, as with any other tool failure.
+- **Continue, not only resume.** `Harness::resume` rebuilds state; a new `Harness::continue`
+  picks up an unfinished run without a new prompt.
+- **Plugin state.** Replayed events are not delivered to listeners, so state a plugin builds
+  from events is lost today. A plugin keeps durable state through the `state` capability,
+  whose writes join the commit of the step that made them. An alternative worth a prototype:
+  journal every host-call result and rebuild a WebAssembly plugin by replaying its calls,
+  which needs no cooperation from the plugin.
+- **Kernel state.** A kernel's processes do not survive a crash. The `Kernel` trait gains
+  optional `snapshot` and `restore` (Prime Agent has both); a kernel without them reports on
+  resume that its state was lost, as a timeout does today.
+- **Crash loops.** Each restart of an unfinished step is counted in the log; past a limit the
+  run ends as `Status::Failed`.
+
+## Plugins extending plugins (*planned*)
+
+Native plugins can already do this: one plugin calls `ctx.provide` with a service, which may
+be a `Registry` of its own, and others list it in `inject` and register into it. Unloading
+the provider suspends its dependents. Nothing in that path knows about tools or prompts, so a
+plugin-defined extension point is as good as a built-in one.
+
+WebAssembly plugins cannot, because the world only exports tools, an event handler and a
+prompt part. The target:
+
+- `plugin-info` gains `provides` and `inject`, each a list of service names, so the fiber
+  tree orders WebAssembly plugins the same way it orders native ones.
+- A `service` interface: `call(service, method, payload) -> result<string, host-error>`, and
+  a matching world export `handle-call`. Payloads are JSON text, like events.
+- The call is queued or refused if it would re-enter a plugin that is already running, in
+  keeping with the rule that a plugin is never called back while it runs.
+- **Authority does not travel.** A plugin handling a call acts with its own grants, so a
+  service is a deliberate grant of some of its power to callers. The host passes the caller's
+  name with every call, and the `service` scope decides who may call what. A plugin that
+  re-exports the filesystem to all callers is a misconfigured grant, visible in one place.
+
+The built-in registries (`tools`, `prompts`, `kernels`, `gates`) are the cases where the loop
+itself is the consumer. A plugin that wants its own extension point (an MCP plugin accepting
+server definitions, a skills plugin accepting skill sources) provides a service.
+
+## Sandboxing
+
+Three different things go by this name, and they land in different places.
+
+| Layer | Question it answers | Where |
+| --- | --- | --- |
+| Plugin isolation | What can plugin code do? | **Core** (`corduroy-wasm`): no WASI, granted interfaces only, scope checks, fuel and memory limits. Built. |
+| Execution sandbox | What can a command the model runs do? | **Plugin**: a kernel implementation. A container, bubblewrap or Landlock kernel registers under a name like any other. |
+| Policy | Should this call happen at all? | **Plugin**: a gate (approval modes, allow lists, injection scanning). |
+
+The core supplies the choke points, not the sandbox. What it must guarantee:
+
+- **Every side effect of a WebAssembly plugin is a host call checked against a scope.** This
+  holds today and must hold for each capability added.
+- **Process execution goes through a kernel.** No capability may start a process any other
+  way, or an execution sandbox could be bypassed. A plugin that needs a subprocess (an MCP
+  server over stdio) asks for one through a kernel, so the same grant and the same sandbox
+  apply.
+- **Native plugins are trusted.** A native plugin runs with the host's authority and no check
+  applies to it. Anything that comes from a third party, or that the agent writes for
+  itself, must be WebAssembly.
+
+## Shipped plugins: the Goose baseline (*planned*)
+
+Each row is a plugin, with the core primitive it waits on. Nothing here is built into the
+harness.
+
+| Goose feature | Plugin here | Kind | Waits on |
+| --- | --- | --- | --- |
+| Developer: `write`, `edit`, `shell`, `tree`, `read_image` | `pi-tools`, extended | WebAssembly | content blocks |
+| MCP extensions (stdio, streamable HTTP) | `mcp` | native (`rmcp`) | kernels for subprocesses, `secret` |
+| Providers | `providers` (`oi-kit-providers`) | native | `provider` service, `secret` |
+| Permission modes, per-tool permissions | `approval` | WebAssembly | gates, waits |
+| Tool inspection, prompt-injection scan | `inspect` | WebAssembly | gates |
+| Auto-compaction | `compact` | WebAssembly | `llm`, compaction event |
+| Summon: `load`, `delegate` | `subagents` | WebAssembly | sessions, `session`, waits |
+| Skills | `skills` (exists) | WebAssembly | `llm` for the review fork |
+| Context files (`.goosehints`, `AGENTS.md`) | `hints` | WebAssembly | nothing |
+| Todo | `todo` | WebAssembly | `state` |
+| Memory | `memory` | WebAssembly | nothing (scoped files) |
+| Chat Recall | `recall` | WebAssembly | `log-read` |
+| Summarize | `summarize` | WebAssembly | `llm` |
+| Extension Manager | `plugin-manager` | WebAssembly | `plugins` |
+| Code Mode | `code-mode` | WebAssembly + kernel | kernel-to-host bridge |
+| Recipes and sub-recipes | a declarative plugin tree with grants | host configuration | grant files |
+
+**Left out of the baseline.** Apps, computer control, the auto-visualiser and the tutorial
+are tied to Goose's desktop application. The scheduler and ACP are front ends: they drive a
+harness from outside and need nothing from the core beyond sessions and signals.
+
+## Order of work
+
+The core first, in the order its parts depend on each other. No new plugin is started until
+the step it waits on is done.
+
+1. `Log` trait, atomic commit before delivery, JSONL store, log header with a schema version.
+2. Sessions: ids, parents, a session on every event.
+3. Tool lifecycle: intent before execution, `replay` and `read-only`, content blocks,
+   progress, cancellation. `Harness::continue` and the restart limit.
+4. Gates, waits and signals.
+5. Services across the WebAssembly boundary; `state`.
+6. The remaining capabilities, each when its first plugin needs it; `provider` as a service;
+   `ShellKernel` out of the core.
+7. Shipped plugins, MCP first.
+
 ## Open questions
 
 - **Grant files.** Grants are built in code. A declarative form (Zed's `extension.toml`
   capabilities and Tauri's capability files are the closest prior art) would let users review
-  and edit what each plugin may do.
-- **WebAssembly gates.** WebAssembly plugins can observe events but not veto a tool call.
-  Giving the world an `on-tool-call` export that returns allow or deny would put Pi-style
-  gates and approval policies in plugins too.
+  and edit what each plugin may do. Joined with a plugin list it is also Goose's recipe and
+  Cordis's `cordis.yml`: one file naming the plugins of an agent and what each may do.
+- **Gates as a registry or as a dispatch mode.** Cordis has a `bail` dispatch mode in which
+  the first listener to return a value decides. Gates could be that mode on the event stream
+  rather than a fourth registry. The registry is simpler to order and to explain.
+- **Host-call replay.** Whether rebuilding a WebAssembly plugin by replaying its journaled
+  host calls is worth its log volume, compared with the explicit `state` capability.
+- **Session tree.** Sessions have a parent. Pi's sessions are a tree of entries, so one
+  session can branch from any earlier point. Branching within a session is not planned yet.
 - **Operations from plugins.** Loop steps are native `Operation`s. Letting plugins contribute
   steps needs an async-friendly, effect-returning export.
 - **Blocking.** Tool calls run on blocking threads, but event listeners run inline on the
