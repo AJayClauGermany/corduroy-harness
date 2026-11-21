@@ -9,9 +9,10 @@ oi-kit's state machine. `docs/design.md` explains where each idea comes from and
 
 | Path | What it is |
 | --- | --- |
-| `crates/corduroy-core` | **Zero dependencies, synchronous.** Plugin contexts (`App`, `Context`, `Plugin`), capabilities (`Grants`, `Scope`), the `EventStream`, and the `Tools` / `Prompts` / `Kernels` registries. |
+| `crates/corduroy-core` | **Zero dependencies, synchronous.** Plugin contexts (`App`, `Context`, `Plugin`), capabilities (`Grants`, `Scope`), the `EventStream` (commits, `SessionId`, the `Log` trait), and the `Tools` / `Prompts` / `Kernels` registries. |
+| `crates/corduroy-jsonl` | A store for the event stream: `JsonlLog`, one line per commit under a versioned header. Stores implement `corduroy_core::Log` and live outside the core. |
 | `crates/corduroy-wasm` | wasmtime host. Loads components built against `wit/corduroy.wit` as `Plugin`s; links only granted interfaces. |
-| `src/` (`corduroy-harness`) | Assembles the loop from oi-kit: `Harness`, `Journal` (effects to events), `PluginTools`, `ScriptedProvider`. Async (tokio). |
+| `src/` (`corduroy-harness`) | Assembles the loop from oi-kit: `Harness` (sessions, `run_in`, `continue_run`), `Journal` (one step's effects to one commit), `PluginTools`, `ScriptedProvider`. Async (tokio). |
 | `wit/corduroy.wit` | The typed plugin boundary. Each imported interface is one capability. |
 | `plugins/` | **Separate workspace**, built for `wasm32-unknown-unknown`: `pi-tools` (read, write, edit, bash) and `skills`. |
 | `crates/corduroy-test-support` | Test-only helpers: finds built plugins, makes scratch directories. |
@@ -94,6 +95,13 @@ as design guidance, not noise.
   delivered after its call returns (`Instance::call`).
 - **The event stream is the record.** The conversation is a projection of `message` events
   (`src/session.rs`); do not keep conversation state that cannot be rebuilt from the stream.
+  The same goes for sessions (`session/start`) and for whether a run is unfinished.
+- **Commit, then deliver.** A step's events go to the stream as one `EventStream::commit`,
+  which stores the batch in the `Log` before any listener or the next step sees it. Events of
+  a run carry its `SessionId`. A refused commit closes the stream and is the one event failure
+  that must reach the caller: propagate the `LogError` where there is a caller to give it to.
+- **A tool is repeated after a crash only if it says so.** `ToolSpec::replay_safe` (and
+  `replay-safe` in the WIT) is true only when calling twice equals calling once.
 - **Tool failures are data, not control flow.** A `ToolError` becomes an error tool result and
   goes back to the model so it can recover. A model failure ends the run as `Status::Failed`,
   also recorded in the conversation. Only a broken pipeline returns `Err` from `Harness::run`.
