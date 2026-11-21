@@ -7,3 +7,5 @@ lint = "clippy --all-targets --all-features -- -D warnings"
 fmtc = "fmt --all -- --check"
 # Run the demo agent loop.
 demo = "run --quiet --"
+# Build the guest plugins in plugins/ to WebAssembly. Tests and the demo load the result.
+plugins = "build --manifest-path plugins/Cargo.toml --target wasm32-unknown-unknown --release"

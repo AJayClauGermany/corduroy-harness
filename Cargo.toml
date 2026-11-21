@@ -7,7 +7,7 @@ resolver = "3"
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.95"
+rust-version = "1.97"
 license = "BSL-1.0"
 repository = "https://github.com/AJayClauGermany/corduroy-harness"
 readme = "README.md"
@@ -16,6 +16,11 @@ categories = ["development-tools"]
 
 [workspace.dependencies]
 corduroy-core = { path = "crates/corduroy-core", version = "0.1.0" }
+corduroy-wasm = { path = "crates/corduroy-wasm", version = "0.1.0" }
+corduroy-test-support = { path = "crates/corduroy-test-support", version = "0.1.0" }
+# Synchronous embedding: no async runtime, and no WASI, so plugins get no ambient authority.
+wasmtime = { version = "51.0.0", default-features = false, features = ["component-model", "cranelift", "runtime"] }
+wit-component = "0.263.0"
 
 [package]
 name = "corduroy-harness"

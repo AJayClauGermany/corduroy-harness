@@ -1,0 +1,115 @@
+package corduroy:plugin@0.1.0;
+
+/// Types shared by the host interfaces and the plugin world.
+interface types {
+    /// Why a host call did not succeed.
+    variant host-error {
+        /// The plugin's capability does not cover the resource it asked for.
+        denied(string),
+        /// The capability covers it, but the operation itself failed.
+        failed(string),
+    }
+
+    /// How a tool presents itself to the model.
+    record tool-spec {
+        name: string,
+        description: string,
+        /// JSON Schema for the tool's input object, as JSON text.
+        input-schema: string,
+    }
+
+    /// Why a tool call failed. Shown to the model so it can recover.
+    variant tool-error {
+        unknown-tool(string),
+        invalid-input(string),
+        failed(string),
+        denied(string),
+    }
+
+    /// One entry of the harness event stream.
+    record event {
+        id: u64,
+        /// `user`, `agent`, `environment`, `host` or `plugin:<name>`.
+        source: string,
+        /// The earlier event this one answers.
+        cause: option<u64>,
+        topic: string,
+        /// JSON text.
+        payload: string,
+    }
+
+    /// What a plugin contributes, returned from `activate`.
+    record plugin-info {
+        name: string,
+        version: string,
+        tools: list<tool-spec>,
+        /// Topic globs (`*` matches any run of characters) the plugin wants `on-event` for.
+        subscriptions: list<string>,
+        /// Whether the host should call `prompt-part` for each model request.
+        prompt: bool,
+    }
+}
+
+/// Capability `fs-read`: read files and list directories. Scoped by absolute path.
+interface fs-read {
+    use types.{host-error};
+
+    /// The file's contents. Files that are not UTF-8 text are refused.
+    read: func(path: string) -> result<string, host-error>;
+    /// Names in a directory, sorted; directories end in `/`.
+    %list: func(path: string) -> result<list<string>, host-error>;
+}
+
+/// Capability `fs-write`: create, replace and delete files. Scoped by absolute path.
+interface fs-write {
+    use types.{host-error};
+
+    /// Create or replace a file, creating parent directories as needed.
+    write: func(path: string, contents: string) -> result<_, host-error>;
+    /// Delete a file.
+    remove: func(path: string) -> result<_, host-error>;
+}
+
+/// Capability `kernel`: run code in a long-lived kernel that keeps its state between calls.
+/// Scoped by kernel name.
+interface kernel {
+    use types.{host-error};
+
+    record cell {
+        /// Standard output and standard error, interleaved.
+        output: string,
+        status: s32,
+        /// Whether the host dropped output beyond its limit.
+        truncated: bool,
+    }
+
+    exec: func(kernel: string, code: string, timeout-ms: u32) -> result<cell, host-error>;
+}
+
+/// Capability `events`: publish to the harness event stream. Scoped by topic.
+interface events {
+    use types.{host-error};
+
+    /// Queue an event. It is delivered once the current call into the plugin returns.
+    emit: func(topic: string, payload: string) -> result<_, host-error>;
+}
+
+/// A plugin. Every import is a capability the host must grant before the plugin is
+/// instantiated; a plugin that imports nothing can only compute.
+world plugin {
+    use types.{plugin-info, tool-error, event};
+
+    import fs-read;
+    import fs-write;
+    import kernel;
+    import events;
+
+    /// Called once per instantiation with the plugin's configuration as JSON text.
+    export activate: func(config: string) -> result<plugin-info, string>;
+    /// Run one of the tools listed by `activate`. `input` is a JSON object.
+    export call-tool: func(name: string, input: string) -> result<string, tool-error>;
+    /// Called for each event matching the plugin's subscriptions.
+    export on-event: func(event: event);
+    /// Text to add to the system prompt for the next model request.
+    export prompt-part: func() -> option<string>;
+}
