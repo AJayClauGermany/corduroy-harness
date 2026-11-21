@@ -1,4 +1,6 @@
 [toolchain]
 channel = "stable"
 components = ["clippy", "rustfmt"]
+# Guest plugins in plugins/ compile to WebAssembly.
+targets = ["wasm32-unknown-unknown"]
 profile = "minimal"

@@ -1,17 +1,91 @@
-[package]
-name = "corduroy-harness"
+[workspace]
+members = [".", "crates/*"]
+# Without this, commands run at the root would cover the root package only.
+default-members = [".", "crates/*"]
+# Guest plugins compile to WebAssembly and live in their own workspace.
+exclude = ["plugins"]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
-description = "A minimal agent harness: a model proposes actions, tools execute them, results feed back until done."
+rust-version = "1.97"
 license = "BSL-1.0"
 repository = "https://github.com/AJayClauGermany/corduroy-harness"
 readme = "README.md"
-keywords = ["agent", "llm", "harness"]
+keywords = ["agent", "llm", "harness", "wasm", "plugins"]
 categories = ["development-tools"]
+
+[workspace.dependencies]
+corduroy-core = { path = "crates/corduroy-core", version = "0.1.0" }
+corduroy-wasm = { path = "crates/corduroy-wasm", version = "0.1.0" }
+corduroy-test-support = { path = "crates/corduroy-test-support", version = "0.1.0" }
+# Synchronous embedding: no async runtime, and no WASI, so plugins get no ambient authority.
+wasmtime = { version = "51.0.0", default-features = false, features = ["component-model", "cranelift", "runtime"] }
+wit-component = "0.263.0"
+# The base agent abstractions (provider, message, conversation, operation, state machine).
+oi-kit-agent = { version = "=0.1.0-alpha.15", default-features = false }
+oi-kit-provider-types = { version = "=0.1.0-alpha.15", default-features = false }
+# Must match the versions oi-kit is built against: its API exposes these types.
+rmcp = { version = "3.11.0", default-features = false }
+anyhow = "1"
+async-trait = "0.1"
+futures = { version = "0.3", default-features = false, features = ["std"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
+tokio-util = "0.7"
+
+[package]
+name = "corduroy-harness"
+description = "A plugin-first agent harness: capability-gated WebAssembly plugins around a small core."
 publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
 
 [dependencies]
+corduroy-core = { workspace = true }
+corduroy-wasm = { workspace = true }
+oi-kit-agent = { workspace = true }
+oi-kit-provider-types = { workspace = true }
+rmcp = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+
+[dev-dependencies]
+corduroy-test-support = { workspace = true }
+
+# Plugins are compiled to machine code when they are loaded. With the compiler itself
+# unoptimised that takes seconds per plugin and dominates test time, so the crates on that
+# path are optimised even in debug builds.
+[profile.dev.package.cranelift-codegen]
+opt-level = 3
+[profile.dev.package.regalloc2]
+opt-level = 3
+[profile.dev.package.wasmparser]
+opt-level = 3
+[profile.dev.package.wasmtime-environ]
+opt-level = 3
+[profile.dev.package.wasmtime-internal-cranelift]
+opt-level = 3
+[profile.dev.package.wit-component]
+opt-level = 3
+[profile.dev.package.wit-parser]
+opt-level = 3
+[profile.dev.package.wasm-encoder]
+opt-level = 3
 
 # -----------------------------------------------------------------------------
 # Lints
@@ -22,7 +96,7 @@ publish = false
 # `#[expect(lint, reason = "...")]` at the narrowest scope so it is removed
 # automatically once it stops being needed.
 # -----------------------------------------------------------------------------
-[lints.rust]
+[workspace.lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
 missing_debug_implementations = "warn"
@@ -41,12 +115,12 @@ meta_variable_misuse = "warn"
 rust_2018_idioms = { level = "warn", priority = -1 }
 future_incompatible = { level = "warn", priority = -1 }
 
-[lints.rustdoc]
+[workspace.lints.rustdoc]
 broken_intra_doc_links = "warn"
 private_intra_doc_links = "warn"
 missing_crate_level_docs = "warn"
 
-[lints.clippy]
+[workspace.lints.clippy]
 # Whole lint groups (lowest priority so the individual entries below win).
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }

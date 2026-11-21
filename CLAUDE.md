@@ -1,19 +1,33 @@
 # corduroy-harness
 
-Minimal agent harness in Rust: a `Model` proposes `Action`s, `Tool`s run them, results are
-appended to a `Transcript`, repeat until `Finish` or `Config::max_steps`. Zero dependencies,
-synchronous, edition 2024.
+A plugin-first agent harness in Rust. A small core provides a plugin tree, an event stream and
+three registries; everything else (tools, prompt text, kernels, reactions to events) is a
+plugin, either native Rust or a capability-gated WebAssembly component. The agent loop is
+oi-kit's state machine. `docs/design.md` explains where each idea comes from and why.
+
+## Layout
+
+| Path | What it is |
+| --- | --- |
+| `crates/corduroy-core` | **Zero dependencies, synchronous.** Plugin contexts (`App`, `Context`, `Plugin`), capabilities (`Grants`, `Scope`), the `EventStream`, and the `Tools` / `Prompts` / `Kernels` registries. |
+| `crates/corduroy-wasm` | wasmtime host. Loads components built against `wit/corduroy.wit` as `Plugin`s; links only granted interfaces. |
+| `src/` (`corduroy-harness`) | Assembles the loop from oi-kit: `Harness`, `Journal` (effects to events), `PluginTools`, `ScriptedProvider`. Async (tokio). |
+| `wit/corduroy.wit` | The typed plugin boundary. Each imported interface is one capability. |
+| `plugins/` | **Separate workspace**, built for `wasm32-unknown-unknown`: `pi-tools` (read, write, edit, bash) and `skills`. |
+| `crates/corduroy-test-support` | Test-only helpers: finds built plugins, makes scratch directories. |
 
 ## Commands
 
 | Command | What it does |
 | --- | --- |
-| `cargo t` | Fast tests (`cargo nextest run --all-features`). **Does not run doctests.** |
+| `cargo plugins` | Build the guest plugins to WebAssembly. **Run after changing `plugins/` or `wit/`**; host tests and the demo load the result. |
+| `cargo t` | Fast tests for the whole host workspace (`cargo nextest run --all-features`). **Does not run doctests.** Fails with instructions if the plugins are missing or stale. |
 | `cargo test --doc` | Doctests (nextest skips them) |
-| `cargo lint` | Strictest clippy, `-D warnings`. Must be clean before finishing. |
+| `cargo test --manifest-path plugins/Cargo.toml` | Unit tests of the plugins' pure logic, run natively |
+| `cargo lint` | Strictest clippy on the host workspace, `-D warnings`. Must be clean before finishing. |
 | `cargo fmt --all` | Format. `cargo fmtc` checks without writing. |
-| `cargo demo` | Run the demo loop |
-| `scripts/check.sh` | fmt + clippy + nextest + doctests + docs: exactly what CI runs |
+| `cargo demo` | Run a scripted agent through both plugins and print the event stream |
+| `scripts/check.sh` | fmt + clippy + plugins + nextest + doctests + docs, host and plugins: exactly what CI runs |
 
 If `cargo nextest` is missing: `cargo install cargo-nextest --locked` (slow, ~3 min).
 
@@ -25,37 +39,68 @@ If `cargo nextest` is missing: `cargo install cargo-nextest --locked` (slow, ~3 
 
 Configured in `.claude/settings.json`, scripts in `.claude/hooks/`.
 
-- **After every Edit/Write/MultiEdit** of a `*.rs`, `Cargo.toml` or `clippy.toml` file,
-  `lint-after-edit.sh` runs `cargo lint` and returns the findings as feedback on that edit. Treat
-  them as instructions to fix, not noise. A failure partway through a multi-file change is
-  expected; finish the change, then fix what remains.
-- **On cloud session start**, `session-start.sh` makes sure clippy, rustfmt and cargo-nextest are
-  installed. The first start in a fresh container builds nextest from crates.io (~4 min, the
-  prebuilt binaries at `get.nexte.st` are blocked by the egress policy); later starts skip it.
+- **After every Edit/Write/MultiEdit** of a `*.rs`, `*.wit`, `Cargo.toml` or `clippy.toml` file,
+  `lint-after-edit.sh` runs clippy on the workspace the file belongs to (host, plugins, or both
+  for the WIT world) and returns the findings as feedback on that edit. Treat them as
+  instructions to fix, not noise. A failure partway through a multi-file change is expected;
+  finish the change, then fix what remains.
+- **On cloud session start**, `session-start.sh` makes sure clippy, rustfmt, the wasm32 target
+  and cargo-nextest are installed, then builds the plugins. The first start in a fresh
+  container builds nextest from crates.io (~4 min, the prebuilt binaries at `get.nexte.st` are
+  blocked by the egress policy); later starts skip it.
 
 ## Lint policy
 
 Clippy runs with `all`, `pedantic`, `nursery`, `cargo` plus a curated set of `restriction`
-lints (see `[lints]` in `Cargo.toml`, thresholds in `clippy.toml`). Treat its output as design
-guidance, not noise.
+lints (see `[workspace.lints]` in `Cargo.toml`, thresholds in `clippy.toml`). Treat its output
+as design guidance, not noise.
 
-- Never add a crate- or module-wide `#![allow(...)]`, and never loosen `[lints]` to get green.
+- Never add a crate- or module-wide `#![allow(...)]`, and never loosen `[workspace.lints]` to
+  get green.
 - If one exception is genuinely right, use `#[expect(lint, reason = "...")]` on the narrowest
   item. `allow_attributes` is on, so plain `#[allow]` is flagged; `expect` self-removes when stale.
+- The one standing exception: crates that depend on wasmtime or oi-kit carry
+  `#![expect(clippy::multiple_crate_versions)]`, because the duplicates are in those
+  dependencies' own trees. `corduroy-core` has no such exception and must stay dependency-free.
 - `unwrap`, `expect`, `panic!`, `todo!`, indexing and slicing are denied in non-test code. Return
-  errors instead. They are permitted inside `#[cfg(test)]` and `tests/`.
+  errors instead. They are permitted inside `#[cfg(test)]` and `#[test]` functions, but **not in
+  helper functions of integration tests**: make those return `Result` and unwrap in the test.
 - No `println!`/`eprintln!`/`dbg!`. Write to an `io::Write` you were given (see `src/main.rs`).
-- `unsafe` is forbidden.
+- `unsafe` is forbidden in the host workspace.
 - Public items need docs (`missing_docs`), fallible public fns need `# Errors`.
+- `redundant_pub_crate` and `unreachable_pub` pull in opposite directions for private modules.
+  Keep crate-internal items either in a public module as `pub(crate)`, or in a private child
+  module as `pub(super)` (see `crates/corduroy-wasm/src/plugin/`).
+- `plugins/` has its own, lighter lint table: the bindings `wit-bindgen` generates need
+  `unsafe` and are confined to a `mod bindings` with a documented `#[allow]`. Plugin code must
+  not panic: a panic is a trap that takes the instance down.
 
 ## Architecture rules
 
-- `Model` and `Tool` are the extension points. Keep the loop in `agent.rs` ignorant of any
-  specific model or tool.
-- **Tool failures are data, not control flow.** `ToolError` becomes `Entry::ToolError` and goes
-  back to the model so it can recover. Only `ModelError` aborts a run.
-- Hitting the step limit is a normal `Status::StepLimitReached`, not an `Err`.
-- Tests must not need network or an LLM. Drive the loop with `ScriptedModel` or a closure.
+- **Everything is a plugin.** The core and the harness provide registries and a loop, never a
+  tool or a prompt of their own. New behaviour goes in a plugin unless it is a new *kind* of
+  thing plugins contribute.
+- **Every registration is an effect.** Plugins set things up only through their `Context`
+  (`ctx.effect`, `ctx.provide`, `ctx.on`, `registry.register(ctx, ..)`), so unloading reverts
+  it. Never reach around the context to mutate shared state from `apply`.
+- **Plugins declare what they need.** A service used in `apply` must be listed in `inject`; the
+  plugin is then activated, suspended and re-applied as that service comes and goes.
+- **No ambient authority for WebAssembly plugins.** A host function is reachable only through
+  a WIT interface, each interface is one capability, and every host function checks its
+  resource against the grant's scope before acting. Do not add WASI to the linker. A new host
+  ability means a new interface in `wit/corduroy.wit`, a `Host` impl in
+  `crates/corduroy-wasm/src/plugin/host.rs` and an entry in `CAPABILITIES`.
+- **Never call back into a plugin while it is running.** Events a plugin raises are queued and
+  delivered after its call returns (`Instance::call`).
+- **The event stream is the record.** The conversation is a projection of `message` events
+  (`src/session.rs`); do not keep conversation state that cannot be rebuilt from the stream.
+- **Tool failures are data, not control flow.** A `ToolError` becomes an error tool result and
+  goes back to the model so it can recover. A model failure ends the run as `Status::Failed`,
+  also recorded in the conversation. Only a broken pipeline returns `Err` from `Harness::run`.
+- Hitting the turn limit is a normal `Status::TurnLimitReached`, not an `Err`.
+- Keep the loop ignorant of any specific model, tool or plugin. Extend it with an oi-kit
+  `Operation` (`Harness::with_operation`), not with special cases.
+- Tests must not need network or an LLM. Drive the loop with `ScriptedProvider`.
 - Unit tests live in a `#[cfg(test)] mod tests` beside the code; behaviour through the public API
   goes in `tests/`. nextest kills tests after 15s (`.config/nextest.toml`), so a non-terminating
   loop shows up as a failure rather than a hang.
@@ -66,3 +111,5 @@ guidance, not noise.
 - Prefer `.to_owned()`/`String::from` over `.to_string()` on `&str` (`str_to_string` is on).
 - Use `foo.rs` + `foo/` for modules, never `foo/mod.rs` (`mod_module_files` is on).
 - Inline format args: `format!("{name}")`, not `format!("{}", name)`.
+- oi-kit is pinned to an exact alpha version, and `rmcp` must match the version oi-kit builds
+  against. Bump them together.

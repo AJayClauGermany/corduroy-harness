@@ -18,13 +18,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+          # Guest plugins in plugins/ compile to WebAssembly.
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            plugins
       - uses: taiki-e/install-action@v2
         with:
           tool: nextest
       - run: cargo fmt --all -- --check
+      - run: cargo fmt --manifest-path plugins/Cargo.toml --all -- --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo clippy --manifest-path plugins/Cargo.toml --target wasm32-unknown-unknown -- -D warnings
+      # The host tests load the plugins, so they are built first.
+      - run: cargo plugins
       - run: cargo nextest run --all-features --profile ci
+      - run: cargo test --manifest-path plugins/Cargo.toml
       # nextest does not run doctests.
       - run: cargo test --doc --all-features
       - run: cargo doc --no-deps --all-features
