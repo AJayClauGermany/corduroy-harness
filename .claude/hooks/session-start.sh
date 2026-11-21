@@ -23,9 +23,19 @@ if command -v rustup >/dev/null 2>&1; then
   done
 fi
 
+# The WebAssembly target the guest plugins in plugins/ are built for.
+if command -v rustup >/dev/null 2>&1; then
+  if ! rustup target list --installed | grep -q '^wasm32-unknown-unknown$'; then
+    rustup target add wasm32-unknown-unknown >&2
+  fi
+fi
+
 # cargo-nextest, used by `cargo t`. The prebuilt binaries at get.nexte.st are blocked by
 # the cloud egress policy, so build from crates.io (slow, ~3-4 min, but cached with the
 # container afterwards and skipped on every later session start).
 if ! cargo nextest --version >/dev/null 2>&1; then
   cargo install cargo-nextest --locked >&2
 fi
+
+# Build the guest plugins so the tests that load them pass straight away (~30s cold).
+cargo plugins >&2

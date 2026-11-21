@@ -67,6 +67,26 @@ tokio-util = { workspace = true }
 [dev-dependencies]
 corduroy-test-support = { workspace = true }
 
+# Plugins are compiled to machine code when they are loaded. With the compiler itself
+# unoptimised that takes seconds per plugin and dominates test time, so the crates on that
+# path are optimised even in debug builds.
+[profile.dev.package.cranelift-codegen]
+opt-level = 3
+[profile.dev.package.regalloc2]
+opt-level = 3
+[profile.dev.package.wasmparser]
+opt-level = 3
+[profile.dev.package.wasmtime-environ]
+opt-level = 3
+[profile.dev.package.wasmtime-internal-cranelift]
+opt-level = 3
+[profile.dev.package.wit-component]
+opt-level = 3
+[profile.dev.package.wit-parser]
+opt-level = 3
+[profile.dev.package.wasm-encoder]
+opt-level = 3
+
 # -----------------------------------------------------------------------------
 # Lints
 #
