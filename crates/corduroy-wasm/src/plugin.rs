@@ -267,6 +267,10 @@ fn deliver(instance: &Instance, event: &Event) {
     }
     let event = types::Event {
         id: event.id.get(),
+        session: event
+            .session
+            .as_ref()
+            .map(|session| session.as_str().to_owned()),
         source: event.source.to_string(),
         cause: event.cause.map(corduroy_core::EventId::get),
         topic: event.topic.clone(),

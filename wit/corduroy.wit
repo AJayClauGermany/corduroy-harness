@@ -29,6 +29,8 @@ interface types {
     /// One entry of the harness event stream.
     record event {
         id: u64,
+        /// The session the event belongs to. Events about the harness itself have none.
+        session: option<string>,
         /// `user`, `agent`, `environment`, `host` or `plugin:<name>`.
         source: string,
         /// The earlier event this one answers.

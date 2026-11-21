@@ -11,7 +11,7 @@ use corduroy_harness::core::{
 };
 use corduroy_harness::oi_kit_provider_types::conversation::message::Message;
 use corduroy_harness::scripted::{ScriptedProvider, call, say};
-use corduroy_harness::{Harness, HarnessError, Status, jsonl};
+use corduroy_harness::{Harness, HarnessError, MAIN, Status, jsonl};
 use corduroy_test_support::scratch;
 use serde_json::json;
 
@@ -114,9 +114,10 @@ impl Log for Failing {
 #[tokio::test]
 async fn a_step_the_log_refuses_ends_the_run_before_anyone_sees_it() {
     let commits = Arc::new(AtomicUsize::new(0));
-    // Room for the plugin's activation, the prompt and the model's call, but not the result.
+    // Room for the session's start, the plugin's activation, the prompt and the model's
+    // call, but not the result.
     let log = Failing {
-        healthy: 3,
+        healthy: 4,
         commits: Arc::clone(&commits),
     };
     let (harness, model) = harness(
@@ -131,7 +132,8 @@ async fn a_step_the_log_refuses_ends_the_run_before_anyone_sees_it() {
     assert_eq!(error.to_string(), "event log: the disk is full");
     // The result that was not stored is in neither the stream nor the conversation, and
     // the model was not asked again.
-    assert_eq!(harness.events().len(), 5);
-    assert_eq!(harness.journal().session().conversation().len(), 2);
+    assert_eq!(harness.events().len(), 6);
+    let journal = harness.journal(&MAIN.into()).unwrap();
+    assert_eq!(journal.session().conversation().len(), 2);
     assert_eq!(model.requests().len(), 1);
 }

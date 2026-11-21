@@ -6,6 +6,10 @@
 //! The log is the single source of truth: the conversation shown to a model is a projection of
 //! it, and a run can be resumed or replayed from it.
 //!
+//! One stream holds many *sessions*: conversations, each with its own history. An event that
+//! belongs to one names it ([`SessionId`]); events about the harness as a whole, such as a
+//! plugin being loaded, name none.
+//!
 //! Events are added in *commits*: a batch that is stored whole or not at all. A stream may
 //! have a [`Log`] behind it, and then a commit is written there before it is added to the
 //! stream or shown to any listener, so nothing is ever observed that a restart would not find
@@ -43,6 +47,39 @@ impl EventId {
 impl fmt::Display for EventId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "#{}", self.0)
+    }
+}
+
+/// Names one session: one conversation among the many a stream can hold.
+///
+/// The core gives the name no meaning. Whoever starts sessions chooses their ids and records
+/// how they relate (a parent, say) in events of its own.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SessionId(String);
+
+impl SessionId {
+    /// The session called `name`.
+    #[must_use]
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
+    }
+
+    /// The name.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for SessionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<&str> for SessionId {
+    fn from(name: &str) -> Self {
+        Self::new(name)
     }
 }
 
@@ -96,6 +133,8 @@ impl FromStr for Source {
 pub struct Event {
     /// Position in the stream.
     pub id: EventId,
+    /// The session the event belongs to, if it belongs to one.
+    pub session: Option<SessionId>,
     /// Who produced the event.
     pub source: Source,
     /// The earlier event this one answers, if any.
@@ -108,7 +147,11 @@ pub struct Event {
 
 impl fmt::Display for Event {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} [{}] {}", self.id, self.source, self.topic)?;
+        write!(f, "{}", self.id)?;
+        if let Some(session) = &self.session {
+            write!(f, " {session}")?;
+        }
+        write!(f, " [{}] {}", self.source, self.topic)?;
         if let Some(cause) = self.cause {
             write!(f, " (after {cause})")?;
         }
@@ -122,6 +165,7 @@ impl fmt::Display for Event {
 /// An event that has not been added to a stream yet, so has no id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Draft {
+    session: Option<SessionId>,
     source: Source,
     cause: Option<Cause>,
     topic: String,
@@ -133,6 +177,7 @@ impl Draft {
     #[must_use]
     pub fn new(source: Source, topic: impl Into<String>) -> Self {
         Self {
+            session: None,
             source,
             cause: None,
             topic: topic.into(),
@@ -144,6 +189,13 @@ impl Draft {
     #[must_use]
     pub fn payload(mut self, payload: impl Into<String>) -> Self {
         self.payload = payload.into();
+        self
+    }
+
+    /// Record the session the event belongs to.
+    #[must_use]
+    pub fn session(mut self, session: SessionId) -> Self {
+        self.session = Some(session);
         self
     }
 
@@ -181,6 +233,7 @@ impl Draft {
         };
         Ok(Event {
             id: EventId(last + batch.len() as u64 + 1),
+            session: self.session,
             source: self.source,
             cause,
             topic: self.topic,
@@ -422,6 +475,17 @@ impl EventStream {
             .collect()
     }
 
+    /// A copy of every event that belongs to `session`, oldest first.
+    #[must_use]
+    pub fn session(&self, session: &SessionId) -> Vec<Event> {
+        self.lock()
+            .log
+            .iter()
+            .filter(|event| event.session.as_ref() == Some(session))
+            .cloned()
+            .collect()
+    }
+
     /// How many events have been emitted.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -465,6 +529,7 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[1].cause, Some(first));
         assert_eq!(events[0].to_string(), "#1 [user] message hi");
+        assert_eq!(events[0].session, None);
         assert_eq!(events[1].to_string(), "#2 [agent] tool/call (after #1)");
     }
 
@@ -596,6 +661,25 @@ mod tests {
         assert!(stream.is_empty());
         // A bad batch is the caller's mistake, not the log's: the stream stays open.
         assert!(stream.emit(user("b")).is_ok());
+    }
+
+    #[test]
+    fn events_name_their_session_and_can_be_read_by_it() {
+        let stream = EventStream::new();
+        let (main, child) = (SessionId::new("main"), SessionId::from("child"));
+
+        stream.emit(user("message").session(main.clone())).unwrap();
+        stream.emit(user("message").session(child.clone())).unwrap();
+        stream
+            .emit(Draft::new(Source::Host, "plugin/activated"))
+            .unwrap();
+        stream.emit(user("message").session(main.clone())).unwrap();
+
+        let ids = |events: Vec<Event>| events.iter().map(|e| e.id.get()).collect::<Vec<_>>();
+        assert_eq!(ids(stream.session(&main)), [1, 4]);
+        assert_eq!(ids(stream.session(&child)), [2]);
+        assert_eq!(stream.events()[0].to_string(), "#1 main [user] message");
+        assert_eq!(child.as_str(), "child");
     }
 
     #[test]

@@ -1,13 +1,15 @@
 //! Assembling the pieces into an agent.
 
+use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::error::Error;
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use corduroy_core::{
-    App, ContextError, Draft, EventStream, FiberId, KERNELS, Kernel, Kernels, LogError, PROMPTS,
-    Plugin, Prompts, ShellKernel, Source, TOOLS, Tools, plugin_fn,
+    App, ContextError, EventStream, FiberId, KERNELS, Kernel, Kernels, LogError, PROMPTS, Plugin,
+    Prompts, SessionId, ShellKernel, Source, TOOLS, Tools, plugin_fn,
 };
 use oi_kit_agent::inference::InferenceRunner;
 use oi_kit_agent::machine::{StateMachine, Step};
@@ -21,11 +23,8 @@ use oi_kit_provider_types::model::ModelConfig;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::session::{Effect, Journal, Session};
+use crate::session::{Effect, Journal, MAIN, Session, SessionInfo};
 use crate::tools::{PluginTools, PromptOperation};
-
-/// The id of the one session a [`Harness`] runs.
-const SESSION: &str = "main";
 
 /// Why the harness could not be set up or a run could not complete.
 #[derive(Debug)]
@@ -36,6 +35,10 @@ pub enum HarnessError {
     Run(String),
     /// The event log could not store a commit. Nothing after it was recorded or shown.
     Log(LogError),
+    /// No session has this id.
+    UnknownSession(SessionId),
+    /// A session with this id already exists.
+    DuplicateSession(SessionId),
 }
 
 impl fmt::Display for HarnessError {
@@ -44,6 +47,8 @@ impl fmt::Display for HarnessError {
             Self::Context(error) => write!(f, "plugin tree: {error}"),
             Self::Run(reason) => write!(f, "run failed: {reason}"),
             Self::Log(error) => write!(f, "{error}"),
+            Self::UnknownSession(id) => write!(f, "there is no session `{id}`"),
+            Self::DuplicateSession(id) => write!(f, "session `{id}` already exists"),
         }
     }
 }
@@ -103,6 +108,12 @@ impl fmt::Display for Status {
     }
 }
 
+/// A session the harness knows of. Its journal is built from the stream when first needed.
+struct Known {
+    info: SessionInfo,
+    journal: Option<Arc<Journal>>,
+}
+
 /// The result of a completed run.
 #[derive(Debug, Clone)]
 pub struct Outcome {
@@ -114,6 +125,9 @@ pub struct Outcome {
 
 /// An agent: a plugin tree, an event stream and a programmable loop around a model.
 ///
+/// A harness holds any number of sessions, each a conversation of its own on the one stream.
+/// It starts with the session [`MAIN`], which [`run`](Self::run) uses.
+///
 /// The harness itself does very little. It provides the three registries plugins contribute
 /// to ([`Tools`], [`Prompts`], [`Kernels`]), journals the conversation to the event stream,
 /// and lines up oi-kit operations into a loop. Tools, prompt text, kernels and reactions to
@@ -123,7 +137,7 @@ pub struct Harness {
     tools: Arc<Tools>,
     prompts: Arc<Prompts>,
     kernels: Arc<Kernels>,
-    journal: Arc<Journal>,
+    sessions: Mutex<BTreeMap<SessionId, Known>>,
     provider: Arc<dyn Provider>,
     model: ModelConfig,
     system: String,
@@ -153,18 +167,41 @@ impl Harness {
     }
 
     /// A harness that continues from an existing event stream, such as one rebuilt with
-    /// [`EventStream::replay`]. The conversation is whatever the stream's `message` events
-    /// add up to.
+    /// [`EventStream::replay`] or opened from a log on disk. Its sessions are the ones the
+    /// stream holds, and each conversation is whatever that session's `message` events add
+    /// up to.
     ///
     /// # Errors
     ///
-    /// Returns [`HarnessError::Run`] if the stream's messages cannot be decoded, or
-    /// [`HarnessError::Context`] if the built-in services cannot be provided.
+    /// Returns [`HarnessError::Log`] if the stream cannot store the start of the main
+    /// session, or [`HarnessError::Context`] if the built-in services cannot be provided.
     pub fn resume(
         provider: Arc<dyn Provider>,
         events: Arc<EventStream>,
     ) -> Result<Self, HarnessError> {
-        let journal = Arc::new(Journal::new(SESSION, Arc::clone(&events))?);
+        let mut sessions: BTreeMap<SessionId, Known> = SessionInfo::all(&events)
+            .into_iter()
+            .map(|info| {
+                (
+                    info.id.clone(),
+                    Known {
+                        info,
+                        journal: None,
+                    },
+                )
+            })
+            .collect();
+        if let Entry::Vacant(vacant) = sessions.entry(SessionId::new(MAIN)) {
+            let info = SessionInfo {
+                id: vacant.key().clone(),
+                parent: None,
+            };
+            events.emit(info.start())?;
+            vacant.insert(Known {
+                info,
+                journal: None,
+            });
+        }
         let tools = Arc::new(Tools::new());
         let prompts = Arc::new(Prompts::new());
         let kernels = Arc::new(Kernels::new());
@@ -177,7 +214,7 @@ impl Harness {
             tools,
             prompts,
             kernels,
-            journal,
+            sessions: Mutex::new(sessions),
             provider,
             model: ModelConfig::new("default"),
             system: String::new(),
@@ -244,11 +281,77 @@ impl Harness {
         &self.kernels
     }
 
-    /// The journal that persists effects to the event stream. It is the `runtime` argument
-    /// for callers that drive a [`StateMachine`] themselves.
+    /// Start a session called `id`, recording `parent` as the session it came from. The new
+    /// session has an empty conversation of its own.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HarnessError::DuplicateSession`] if `id` is taken,
+    /// [`HarnessError::UnknownSession`] if `parent` does not exist, or [`HarnessError::Log`]
+    /// if the start could not be stored.
+    pub fn start_session(
+        &self,
+        id: impl Into<SessionId>,
+        parent: Option<&SessionId>,
+    ) -> Result<SessionId, HarnessError> {
+        let info = SessionInfo {
+            id: id.into(),
+            parent: parent.cloned(),
+        };
+        let mut sessions = self.sessions();
+        if sessions.contains_key(&info.id) {
+            return Err(HarnessError::DuplicateSession(info.id));
+        }
+        if let Some(parent) = parent.filter(|parent| !sessions.contains_key(parent)) {
+            return Err(HarnessError::UnknownSession(parent.clone()));
+        }
+        // Stored while the table is locked, so two callers cannot both start the same id.
+        // `session/start` is the harness's own topic; a listener has no cause to start one.
+        self.events().emit(info.start())?;
+        let id = info.id.clone();
+        sessions.insert(
+            id.clone(),
+            Known {
+                info,
+                journal: None,
+            },
+        );
+        drop(sessions);
+        Ok(id)
+    }
+
+    /// Every session, in order of id.
     #[must_use]
-    pub const fn journal(&self) -> &Arc<Journal> {
-        &self.journal
+    pub fn session_list(&self) -> Vec<SessionInfo> {
+        self.sessions()
+            .values()
+            .map(|known| known.info.clone())
+            .collect()
+    }
+
+    /// The journal that persists the effects of `session` to the event stream. It is the
+    /// `runtime` argument for callers that drive a [`StateMachine`] themselves.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HarnessError::UnknownSession`] if there is no such session, or
+    /// [`HarnessError::Run`] if its events cannot be decoded.
+    pub fn journal(&self, session: &SessionId) -> Result<Arc<Journal>, HarnessError> {
+        let mut sessions = self.sessions();
+        let known = sessions
+            .get_mut(session)
+            .ok_or_else(|| HarnessError::UnknownSession(session.clone()))?;
+        if let Some(journal) = &known.journal {
+            return Ok(Arc::clone(journal));
+        }
+        let journal = Arc::new(Journal::new(session.clone(), Arc::clone(self.events()))?);
+        known.journal = Some(Arc::clone(&journal));
+        drop(sessions);
+        Ok(journal)
+    }
+
+    fn sessions(&self) -> MutexGuard<'_, BTreeMap<SessionId, Known>> {
+        self.sessions.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// The loop, as the ordered steps a [`StateMachine`] walks: custom operations, the
@@ -278,38 +381,55 @@ impl Harness {
         steps
     }
 
-    /// A state machine over [`steps`](Self::steps). Call its `step` and `apply` with
-    /// [`journal`](Self::journal) to advance the loop one step at a time.
+    /// A state machine over [`steps`](Self::steps). Call its `step` and `apply` with a
+    /// session's [`journal`](Self::journal) to advance the loop one step at a time.
     #[must_use]
     pub fn machine(&self, cancel: CancellationToken) -> StateMachine<'static, Session, Effect> {
         StateMachine::new(self.steps(), cancel)
     }
 
-    /// Add `prompt` to the conversation as the user and run the loop until the model
-    /// answers, runs out of turns or fails.
+    /// Add `prompt` to the main session's conversation as the user and run the loop until
+    /// the model answers, runs out of turns or fails. See [`run_in`](Self::run_in).
+    ///
+    /// # Errors
+    ///
+    /// As [`run_in`](Self::run_in).
+    pub async fn run(&self, prompt: &str) -> Result<Outcome, HarnessError> {
+        self.run_in(&SessionId::new(MAIN), prompt).await
+    }
+
+    /// Add `prompt` to the conversation of `session` as the user and run the loop until the
+    /// model answers, runs out of turns or fails.
     ///
     /// Tool failures and model failures are recorded in the conversation, not returned from
     /// here: see [`Status`].
     ///
     /// # Errors
     ///
-    /// Returns [`HarnessError::Run`] if an operation fails outright, for example because two
-    /// plugins registered tools the model cannot tell apart, or [`HarnessError::Log`] if the
-    /// event log could not store a step.
-    pub async fn run(&self, prompt: &str) -> Result<Outcome, HarnessError> {
+    /// Returns [`HarnessError::UnknownSession`] if there is no such session,
+    /// [`HarnessError::Run`] if an operation fails outright, for example because two plugins
+    /// registered tools the model cannot tell apart, or [`HarnessError::Log`] if the event
+    /// log could not store a step.
+    pub async fn run_in(&self, session: &SessionId, prompt: &str) -> Result<Outcome, HarnessError> {
+        let journal = self.journal(session)?;
         let prompt = Message::user()
             .with_text(prompt)
             .with_generated_id_if_missing();
-        self.journal.record(&prompt)?;
+        journal.record(&prompt)?;
+        self.drive(&journal).await
+    }
+
+    /// Run the loop over `journal`'s session until it stops, and mark the end of the turn.
+    async fn drive(&self, journal: &Journal) -> Result<Outcome, HarnessError> {
         let cancel = CancellationToken::new();
         let machine = self.machine(cancel.clone());
         // Streaming updates have no audience here; the event stream is the record.
         let (updates, _unwatched) = mpsc::unbounded_channel();
         let emitter = Emitter::new(updates, cancel);
         let session = machine
-            .run(self.journal.as_ref(), SESSION, &emitter)
+            .run(journal, journal.id().as_str(), &emitter)
             .await?;
-        self.events().emit(Draft::new(Source::Host, "turn/end"))?;
+        journal.note(Source::Host, "turn/end")?;
         Ok(Outcome {
             status: status_of(&session),
             session,

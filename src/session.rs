@@ -6,8 +6,12 @@
 //! is whatever the `message` events add up to. A run can therefore be resumed, replayed or
 //! inspected from the log alone, and every plugin sees the same history the model does.
 //!
+//! One stream holds many sessions. Each begins with a `session/start` event, and every event
+//! below names the session it belongs to, so a session is rebuilt from its own events alone.
+//!
 //! | Topic | Source | Payload |
 //! | --- | --- | --- |
+//! | `session/start` | `host` | `{"parent"}`, or `{}` for a session with no parent |
 //! | `message` | `user`, `agent` or `environment` | the oi-kit message, as JSON |
 //! | `tool/call` | `agent` | `{"id", "tool", "input"}`, caused by its `message` |
 //! | `tool/result` | `environment` | `{"id", "tool", "ok", "output"}`, caused by its `tool/call` |
@@ -19,7 +23,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
-use corduroy_core::{Draft, EventId, EventStream, Pattern, Source};
+use corduroy_core::{Draft, Event, EventId, EventStream, Pattern, SessionId, Source};
 use oi_kit_agent::inference::InferenceEffect;
 use oi_kit_agent::machine::{EffectHandler, MachineSession, SessionLoader};
 use oi_kit_agent::operation::{Emitter, MachineEffect};
@@ -33,6 +37,52 @@ use serde_json::{Value, json};
 
 /// Topic of the events that make up the conversation.
 pub const MESSAGE: &str = "message";
+
+/// Topic of the event that begins a session.
+pub const SESSION_START: &str = "session/start";
+
+/// Name of the session a harness starts with, and the one [`Harness::run`] uses.
+///
+/// [`Harness::run`]: crate::Harness::run
+pub const MAIN: &str = "main";
+
+/// A session and where it came from, as its `session/start` event recorded it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionInfo {
+    /// The session.
+    pub id: SessionId,
+    /// The session that started it, if one did.
+    pub parent: Option<SessionId>,
+}
+
+impl SessionInfo {
+    /// The event that begins this session.
+    pub(crate) fn start(&self) -> Draft {
+        let payload = self
+            .parent
+            .as_ref()
+            .map_or_else(|| json!({}), |parent| json!({"parent": parent.as_str()}));
+        Draft::new(Source::Host, SESSION_START)
+            .session(self.id.clone())
+            .payload(payload.to_string())
+    }
+
+    /// Every session `events` holds, in the order they were started.
+    pub(crate) fn all(events: &EventStream) -> Vec<Self> {
+        events
+            .matching(&Pattern::new(SESSION_START))
+            .into_iter()
+            .filter_map(|event| {
+                let payload: Value = serde_json::from_str(&event.payload).ok()?;
+                let parent = payload.get("parent").and_then(Value::as_str);
+                Some(Self {
+                    id: event.session?,
+                    parent: parent.map(SessionId::new),
+                })
+            })
+            .collect()
+    }
+}
 
 /// One conversation, as the state machine sees it at the start of a step.
 #[derive(Debug, Clone)]
@@ -149,7 +199,7 @@ impl Batch {
 /// The effects of one step of the loop become one commit: they are stored together or not
 /// at all, and the conversation the next step sees changes only once they are.
 pub struct Journal {
-    id: String,
+    id: SessionId,
     events: Arc<EventStream>,
     state: Mutex<State>,
 }
@@ -165,29 +215,28 @@ impl std::fmt::Debug for Journal {
 
 impl Journal {
     /// A journal for the session `id`, picking up whatever conversation `events` already
-    /// holds. Pass a stream rebuilt with [`EventStream::replay`] to resume an earlier run.
+    /// holds for it. Pass a stream rebuilt with [`EventStream::replay`] to resume an earlier
+    /// run.
     ///
     /// # Errors
     ///
-    /// Fails if a `message` or `tool/call` event in the stream cannot be decoded.
-    pub fn new(id: impl Into<String>, events: Arc<EventStream>) -> Result<Self> {
+    /// Fails if a `message` or `tool/call` event of the session cannot be decoded.
+    pub fn new(id: SessionId, events: Arc<EventStream>) -> Result<Self> {
         let mut conversation = Conversation::empty();
-        for event in events.matching(&Pattern::new(MESSAGE)) {
-            let message = serde_json::from_str(&event.payload)
-                .with_context(|| format!("event {} is not a message", event.id))?;
-            conversation.push(message);
-        }
         let mut calls = BTreeMap::new();
-        for event in events.matching(&Pattern::new("tool/call")) {
-            let call: Value = serde_json::from_str(&event.payload)
-                .with_context(|| format!("event {} is not a tool call", event.id))?;
-            let field = |name: &str| call.get(name).and_then(Value::as_str).map(str::to_owned);
-            if let (Some(id), Some(tool)) = (field("id"), field("tool")) {
+        for event in events.session(&id) {
+            if event.topic == MESSAGE {
+                let message = serde_json::from_str(&event.payload)
+                    .with_context(|| format!("event {} is not a message", event.id))?;
+                conversation.push(message);
+            } else if event.topic == "tool/call"
+                && let Some((id, tool)) = call_of(&event)?
+            {
                 calls.insert(id, (event.id, tool));
             }
         }
         Ok(Self {
-            id: id.into(),
+            id,
             events,
             state: Mutex::new(State {
                 conversation,
@@ -200,7 +249,7 @@ impl Journal {
     #[must_use]
     pub fn session(&self) -> Session {
         Session {
-            id: self.id.clone(),
+            id: self.id.as_str().to_owned(),
             conversation: self.state().conversation.clone(),
         }
     }
@@ -247,9 +296,26 @@ impl Journal {
         Ok(recorded)
     }
 
-    /// Store `batch` as one commit, then bring the projection up to date with it.
+    /// The session this journal records.
+    #[must_use]
+    pub const fn id(&self) -> &SessionId {
+        &self.id
+    }
+
+    /// Record an event of this session that is not part of the conversation.
+    pub(crate) fn note(&self, source: Source, topic: &str) -> Result<EventId> {
+        Ok(self
+            .events
+            .emit(Draft::new(source, topic).session(self.id.clone()))?)
+    }
+
+    /// Store `batch` as one commit of this session, then bring the projection up to date.
     fn commit(&self, batch: Batch) -> Result<Vec<EventId>> {
-        let ids = self.events.commit(batch.drafts)?;
+        let drafts = batch
+            .drafts
+            .into_iter()
+            .map(|draft| draft.session(self.id.clone()));
+        let ids = self.events.commit(drafts)?;
         let mut state = self.state();
         for message in batch.messages {
             state.conversation.push(message);
@@ -269,6 +335,14 @@ impl Journal {
     fn state(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
+}
+
+/// The tool-call id and tool name a `tool/call` event records.
+fn call_of(event: &Event) -> Result<Option<(String, String)>> {
+    let call: Value = serde_json::from_str(&event.payload)
+        .with_context(|| format!("event {} is not a tool call", event.id))?;
+    let field = |name: &str| call.get(name).and_then(Value::as_str).map(str::to_owned);
+    Ok(field("id").zip(field("tool")))
 }
 
 /// The text blocks of a tool result, joined.

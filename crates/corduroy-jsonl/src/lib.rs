@@ -5,8 +5,8 @@
 //!
 //! ```text
 //! {"corduroy-log":1}
-//! [{"id":1,"source":"user","cause":null,"topic":"message","payload":"..."}]
-//! [{"id":2,"source":"agent","cause":null,"topic":"message","payload":"..."},{"id":3,...}]
+//! [{"id":1,"session":"main","source":"user","cause":null,"topic":"message","payload":"..."}]
+//! [{"id":2,"session":"main","source":"agent","cause":null,"topic":"message","payload":"..."},{"id":3,...}]
 //! ```
 //!
 //! The first line is the header and carries the schema version. Every line after it is one
@@ -39,7 +39,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Read as _, Write as _};
 use std::path::Path;
 
-use corduroy_core::{Event, EventId, EventStream, Log, LogError};
+use corduroy_core::{Event, EventId, EventStream, Log, LogError, SessionId};
 use serde_json::{Value, json};
 
 /// The schema version this crate writes, and the only one it reads.
@@ -152,6 +152,7 @@ impl Log for JsonlLog {
             last += 1;
             line.push(json!({
                 "id": event.id.get(),
+                "session": event.session.as_ref().map(SessionId::as_str),
                 "source": event.source.to_string(),
                 "cause": event.cause.map(EventId::get),
                 "topic": event.topic,
@@ -216,6 +217,10 @@ fn parse_commit(line: &str, mut last: u64) -> Result<Vec<Event>, String> {
         last = id;
         events.push(Event {
             id: EventId::new(id),
+            session: entry
+                .get("session")
+                .and_then(Value::as_str)
+                .map(SessionId::new),
             source: text("source")?
                 .parse()
                 .map_err(|error: LogError| error.to_string())?,
@@ -250,7 +255,11 @@ mod tests {
         let path = log_in("jsonl-reopen");
         let stream = open(&path).unwrap();
         let first = stream
-            .emit(user("message").payload("{\"text\":\"hi\\n\"}"))
+            .emit(
+                user("message")
+                    .session(SessionId::new("main"))
+                    .payload("{\"text\":\"hi\\n\"}"),
+            )
             .unwrap();
         stream
             .commit([
