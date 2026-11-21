@@ -6,6 +6,13 @@ It takes one mechanism from each of six existing harnesses. This document record
 of those mechanisms is (checked against the projects' sources in November 2026), what was
 borrowed, where it lives here, and what was left out.
 
+**Why a Rust core and WebAssembly plugins.** The core is meant to be fixed: compiled, small,
+and not something an agent or a plugin can change. It holds the security boundaries (the log,
+the capability checks, the gates) and the contract plugins are written against. Plugins are
+the part that adapts: they can be added, rewritten and removed, by people or by the agent
+itself, without the core moving. The aim is that whatever the plugins become, the same core
+is underneath and still enforcing the same rules.
+
 The second half records where the design is going. The core is being hardened before any
 further plugins are written, so that plugins build on a surface that does not shift under
 them. Sections and table rows marked *planned* describe that target, not the code as it is.
@@ -240,6 +247,7 @@ Capabilities to add, each a WIT interface with a scope:
 | `http` | make a request | host | web fetch, remote MCP |
 | `secret` | read a named credential | secret name | providers, MCP servers |
 | `clock` | read the time | (none) | schedulers, timestamps in output |
+| `tools` | call a registered tool, through the gates | tool name | automations, code mode |
 
 Two rules follow from adding these:
 
@@ -344,6 +352,49 @@ The built-in registries (`tools`, `prompts`, `kernels`, `gates`) are the cases w
 itself is the consumer. A plugin that wants its own extension point (an MCP plugin accepting
 server definitions, a skills plugin accepting skill sources) provides a service.
 
+## Automations (*planned*)
+
+The purpose of the plugin system is that the agent can adapt the harness to its task: having
+done something by hand, it writes an automation that does it from then on without a model
+in the loop. This extends Hermes's idea from skills (text the model reads) to plugins (code
+the harness runs). An automation is a WebAssembly plugin with three parts:
+
+| Part | Provided by |
+| --- | --- |
+| A trigger | An event subscription (built). Time-based triggers are events too, emitted by a native `scheduler` plugin, since a plugin cannot wake itself. |
+| An action | Host capabilities, and the `tools` capability to call other plugins' tools. Such calls pass through the gates and are logged like the model's, with the plugin as their source. |
+| Optionally, the model | The `llm` capability for one request, or `session` to start a run. |
+
+What the core must guarantee, because the author is now the agent:
+
+- **No amplification.** A plugin holding the `plugins` capability can grant a plugin it loads
+  only what it holds itself, narrowed or equal, never more.
+- **Loading is a decision point.** `plugin/load` is asked of the gates with the component's
+  hash and the capabilities it requests, so an approval plugin can ask the user. The answer
+  and the hash are in the log.
+- **The core's own files are out of reach.** The log, grant files, the plugin store and the
+  host binary are denied to every `fs-write` and kernel-independent path scope, whatever a
+  grant says. A plugin cannot edit its own grants.
+- **Cascades end.** An automation reacts to events and causes events. Each event already
+  records its cause; the stream refuses a chain deeper than a limit, and fuel bounds each
+  call.
+- **Agent-written code is never native.** Native plugins are trusted, so only WebAssembly
+  can be loaded through the `plugins` capability.
+
+**Guest languages.** JavaScript/TypeScript and Python come first, since those are what other
+harnesses' extensions are written in; the two existing Rust plugins are the reference, not
+the expected norm. There are two ways to run them, and they suit different authors:
+
+- *Compiled components* (`componentize-js`, `componentize-py`): each plugin is its own
+  component. Best for plugins people write and ship. To be checked: these toolchains
+  normally emit components that import WASI, which the linker deliberately lacks. The
+  options are building with those features disabled, or linking WASI interfaces that refuse
+  everything.
+- *A script host*: one interpreter component, instantiated once per automation with that
+  automation's script as its configuration and its own grants. Nothing is compiled, so the
+  agent can write an automation as a file, and the core still enforces each one's grants
+  separately. Best for automations the agent writes.
+
 ## Sandboxing
 
 Three different things go by this name, and they land in different places.
@@ -404,10 +455,14 @@ the step it waits on is done.
 3. Tool lifecycle: intent before execution, `replay` and `read-only`, content blocks,
    progress, cancellation. `Harness::continue` and the restart limit.
 4. Gates, waits and signals.
-5. Services across the WebAssembly boundary; `state`.
-6. The remaining capabilities, each when its first plugin needs it; `provider` as a service;
+5. Services across the WebAssembly boundary; `state`; `tools`.
+6. Loading plugins safely: `plugins` with no amplification, the `plugin/load` decision
+   point, protected paths, the cascade limit.
+7. The remaining capabilities, each when its first plugin needs it; `provider` as a service;
    `ShellKernel` out of the core.
-7. Shipped plugins, MCP first.
+8. A guest-language spike: one JavaScript and one Python plugin against the world, settling
+   the WASI question and the script host.
+9. Shipped plugins, MCP first.
 
 ## Open questions
 
