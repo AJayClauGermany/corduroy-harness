@@ -218,7 +218,7 @@ Everything else is a plugin, and a plugin may itself offer primitives to other p
 | Event log | in memory | A fallible `Log` trait. A step's events are one atomic commit, stored before any listener or the model sees them. |
 | Sessions | one, hardcoded | Many sessions, each with an id and an optional parent. Every event names its session. |
 | Tool lifecycle | derived from messages | `tool/call` committed before the tool runs, `tool/result` after. `ToolSpec` gains `replay` (safe or not) and `read-only`. Results are content blocks, not one string; tools can report progress and be cancelled. |
-| Gates | native `Operation` only | A fourth registry. A gate sees a tool call before it runs and answers allow, deny or ask. Reachable from WebAssembly through a world export. |
+| Gates | native `Operation` only | A fourth registry. A gate is asked at a named decision point before something happens and answers allow, deny or ask. Reachable from WebAssembly through a world export. See [Events, gates and hooks](#events-gates-and-hooks-planned). |
 | Waits and signals | none | A step can end by waiting for a named signal (a user's answer, a child session finishing). The wait is an event, so it survives a restart. |
 | Services | native only | Calls between plugins across the WebAssembly boundary, as a capability scoped by service name. |
 | Capabilities | four | The mechanism is settled; the set grows (below). |
@@ -250,6 +250,28 @@ Two rules follow from adding these:
   [replaying a plugin](#durability-planned) possible, and WASI stays out of the linker to
   keep it true.
 
+## Events, gates and hooks (*planned*)
+
+What other harnesses call hooks are two different things here, and both are plugins.
+
+- **Reacting is an event.** Events stay fire-and-forget: the emitter does not know who
+  listens and gets nothing back. A hook that observes (log this, count that, nudge the
+  prompt) is a plugin with a subscription. This keeps the log a plain record that replays
+  without re-running anyone's decision.
+- **Deciding is a gate.** Where the loop needs an answer before it proceeds, it asks the
+  gates registered for that decision point, in a fixed order, and the strictest answer wins
+  (deny over ask over allow). The outcome does not depend on which plugin loaded first. The
+  decision itself is then recorded as an event.
+
+The core defines a small, fixed set of decision points, starting with `tool/call`. Likely
+additions are the user's input and the request about to be sent to the model, each added
+when a plugin needs it. A plugin that wants to ask other plugins a question of its own does
+so through a [service](#plugins-extending-plugins-planned), not through the event stream.
+
+**Decided against:** a Cordis-style `bail` dispatch mode, in which the first listener to
+return a value decides. It is more general, but it gives events return values, and "first
+wins" lets a permissive plugin loaded early pre-empt a strict one.
+
 ## Durability (*planned*)
 
 The oi-kit state machine already has the right shape: an operation reads the persisted
@@ -268,9 +290,11 @@ conversation and returns effects for the host to persist. One step is therefore 
   picks up an unfinished run without a new prompt.
 - **Plugin state.** Replayed events are not delivered to listeners, so state a plugin builds
   from events is lost today. A plugin keeps durable state through the `state` capability,
-  whose writes join the commit of the step that made them. An alternative worth a prototype:
-  journal every host-call result and rebuild a WebAssembly plugin by replaying its calls,
-  which needs no cooperation from the plugin.
+  whose writes join the commit of the step that made them. State is explicit so that it is
+  visible in the log and bounded: restoring a plugin reads its current keys, not its history.
+  **Decided against, for now:** journaling every host-call result and rebuilding a plugin by
+  replaying them. It needs nothing from the plugin author, but the log grows with every file
+  read and recovery slows as a session ages. It can be added later without changing `state`.
 - **Kernel state.** A kernel's processes do not survive a crash. The `Kernel` trait gains
   optional `snapshot` and `restore` (Prime Agent has both); a kernel without them reports on
   resume that its state was lost, as a timeout does today.
@@ -373,13 +397,14 @@ the step it waits on is done.
   capabilities and Tauri's capability files are the closest prior art) would let users review
   and edit what each plugin may do. Joined with a plugin list it is also Goose's recipe and
   Cordis's `cordis.yml`: one file naming the plugins of an agent and what each may do.
-- **Gates as a registry or as a dispatch mode.** Cordis has a `bail` dispatch mode in which
-  the first listener to return a value decides. Gates could be that mode on the event stream
-  rather than a fourth registry. The registry is simpler to order and to explain.
-- **Host-call replay.** Whether rebuilding a WebAssembly plugin by replaying its journaled
-  host calls is worth its log volume, compared with the explicit `state` capability.
-- **Session tree.** Sessions have a parent. Pi's sessions are a tree of entries, so one
-  session can branch from any earlier point. Branching within a session is not planned yet.
+- **Gates that rewrite.** A gate answers allow, deny or ask. Pi's hooks can also change a
+  tool call's input. Rewrites do not combine the way "strictest wins" does (two gates may
+  rewrite differently), so they need an ordering rule before they are added.
+- **Session tree.** Sessions are linear for now, with a parent link. Pi's sessions are a tree
+  of entries, so one session can branch from any earlier point, which gives rewinding and a
+  common starting point for several attempts. Because every event names its session and a
+  session names its parent, branching can be added as "a new session whose parent is event N
+  of another" without changing the log.
 - **Operations from plugins.** Loop steps are native `Operation`s. Letting plugins contribute
   steps needs an async-friendly, effect-returning export.
 - **Blocking.** Tool calls run on blocking threads, but event listeners run inline on the
