@@ -268,6 +268,24 @@ additions are the user's input and the request about to be sent to the model, ea
 when a plugin needs it. A plugin that wants to ask other plugins a question of its own does
 so through a [service](#plugins-extending-plugins-planned), not through the event stream.
 
+A deny or an ask always carries a reason. A denied tool call becomes an error tool result
+holding that reason, so the model learns what was wrong and can try again, as with any other
+tool failure.
+
+**Decided against, for now:** gates that rewrite a call's input and let it run, as Pi's hooks
+can. A rewrite saves a model round trip and guarantees the outcome, but the model then
+believes it ran something it did not, two gates can rewrite the same call differently (which
+"strictest wins" cannot settle), and the log must hold both the requested and the executed
+input. Its uses are covered elsewhere:
+
+| Use of a rewrite | Covered by |
+| --- | --- |
+| Correcting a call | Deny with a reason; the model corrects it. |
+| Timeouts, sandbox wrapping | The kernel, which applies them to everything it runs. |
+| A person editing a call at the approval prompt | Deny, plus the person's instruction as a new message. |
+| Keeping a credential out of a command | The `secret` capability: the host injects the value, so the model never holds it. |
+| Stopping a sensitive value being read or sent | Capability scopes, or a gate that denies. |
+
 **Decided against:** a Cordis-style `bail` dispatch mode, in which the first listener to
 return a value decides. It is more general, but it gives events return values, and "first
 wins" lets a permissive plugin loaded early pre-empt a strict one.
@@ -397,9 +415,10 @@ the step it waits on is done.
   capabilities and Tauri's capability files are the closest prior art) would let users review
   and edit what each plugin may do. Joined with a plugin list it is also Goose's recipe and
   Cordis's `cordis.yml`: one file naming the plugins of an agent and what each may do.
-- **Gates that rewrite.** A gate answers allow, deny or ask. Pi's hooks can also change a
-  tool call's input. Rewrites do not combine the way "strictest wins" does (two gates may
-  rewrite differently), so they need an ordering rule before they are added.
+- **Scrubbing the log.** If the model does write a sensitive value into a tool call, the
+  assistant message holding it is committed before any gate is asked, so neither a deny nor a
+  rewrite keeps it out of the log. If that matters it is a property of the log (a filter
+  applied to a batch before it is stored), not of gates.
 - **Session tree.** Sessions are linear for now, with a parent link. Pi's sessions are a tree
   of entries, so one session can branch from any earlier point, which gives rewinding and a
   common starting point for several attempts. Because every event names its session and a
