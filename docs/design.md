@@ -414,8 +414,8 @@ What the core must guarantee, because the author is now the agent:
 - **Loading is a decision point.** `plugin/load` is asked of the gates with the component's
   hash and the capabilities it requests, so an approval plugin can ask the user. The answer
   and the hash are in the log.
-- **The core's own files are out of reach.** The log, grant files, the plugin store and the
-  host binary are denied to every `fs-write` and kernel-independent path scope, whatever a
+- **The core's own files are out of reach.** The log, grant files, the plugin store, the
+  cache of compiled plugins (machine code the host runs) and the host binary are denied to every `fs-write` and kernel-independent path scope, whatever a
   grant says. A plugin cannot edit its own grants.
 - **Cascades end.** An automation reacts to events and causes events. Each event already
   records its cause; the stream refuses a chain deeper than a limit, and fuel bounds each
@@ -450,8 +450,9 @@ has the measurements. What it settled:
   imports everything and each automation is granted `Scope::none()` for what it may not use.
 - **Compiled code must be cached.** The components are 12 and 18 MB and take 25 to 30
   seconds to compile at load (6 to 9 with parallel compilation), against milliseconds to
-  instantiate. A component is to be compiled once per process and its compiled code kept on
-  disk by hash. Each instance holds 9 to 13 MB.
+  instantiate. A component is to be compiled once per process, and wasmtime's own cache,
+  which covers components, keeps the compiled code on disk: later loads took 0.6 to 0.7
+  seconds. Each instance holds 9 to 13 MB.
 - **The script host needs "compile once, instantiate many".** `WasmRuntime::load` compiles
   on every call today.
 
@@ -525,8 +526,8 @@ the step it waits on is done.
    without them, and re-instantiating a trapped plugin under the restart limit.
 6. Loading plugins safely: `plugins` with no amplification, the `plugin/load` decision
    point, protected paths, the cascade limit. With it, the compiled-code cache: a component
-   compiled once per process and stored by the hash `plugin/load` already computes, and
-   parallel compilation switched on.
+   compiled once per process, wasmtime's `cache` and `parallel-compilation` features switched
+   on, and the cache directory among the protected paths.
 7. The remaining capabilities, each when its first plugin needs it; `provider` as a service;
    `ShellKernel` out of the core.
 8. Guest languages. *Spike done early:* one JavaScript and one Python plugin ran against the
@@ -559,8 +560,7 @@ the step it waits on is done.
 - **Guest SDK.** Each plugin repeats the same `generate!` and error-mapping boilerplate; a
   small shared guest crate would remove it. For JavaScript and Python an SDK is required
   rather than nice to have (see [Guest languages](guest-languages.md)).
-- **Storing compiled plugins.** Reading compiled code back is `unsafe` in wasmtime
-  (`Component::deserialize`), and the host workspace forbids `unsafe`. Either wasmtime's own
-  cache covers components in the version we pin, or the cache is one small crate with a
-  single documented exception. Without one, a JavaScript or Python plugin costs seconds at
-  every start.
+- **Shipping precompiled plugins.** wasmtime's cache removes the cost of every load but the
+  first on a machine. Removing that one too means distributing compiled code, which is read
+  back with the `unsafe` `Component::deserialize`. Not needed now; if it ever is, that is the
+  place for one documented exception in a crate of its own.

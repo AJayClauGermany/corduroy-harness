@@ -14,6 +14,7 @@ sources that matter are reproduced at the end.
 | Component size | 12.0 MB | 18.5 MB |
 | Compile at load, one thread (today's host) | 30 s | 25 s |
 | Compile at load, `parallel-compilation`, 4 cores | 8 s | 6.5 s |
+| Load with wasmtime's `cache` enabled, after the first | 0.6 s | 0.7 s |
 | Instantiate and `activate` | 5 ms | 11 ms |
 | A tool call | 0.1 to 0.9 ms | 0.1 to 0.6 ms |
 | Smallest memory limit that starts | 16 MB (needs 9.1 MB up front) | 16 MB (needs 12.5 MB up front) |
@@ -79,13 +80,17 @@ processes. Instantiating an already compiled component is milliseconds.
 - **A cache of compiled components** is a precondition for shipping any JavaScript or Python
   plugin, and for the script host. It has two parts. Within a process, a component is compiled
   once and instantiated many times (today each `load` compiles again, so two automations on
-  one script host cost two compilations). Across processes, compiled code is stored keyed by
-  the component's hash and the engine's version and configuration. wasmtime's
-  `Component::deserialize` is `unsafe`, which the host workspace forbids, so this needs a
-  decision: wasmtime's own cache if it covers components in the pinned version, or one
-  narrowly scoped exception in a crate of its own. Enabling `parallel-compilation` is the
-  cheap first step. This belongs with step 6, where the component's hash is already computed
-  for `plugin/load`.
+  one script host cost two compilations). Across processes, wasmtime's own cache does the
+  job: with the `cache` feature and a `Cache` on the engine's `Config`, components are
+  covered as well as modules (checked in the pinned 51.0.0, where `compile_component` goes
+  through the same cached path), and a later load of either engine took 0.6 to 0.7 seconds,
+  in the same process or a new one. It is keyed by the bytes and the engine's version and
+  configuration, and needs no `unsafe` in our code, so the workspace's ban stands with no
+  exception. The two compiled engines took 25 MB on disk. Two things to respect: the cache
+  directory holds machine code the host will run, so it joins the paths no plugin grant can
+  reach; and it is the host's choice of directory, never the default in the user's home
+  without being asked. Enabling `parallel-compilation` covers the first load. This belongs
+  with step 6.
 - **`clock` moves up, and a `log` capability is added.** They are the two things every guest
   plugin reaches for and gets a trap or a wrong answer. `log` is diagnostic output that goes
   to the event stream under the plugin's name; `clock` and a `random` source are host calls
