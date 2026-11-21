@@ -23,6 +23,13 @@ pub struct ToolSpec {
     pub description: String,
     /// JSON Schema for the tool's input object, as JSON text.
     pub input_schema: String,
+    /// Whether a call may simply be made again when nobody knows if it already ran.
+    ///
+    /// A run that is picked up after a crash finds calls it asked for and has no result for.
+    /// Such a call is repeated only if its tool says here that doing it twice is the same as
+    /// doing it once (a read, a write of fixed contents). Otherwise the model is told the
+    /// call was interrupted and decides for itself.
+    pub replay_safe: bool,
 }
 
 /// Why a tool call failed. These are shown to the model, not treated as fatal.
@@ -131,6 +138,7 @@ mod tests {
             name: "shout".into(),
             description: "Upper-cases its input.".into(),
             input_schema: "{}".into(),
+            replay_safe: true,
         };
         tool_fn(spec, |input| {
             if input.is_empty() {

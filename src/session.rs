@@ -17,6 +17,12 @@
 //! | `tool/result` | `environment` | `{"id", "tool", "ok", "output"}`, caused by its `tool/call` |
 //! | `usage` | `agent` | the provider's usage report, as JSON |
 //! | `turn/end` | `host` | empty |
+//! | `run/restart` | `host` | `{"attempt"}`: an unfinished run was picked up again |
+//!
+//! A run is *unfinished* from its first `message` until its `turn/end`. A session whose
+//! events stop short of that was interrupted, and [`Harness::continue_run`] picks it up.
+//!
+//! [`Harness::continue_run`]: crate::Harness::continue_run
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -37,6 +43,12 @@ use serde_json::{Value, json};
 
 /// Topic of the events that make up the conversation.
 pub const MESSAGE: &str = "message";
+
+/// Topic of the event that ends a run.
+const TURN_END: &str = "turn/end";
+
+/// Topic of the event that records an unfinished run being picked up again.
+const RESTART: &str = "run/restart";
 
 /// Topic of the event that begins a session.
 pub const SESSION_START: &str = "session/start";
@@ -144,6 +156,10 @@ struct State {
     conversation: Conversation,
     /// The `tool/call` event and tool name behind each open tool-call id.
     calls: BTreeMap<String, (EventId, String)>,
+    /// Whether a run has begun and not reached its `turn/end`.
+    unfinished: bool,
+    /// How many times the unfinished run has been picked up again.
+    restarts: u32,
 }
 
 /// One step's worth of events, and what they change in the projection once stored.
@@ -224,11 +240,17 @@ impl Journal {
     pub fn new(id: SessionId, events: Arc<EventStream>) -> Result<Self> {
         let mut conversation = Conversation::empty();
         let mut calls = BTreeMap::new();
+        let (mut unfinished, mut restarts) = (false, 0_u32);
         for event in events.session(&id) {
             if event.topic == MESSAGE {
                 let message = serde_json::from_str(&event.payload)
                     .with_context(|| format!("event {} is not a message", event.id))?;
                 conversation.push(message);
+                unfinished = true;
+            } else if event.topic == TURN_END {
+                (unfinished, restarts) = (false, 0);
+            } else if event.topic == RESTART {
+                restarts = restarts.saturating_add(1);
             } else if event.topic == "tool/call"
                 && let Some((id, tool)) = call_of(&event)?
             {
@@ -241,6 +263,8 @@ impl Journal {
             state: Mutex::new(State {
                 conversation,
                 calls,
+                unfinished,
+                restarts,
             }),
         })
     }
@@ -302,11 +326,33 @@ impl Journal {
         &self.id
     }
 
-    /// Record an event of this session that is not part of the conversation.
-    pub(crate) fn note(&self, source: Source, topic: &str) -> Result<EventId> {
-        Ok(self
-            .events
-            .emit(Draft::new(source, topic).session(self.id.clone()))?)
+    /// Whether a run of this session began and has not reached its `turn/end`: it is still
+    /// going, or it was interrupted.
+    #[must_use]
+    pub fn unfinished(&self) -> bool {
+        self.state().unfinished
+    }
+
+    /// Record that the run is over.
+    pub(crate) fn end_turn(&self) -> Result<()> {
+        self.events
+            .emit(Draft::new(Source::Host, TURN_END).session(self.id.clone()))?;
+        let mut state = self.state();
+        (state.unfinished, state.restarts) = (false, 0);
+        drop(state);
+        Ok(())
+    }
+
+    /// Record that the unfinished run is being picked up again. Returns how many times that
+    /// has now happened.
+    pub(crate) fn restart(&self) -> Result<u32> {
+        let attempt = self.state().restarts.saturating_add(1);
+        let draft = Draft::new(Source::Host, RESTART)
+            .session(self.id.clone())
+            .payload(json!({"attempt": attempt}).to_string());
+        self.events.emit(draft)?;
+        self.state().restarts = attempt;
+        Ok(attempt)
     }
 
     /// Store `batch` as one commit of this session, then bring the projection up to date.
@@ -319,6 +365,7 @@ impl Journal {
         let mut state = self.state();
         for message in batch.messages {
             state.conversation.push(message);
+            state.unfinished = true;
         }
         for (call, (position, tool)) in batch.opened {
             if let Some(id) = ids.get(position) {

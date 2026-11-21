@@ -306,24 +306,29 @@ fn save(name: &str, content: &str) -> Result<(), ToolError> {
 }
 
 fn specs() -> Vec<ToolSpec> {
-    let spec = |name: &str, description: &str, input_schema: &str| ToolSpec {
+    // Listing and viewing change nothing, so they may be repeated after a crash.
+    let spec = |name: &str, replay_safe: bool, description: &str, input_schema: &str| ToolSpec {
         name: name.to_owned(),
         description: description.to_owned(),
         input_schema: input_schema.to_owned(),
+        replay_safe,
     };
     vec![
         spec(
             "skills_list",
+            true,
             "List every saved skill with its description.",
             r#"{"type":"object","properties":{}}"#,
         ),
         spec(
             "skill_view",
+            true,
             "Load a skill's full instructions. Do this before following or patching a skill.",
             r#"{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}"#,
         ),
         spec(
             "skill_manage",
+            false,
             "Create, patch or delete a skill. A skill is Markdown that starts with front \
              matter:\n---\nname: <the skill's name>\ndescription: <when to use it>\n---\n\
              followed by the procedure (When to Use, Procedure, Pitfalls, Verification). \

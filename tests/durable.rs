@@ -5,14 +5,19 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use async_trait::async_trait;
+
 use corduroy_harness::core::{
-    Context, Event, EventStream, Log, LogError, PluginError, TOOLS, ToolSpec, Tools, plugin_fn,
-    tool_fn,
+    Context, Event, EventStream, Log, LogError, Pattern, Plugin, PluginError, SessionId, TOOLS,
+    ToolSpec, Tools, plugin_fn, tool_fn,
 };
+use corduroy_harness::oi_kit_agent::operation::{Emitter, Operation, OperationResult};
+use corduroy_harness::oi_kit_provider_types::conversation::Conversation;
 use corduroy_harness::oi_kit_provider_types::conversation::message::Message;
 use corduroy_harness::scripted::{ScriptedProvider, call, say};
-use corduroy_harness::{Harness, HarnessError, MAIN, Status, jsonl};
+use corduroy_harness::{Effect, Harness, HarnessError, MAIN, Session, Status, jsonl};
 use corduroy_test_support::scratch;
+use rmcp::model::CallToolRequestParams;
 use serde_json::json;
 
 /// A native plugin contributing `echo`, which returns its input.
@@ -21,6 +26,7 @@ fn echo(ctx: &mut Context<'_>) -> Result<(), PluginError> {
         name: "echo".into(),
         description: "Return the input.".into(),
         input_schema: r#"{"type":"object"}"#.into(),
+        replay_safe: true,
     };
     ctx.service::<Tools>(TOOLS)?.register(
         ctx,
@@ -136,4 +142,172 @@ async fn a_step_the_log_refuses_ends_the_run_before_anyone_sees_it() {
     let journal = harness.journal(&MAIN.into()).unwrap();
     assert_eq!(journal.session().conversation().len(), 2);
     assert_eq!(model.requests().len(), 1);
+}
+
+/// A plugin contributing `launch`, which is not safe to run twice and counts its calls, and
+/// `peek`, which is and counts its own.
+fn rocketry(launches: &Arc<AtomicUsize>, peeks: &Arc<AtomicUsize>) -> impl Plugin + 'static {
+    let (launches, peeks) = (Arc::clone(launches), Arc::clone(peeks));
+    plugin_fn("rocketry", &[TOOLS], move |ctx| {
+        let tools = ctx.service::<Tools>(TOOLS)?;
+        for (name, replay_safe, calls) in [("launch", false, &launches), ("peek", true, &peeks)] {
+            let spec = ToolSpec {
+                name: name.into(),
+                description: String::new(),
+                input_schema: r#"{"type":"object"}"#.into(),
+                replay_safe,
+            };
+            let calls = Arc::clone(calls);
+            let tool = tool_fn(spec, move |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok("done".to_owned())
+            });
+            tools.register(ctx, name, Arc::new(tool))?;
+        }
+        Ok(())
+    })
+}
+
+/// The events of a run that stopped after the model asked for `peek` and `launch` and
+/// before either result was stored, as a crash in the middle of the tools would leave it.
+async fn interrupted_run() -> Vec<Event> {
+    let asks = call("c1", "peek", &json!({}))
+        .with_tool_request("c2", Ok(CallToolRequestParams::new("launch")));
+    let log = Failing {
+        healthy: 4,
+        commits: Arc::new(AtomicUsize::new(0)),
+    };
+    let model = Arc::new(ScriptedProvider::new([asks]));
+    let mut harness = Harness::resume(model, Arc::new(EventStream::new().with_log(log))).unwrap();
+    harness.plugin(rocketry(&Arc::default(), &Arc::default()));
+    harness.run("launch it").await.unwrap_err();
+    harness.events().events()
+}
+
+/// A harness picking up `events`, with fresh counters for its two tools.
+fn restarted(
+    events: Vec<Event>,
+    replies: impl IntoIterator<Item = Message>,
+) -> (Harness, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+    let (launches, peeks) = (Arc::default(), Arc::default());
+    let model = Arc::new(ScriptedProvider::new(replies));
+    let mut harness = Harness::resume(model, Arc::new(EventStream::replay(events))).unwrap();
+    harness.plugin(rocketry(&launches, &peeks));
+    (harness, launches, peeks)
+}
+
+fn payloads(harness: &Harness, topic: &str) -> Vec<String> {
+    harness
+        .events()
+        .matching(&Pattern::new(topic))
+        .into_iter()
+        .map(|event| event.payload)
+        .collect()
+}
+
+#[tokio::test]
+async fn an_interrupted_run_continues_without_repeating_what_is_not_safe_to_repeat() {
+    let events = interrupted_run().await;
+    let (harness, launches, peeks) = restarted(events, [say("it may have launched")]);
+    let main = SessionId::new(MAIN);
+
+    let refused = harness.run_in(&main, "hello?").await.unwrap_err();
+    let outcome = harness.continue_run(&main).await.unwrap();
+
+    assert_eq!(
+        refused.to_string(),
+        "session `main` has an unfinished run: continue it first"
+    );
+    assert_eq!(
+        outcome.status,
+        Status::Finished {
+            answer: "it may have launched".into()
+        }
+    );
+    // `peek` ran again; `launch` did not, and the model was told why.
+    assert_eq!(
+        (
+            peeks.load(Ordering::SeqCst),
+            launches.load(Ordering::SeqCst)
+        ),
+        (1, 0)
+    );
+    assert_eq!(payloads(&harness, "run/restart"), [r#"{"attempt":1}"#]);
+    assert_eq!(
+        payloads(&harness, "tool/result"),
+        [
+            r#"{"id":"c2","tool":"launch","ok":false,"output":"interrupted: the harness stopped while `launch` may have been running, and it is not safe to run twice. Check what it did before calling it again."}"#,
+            r#"{"id":"c1","tool":"peek","ok":true,"output":"done"}"#,
+        ]
+    );
+}
+
+#[tokio::test]
+async fn continuing_a_finished_run_changes_nothing() {
+    let (harness, _model) = harness(EventStream::new(), [say("done")]).unwrap();
+    let main = SessionId::new(MAIN);
+    let first = harness.run("go").await.unwrap();
+    let events = harness.events().len();
+
+    let again = harness.continue_run(&main).await.unwrap();
+
+    assert_eq!(again.status, first.status);
+    assert_eq!(harness.events().len(), events);
+}
+
+#[tokio::test]
+async fn a_run_that_keeps_being_restarted_is_given_up() {
+    let mut events = interrupted_run().await;
+    let main = SessionId::new(MAIN);
+    // Two processes in a row pick the run up and die before finishing a step of it.
+    for _ in 0..2 {
+        let (harness, _launches, _peeks) = restarted(events, []);
+        let harness = harness.with_operation(Arc::new(Broken));
+        harness.continue_run(&main).await.unwrap_err();
+        events = harness.events().events();
+    }
+    let (harness, launches, peeks) = restarted(events, [say("never asked")]);
+    let harness = harness.with_restart_limit(2);
+
+    let outcome = harness.continue_run(&main).await.unwrap();
+
+    assert_eq!(
+        outcome.status,
+        Status::Failed {
+            reason: "the run was restarted 2 times without finishing and was given up".into()
+        }
+    );
+    assert_eq!(
+        payloads(&harness, "run/restart"),
+        [r#"{"attempt":1}"#, r#"{"attempt":2}"#, r#"{"attempt":3}"#]
+    );
+    assert_eq!(
+        (
+            peeks.load(Ordering::SeqCst),
+            launches.load(Ordering::SeqCst)
+        ),
+        (0, 0)
+    );
+    // The run is over, so the session takes prompts again.
+    assert!(!harness.journal(&main).unwrap().unfinished());
+    assert!(harness.run("start over").await.is_ok());
+}
+
+/// A step that breaks the pipeline every time, standing in for a crash.
+struct Broken;
+
+#[async_trait]
+impl Operation<Session, Effect> for Broken {
+    fn name(&self) -> &'static str {
+        "broken"
+    }
+
+    async fn run(
+        &self,
+        _session: &Session,
+        _conversation: &Conversation,
+        _emit: &Emitter,
+    ) -> anyhow::Result<OperationResult<Effect>> {
+        anyhow::bail!("the process died")
+    }
 }

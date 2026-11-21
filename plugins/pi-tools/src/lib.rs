@@ -200,32 +200,39 @@ fn bash(args: &Bash) -> Result<String, ToolError> {
 }
 
 fn specs() -> Vec<ToolSpec> {
-    let spec = |name: &str, description: &str, input_schema: &str| ToolSpec {
+    // `replay_safe`: reading twice, or writing the same content twice, is the same as once.
+    // An edit that already happened no longer finds its old text, and a command can do anything.
+    let spec = |name: &str, replay_safe: bool, description: &str, input_schema: &str| ToolSpec {
         name: name.to_owned(),
         description: description.to_owned(),
         input_schema: input_schema.to_owned(),
+        replay_safe,
     };
     vec![
         spec(
             "read",
+            true,
             "Read a text file. Returns at most 2000 lines or 50KB; use offset and limit to \
              page through larger files.",
             r#"{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","description":"First line to return, counting from 1"},"limit":{"type":"integer","description":"Maximum number of lines"}},"required":["path"]}"#,
         ),
         spec(
             "write",
+            true,
             "Create or overwrite a file with the given content. Parent directories are \
              created as needed.",
             r#"{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}"#,
         ),
         spec(
             "edit",
+            false,
             "Replace exact text in a file. Each oldText must occur exactly once in the file \
              as it is now; edits must not overlap.",
             r#"{"type":"object","properties":{"path":{"type":"string"},"edits":{"type":"array","items":{"type":"object","properties":{"oldText":{"type":"string"},"newText":{"type":"string"}},"required":["oldText","newText"]}}},"required":["path","edits"]}"#,
         ),
         spec(
             "bash",
+            false,
             "Run a shell command. The shell is persistent: the working directory and \
              variables carry over between calls. Returns the last 2000 lines or 50KB of output.",
             r#"{"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"integer","description":"Seconds before the command is stopped (default 120)"}},"required":["command"]}"#,

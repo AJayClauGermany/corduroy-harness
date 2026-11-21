@@ -8,7 +8,9 @@
 //!   they depend on come and go.
 //! * [`capability`]: what a plugin may do. Plugins start with no authority and are granted
 //!   scoped capabilities.
-//! * [`event`]: the append-only event stream that records a run and connects plugins.
+//! * [`event`]: the append-only event stream that records a run and connects plugins. Events
+//!   are committed in batches to a [`Log`] before anyone sees them, and name the session
+//!   they belong to. The core defines what a log is; stores live in other crates.
 //! * [`registry`], [`tool`], [`prompt`], [`kernel`]: the well-known services plugins
 //!   contribute to: tools the model can call, text for the system prompt, and long-lived
 //!   kernels that keep state between calls.

@@ -225,6 +225,7 @@ impl Plugin for WasmPlugin {
                     name: spec.name,
                     description: spec.description,
                     input_schema: spec.input_schema,
+                    replay_safe: spec.replay_safe,
                 },
             };
             tools.register(ctx, name, Arc::new(tool))?;
