@@ -1,11 +1,9 @@
 //! Assembling the pieces into an agent.
 
-use std::collections::BTreeMap;
-use std::collections::btree_map::Entry;
 use std::error::Error;
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex};
 
 use corduroy_core::{
     App, ContextError, EventStream, FiberId, KERNELS, Kernel, Kernels, LogError, PROMPTS, Plugin,
@@ -25,7 +23,7 @@ use rmcp::model::{CallToolResult, ContentBlock};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::session::{Effect, Journal, MAIN, Session, SessionInfo};
+use crate::session::{Effect, Journal, MAIN, Progress, Session, SessionInfo, Sessions};
 use crate::tools::{PluginTools, PromptOperation};
 
 /// Why the harness could not be set up or a run could not complete.
@@ -116,12 +114,6 @@ impl fmt::Display for Status {
     }
 }
 
-/// A session the harness knows of. Its journal is built from the stream when first needed.
-struct Known {
-    info: SessionInfo,
-    journal: Option<Arc<Journal>>,
-}
-
 /// The result of a completed run.
 #[derive(Debug, Clone)]
 pub struct Outcome {
@@ -145,7 +137,7 @@ pub struct Harness {
     tools: Arc<Tools>,
     prompts: Arc<Prompts>,
     kernels: Arc<Kernels>,
-    sessions: Mutex<BTreeMap<SessionId, Known>>,
+    sessions: Arc<Sessions>,
     provider: Arc<dyn Provider>,
     model: ModelConfig,
     system: String,
@@ -188,29 +180,7 @@ impl Harness {
         provider: Arc<dyn Provider>,
         events: Arc<EventStream>,
     ) -> Result<Self, HarnessError> {
-        let mut sessions: BTreeMap<SessionId, Known> = SessionInfo::all(&events)
-            .into_iter()
-            .map(|info| {
-                (
-                    info.id.clone(),
-                    Known {
-                        info,
-                        journal: None,
-                    },
-                )
-            })
-            .collect();
-        if let Entry::Vacant(vacant) = sessions.entry(SessionId::new(MAIN)) {
-            let info = SessionInfo {
-                id: vacant.key().clone(),
-                parent: None,
-            };
-            events.emit(info.start())?;
-            vacant.insert(Known {
-                info,
-                journal: None,
-            });
-        }
+        let sessions = Arc::new(Sessions::load(Arc::clone(&events))?);
         let tools = Arc::new(Tools::new());
         let prompts = Arc::new(Prompts::new());
         let kernels = Arc::new(Kernels::new());
@@ -223,7 +193,7 @@ impl Harness {
             tools,
             prompts,
             kernels,
-            sessions: Mutex::new(sessions),
+            sessions,
             provider,
             model: ModelConfig::new("default"),
             system: String::new(),
@@ -313,39 +283,13 @@ impl Harness {
         id: impl Into<SessionId>,
         parent: Option<&SessionId>,
     ) -> Result<SessionId, HarnessError> {
-        let info = SessionInfo {
-            id: id.into(),
-            parent: parent.cloned(),
-        };
-        let mut sessions = self.sessions();
-        if sessions.contains_key(&info.id) {
-            return Err(HarnessError::DuplicateSession(info.id));
-        }
-        if let Some(parent) = parent.filter(|parent| !sessions.contains_key(parent)) {
-            return Err(HarnessError::UnknownSession(parent.clone()));
-        }
-        // Stored while the table is locked, so two callers cannot both start the same id.
-        // `session/start` is the harness's own topic; a listener has no cause to start one.
-        self.events().emit(info.start())?;
-        let id = info.id.clone();
-        sessions.insert(
-            id.clone(),
-            Known {
-                info,
-                journal: None,
-            },
-        );
-        drop(sessions);
-        Ok(id)
+        self.sessions.start(id.into(), parent)
     }
 
     /// Every session, in order of id.
     #[must_use]
     pub fn session_list(&self) -> Vec<SessionInfo> {
-        self.sessions()
-            .values()
-            .map(|known| known.info.clone())
-            .collect()
+        self.sessions.list()
     }
 
     /// The journal that persists the effects of `session` to the event stream. It is the
@@ -356,21 +300,7 @@ impl Harness {
     /// Returns [`HarnessError::UnknownSession`] if there is no such session, or
     /// [`HarnessError::Run`] if its events cannot be decoded.
     pub fn journal(&self, session: &SessionId) -> Result<Arc<Journal>, HarnessError> {
-        let mut sessions = self.sessions();
-        let known = sessions
-            .get_mut(session)
-            .ok_or_else(|| HarnessError::UnknownSession(session.clone()))?;
-        if let Some(journal) = &known.journal {
-            return Ok(Arc::clone(journal));
-        }
-        let journal = Arc::new(Journal::new(session.clone(), Arc::clone(self.events()))?);
-        known.journal = Some(Arc::clone(&journal));
-        drop(sessions);
-        Ok(journal)
-    }
-
-    fn sessions(&self) -> MutexGuard<'_, BTreeMap<SessionId, Known>> {
-        self.sessions.lock().unwrap_or_else(PoisonError::into_inner)
+        self.sessions.journal(session)
     }
 
     /// The loop, as the ordered steps a [`StateMachine`] walks: custom operations, the
@@ -378,8 +308,10 @@ impl Harness {
     /// the model.
     #[must_use]
     pub fn steps(&self) -> Vec<Step<'static, Session, Effect>> {
-        let tools =
-            ToolOperation::new().with_provider(Arc::new(PluginTools::new(Arc::clone(&self.tools))));
+        let tools = ToolOperation::new().with_provider(Arc::new(PluginTools::new(
+            Arc::clone(&self.tools),
+            Arc::clone(&self.sessions),
+        )));
         let prompt = PromptOperation::new(self.system.clone(), Arc::clone(&self.prompts));
         let model: InferenceRunner<'static, Session, Effect> =
             InferenceRunner::new(Arc::clone(&self.provider), self.model.clone());
@@ -447,10 +379,15 @@ impl Harness {
     /// prompt. If the session has no such run, nothing happens and the outcome is that of
     /// its last one.
     ///
-    /// Tool calls the model asked for and has no result for may or may not have run. Those
-    /// whose tool is [`replay_safe`](corduroy_core::ToolSpec::replay_safe) are made again.
-    /// The others are answered with an error saying they were interrupted, and the model
-    /// decides what to do, as with any other tool failure.
+    /// The log says how far each tool call the model is still waiting on got:
+    ///
+    /// - It returned, and only handing the result to the model was cut short: the result is
+    ///   taken from the log and the tool is not run again.
+    /// - It never started: it runs now, like any other call.
+    /// - It was started and nothing more is known: it is made again if its tool is
+    ///   [`replay_safe`](corduroy_core::ToolSpec::replay_safe). Otherwise it is answered
+    ///   with an error saying it was interrupted, and the model decides what to do, as with
+    ///   any other tool failure.
     ///
     /// Each call counts as a restart of the run. Past the
     /// [restart limit](Self::with_restart_limit) the run ends as [`Status::Failed`].
@@ -476,14 +413,17 @@ impl Harness {
             journal.end_turn()?;
             return Ok(outcome_of(journal.session()));
         }
-        if let Some(interrupted) = self.interrupted(&journal.session()) {
-            journal.record(&interrupted)?;
+        if let Some(settled) = self.settled(&journal) {
+            journal.record(&settled)?;
         }
         self.drive(&journal).await
     }
 
-    /// Error results for the unanswered tool calls of `session` that cannot be made again.
-    fn interrupted(&self, session: &Session) -> Option<Message> {
+    /// Results for the unanswered tool calls of an interrupted run that must not simply be
+    /// run: those the log already has a result for, and those that were started and are
+    /// not safe to make again. Calls left out are for the tools step to run.
+    fn settled(&self, journal: &Journal) -> Option<Message> {
+        let session = journal.session();
         let turn = messages_since_kickoff(session.conversation()).ok()?;
         let mut results = Message::user();
         for request in pending_tool_requests(turn) {
@@ -491,21 +431,30 @@ impl Harness {
             let Ok(call) = request.tool_call.as_ref() else {
                 continue;
             };
-            let replay_safe = self
-                .tools
-                .get(&call.name)
-                .is_some_and(|tool| tool.spec().replay_safe);
-            if !replay_safe {
-                let text = format!(
-                    "interrupted: the harness stopped while `{}` may have been running, and \
-                     it is not safe to run twice. Check what it did before calling it again.",
+            let result = match journal.progress(&request.id) {
+                Progress::NotStarted => continue,
+                Progress::Started if self.replay_safe(&call.name) => continue,
+                Progress::Started => CallToolResult::error(vec![ContentBlock::text(format!(
+                    "interrupted: the harness stopped while `{}` was running, and it is not \
+                     safe to run twice. Check what it did before calling it again.",
                     call.name
-                );
-                let result = CallToolResult::error(vec![ContentBlock::text(text)]);
-                results = results.with_tool_response(request.id.clone(), Ok(result));
-            }
+                ))]),
+                Progress::Finished { ok: true, output } => {
+                    CallToolResult::success(vec![ContentBlock::text(output)])
+                }
+                Progress::Finished { ok: false, output } => {
+                    CallToolResult::error(vec![ContentBlock::text(output)])
+                }
+            };
+            results = results.with_tool_response(request.id.clone(), Ok(result));
         }
         (!results.content.is_empty()).then(|| results.with_generated_id_if_missing())
+    }
+
+    fn replay_safe(&self, tool: &str) -> bool {
+        self.tools
+            .get(tool)
+            .is_some_and(|tool| tool.spec().replay_safe)
     }
 
     /// Run the loop over `journal`'s session until it stops, and mark the end of the turn.

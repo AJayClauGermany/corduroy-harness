@@ -226,7 +226,7 @@ Everything else is a plugin, and a plugin may itself offer primitives to other p
 | Plugin tree (`App`, `Context`, effects, `inject`) | built | Add a restart limit so a plugin that keeps faulting is suspended, not retried forever. |
 | Event log | built | A fallible `Log` trait. A step's events are one atomic commit, stored before any listener or the model sees them. The core has the trait and the in-memory stream; stores are separate crates. |
 | Sessions | built | Many sessions, each with an id and an optional parent. Every event of a run names its session; events about the plugin tree name none. Still to do: events a plugin emits while serving a tool call do not carry that call's session. |
-| Tool lifecycle | partly built | Built: `tool/call` is committed before the tool runs and `tool/result` after, and `ToolSpec::replay_safe` says whether an interrupted call may be repeated. Still to do: `read-only` (wanted by gates), results as content blocks rather than one string, progress and cancellation. |
+| Tool lifecycle | partly built | Built: `tool/call`, `tool/start` and `tool/result` are each committed as they happen, per call, and `ToolSpec::replay_safe` says whether a call that was running at a crash may be repeated. Still to do: `read-only` (wanted by gates), results as content blocks rather than one string, progress and cancellation. |
 | Gates | native `Operation` only | A fourth registry. A gate is asked at a named decision point before something happens and answers allow, deny or ask. Reachable from WebAssembly through a world export. See [Events, gates and hooks](#events-gates-and-hooks-planned). |
 | Waits and signals | none | A step can end by waiting for a named signal (a user's answer, a child session finishing). The wait is an event, so it survives a restart. |
 | Services | native only | Calls between plugins across the WebAssembly boundary, as a capability scoped by service name. |
@@ -325,16 +325,28 @@ The first five points are built; the last two are *planned*.
   parent, and each session's conversation is rebuilt from its own events. The core knows
   only `SessionId`; which sessions exist and how they relate is a projection the harness
   makes (`Harness::start_session`, `run_in`, `session_list`).
-- **Tool intent first.** The model's message and its `tool/call` events are one commit, stored
-  before the tools step starts. A run is *unfinished* from its first message to its
-  `turn/end`. `Harness::continue_run` picks an unfinished run up without a new prompt: a
-  call with no result is made again if its tool is `replay_safe`; otherwise the harness
-  records an `interrupted` error result and the model recovers, as with any other tool
-  failure. A session with an unfinished run refuses a new prompt until it is continued.
-  This is conservative: all the calls of one message share a commit and so do their results,
-  so after a crash every unanswered call counts as possibly run, including ones the tools
-  step had not reached and ones that had finished. Committing each result as it arrives would
-  narrow that, and needs a tools step of our own in place of oi-kit's.
+- **Tool intent first, one call at a time.** The model's message and its `tool/call` events
+  are one commit, stored before the tools step starts. Each call then leaves a trail of
+  its own: `tool/start` is committed just before the tool runs and `tool/result` as soon as
+  it returns, each a commit, and only then does the message carrying the step's results go
+  to the model. oi-kit's tools step runs every call of a message and returns the results
+  together, and nothing in it splits that up; but every call passes through our
+  `ToolProvider` (`PluginTools`), which is where the two events are written, so the step
+  itself is still oi-kit's and the conversation keeps one result message per step.
+- **Continue, not only resume.** A run is *unfinished* from its first message to its
+  `turn/end`, and a session with an unfinished run refuses a new prompt.
+  `Harness::continue_run` picks the run up without one, and treats each unanswered call by
+  how far the log says it got:
+
+  | The log has | Then |
+  | --- | --- |
+  | `tool/result` | The result is handed to the model from the log. The tool is not run again. |
+  | no `tool/start` | The tool never ran. It runs now, like any other call. |
+  | `tool/start` only | It may or may not have run. It is made again if its tool is `replay_safe`; otherwise the harness records an `interrupted` error result and the model recovers, as with any other tool failure. |
+
+  Only the call that was actually running when the process died is ever in doubt. Results
+  that do not come from a plugin's tool (a custom operation refusing a call, a call nobody
+  handles) are still recorded with their message, as before.
 - **Crash loops.** Each `continue_run` of an unfinished run is a `run/restart` event; past
   `Harness::with_restart_limit` (default 5) the run ends as `Status::Failed`, recorded in the
   conversation, and the session takes prompts again.
@@ -476,8 +488,8 @@ the step it waits on is done.
 1. *Done.* `Log` trait, atomic commit before delivery, JSONL store, log header with a schema
    version.
 2. *Done.* Sessions: ids, parents, a session on every event of a run.
-3. *Done for durability:* intent before execution, `replay_safe`, `Harness::continue_run` and
-   the restart limit. *Moved to step 4,* where their first users are: `read-only` (gates),
+3. *Done for durability:* intent before execution and a result per call (`tool/start`,
+   `tool/result`), `replay_safe`, `Harness::continue_run` and the restart limit. *Moved to step 4,* where their first users are: `read-only` (gates),
    and content blocks, progress and cancellation (which change the tool calling convention
    and are better settled together with waits).
 4. Gates, waits and signals; the rest of the tool lifecycle.

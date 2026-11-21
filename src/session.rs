@@ -14,10 +14,17 @@
 //! | `session/start` | `host` | `{"parent"}`, or `{}` for a session with no parent |
 //! | `message` | `user`, `agent` or `environment` | the oi-kit message, as JSON |
 //! | `tool/call` | `agent` | `{"id", "tool", "input"}`, caused by its `message` |
+//! | `tool/start` | `host` | `{"id", "tool"}`, caused by its `tool/call`: the tool is about to run |
 //! | `tool/result` | `environment` | `{"id", "tool", "ok", "output"}`, caused by its `tool/call` |
 //! | `usage` | `agent` | the provider's usage report, as JSON |
 //! | `turn/end` | `host` | empty |
 //! | `run/restart` | `host` | `{"attempt"}`: an unfinished run was picked up again |
+//!
+//! A tool call leaves a trail of its own, one commit at a time: `tool/call` with the model's
+//! message, `tool/start` just before the tool runs, `tool/result` as soon as it returns, and
+//! only then the `message` that carries the results of every call of that step to the
+//! model. After a crash the log therefore says of each call whether it never started, was
+//! running, or finished with a result that only needs handing over.
 //!
 //! A run is *unfinished* from its first `message` until its `turn/end`. A session whose
 //! events stop short of that was interrupted, and [`Harness::continue_run`] picks it up.
@@ -25,11 +32,14 @@
 //! [`Harness::continue_run`]: crate::Harness::continue_run
 
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
-use corduroy_core::{Draft, Event, EventId, EventStream, Pattern, SessionId, Source};
+use corduroy_core::{Draft, Event, EventId, EventStream, LogError, Pattern, SessionId, Source};
+
+use crate::harness::HarnessError;
 use oi_kit_agent::inference::InferenceEffect;
 use oi_kit_agent::machine::{EffectHandler, MachineSession, SessionLoader};
 use oi_kit_agent::operation::{Emitter, MachineEffect};
@@ -96,6 +106,129 @@ impl SessionInfo {
     }
 }
 
+/// A session the table knows of. Its journal is built from the stream when first needed.
+struct Known {
+    info: SessionInfo,
+    journal: Option<Arc<Journal>>,
+}
+
+/// The sessions of one event stream and the journal of each.
+///
+/// The table is a projection of the stream's `session/start` events, kept so that a step
+/// of the loop can find the journal of the session it is working in.
+pub struct Sessions {
+    events: Arc<EventStream>,
+    known: Mutex<BTreeMap<SessionId, Known>>,
+}
+
+impl std::fmt::Debug for Sessions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Sessions").field(&self.list()).finish()
+    }
+}
+
+impl Sessions {
+    /// The sessions `events` holds, with the session [`MAIN`] started if it is not among
+    /// them.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`LogError`] if the start of the main session cannot be stored.
+    pub fn load(events: Arc<EventStream>) -> Result<Self, LogError> {
+        let unloaded = |info| Known {
+            info,
+            journal: None,
+        };
+        let mut known: BTreeMap<SessionId, Known> = SessionInfo::all(&events)
+            .into_iter()
+            .map(|info| (info.id.clone(), unloaded(info)))
+            .collect();
+        if let Entry::Vacant(vacant) = known.entry(SessionId::new(MAIN)) {
+            let info = SessionInfo {
+                id: vacant.key().clone(),
+                parent: None,
+            };
+            events.emit(info.start())?;
+            vacant.insert(unloaded(info));
+        }
+        Ok(Self {
+            events,
+            known: Mutex::new(known),
+        })
+    }
+
+    /// Start a session called `id`, recording `parent` as the session it came from.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HarnessError::DuplicateSession`] if `id` is taken,
+    /// [`HarnessError::UnknownSession`] if `parent` does not exist, or [`HarnessError::Log`]
+    /// if the start could not be stored.
+    pub fn start(
+        &self,
+        id: SessionId,
+        parent: Option<&SessionId>,
+    ) -> Result<SessionId, HarnessError> {
+        let info = SessionInfo {
+            id,
+            parent: parent.cloned(),
+        };
+        let mut known = self.known();
+        if known.contains_key(&info.id) {
+            return Err(HarnessError::DuplicateSession(info.id));
+        }
+        if let Some(parent) = parent.filter(|parent| !known.contains_key(parent)) {
+            return Err(HarnessError::UnknownSession(parent.clone()));
+        }
+        // Stored while the table is locked, so two callers cannot both start the same id.
+        // A listener for `session/start` must therefore not come back to this table.
+        self.events.emit(info.start())?;
+        let id = info.id.clone();
+        known.insert(
+            id.clone(),
+            Known {
+                info,
+                journal: None,
+            },
+        );
+        drop(known);
+        Ok(id)
+    }
+
+    /// Every session, in order of id.
+    #[must_use]
+    pub fn list(&self) -> Vec<SessionInfo> {
+        self.known()
+            .values()
+            .map(|known| known.info.clone())
+            .collect()
+    }
+
+    /// The journal of `session`, rebuilt from the stream the first time it is asked for.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HarnessError::UnknownSession`] if there is no such session, or
+    /// [`HarnessError::Run`] if its events cannot be decoded.
+    pub fn journal(&self, session: &SessionId) -> Result<Arc<Journal>, HarnessError> {
+        let mut known = self.known();
+        let entry = known
+            .get_mut(session)
+            .ok_or_else(|| HarnessError::UnknownSession(session.clone()))?;
+        if let Some(journal) = &entry.journal {
+            return Ok(Arc::clone(journal));
+        }
+        let journal = Arc::new(Journal::new(session.clone(), Arc::clone(&self.events))?);
+        entry.journal = Some(Arc::clone(&journal));
+        drop(known);
+        Ok(journal)
+    }
+
+    fn known(&self) -> MutexGuard<'_, BTreeMap<SessionId, Known>> {
+        self.known.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 /// One conversation, as the state machine sees it at the start of a step.
 #[derive(Debug, Clone)]
 pub struct Session {
@@ -152,10 +285,38 @@ impl MachineEffect for Effect {
     }
 }
 
+/// A tool call the model asked for whose response is not in the conversation yet.
+#[derive(Clone)]
+struct OpenCall {
+    /// Its `tool/call` event.
+    event: EventId,
+    tool: String,
+    /// Whether a `tool/start` was stored for it.
+    started: bool,
+    /// Whether it succeeded and what it returned, once a `tool/result` was stored for it.
+    result: Option<(bool, String)>,
+}
+
+/// How far the log says a tool call got, for one whose response is not in the conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Progress {
+    /// The tool was never started.
+    NotStarted,
+    /// The tool was started and no result was stored: it may or may not have run.
+    Started,
+    /// The tool returned and its result is in the log.
+    Finished {
+        /// Whether the call succeeded.
+        ok: bool,
+        /// What the tool returned.
+        output: String,
+    },
+}
+
 struct State {
     conversation: Conversation,
-    /// The `tool/call` event and tool name behind each open tool-call id.
-    calls: BTreeMap<String, (EventId, String)>,
+    /// The tool calls waiting for a response, by tool-call id.
+    calls: BTreeMap<String, OpenCall>,
     /// Whether a run has begun and not reached its `turn/end`.
     unfinished: bool,
     /// How many times the unfinished run has been picked up again.
@@ -190,14 +351,17 @@ impl Batch {
         );
     }
 
-    /// Add the `tool/result` event for `response`. It is caused by its call, which is in this
-    /// batch, or is the `open` one from an earlier commit, or else is unknown, in which case
-    /// the message at `message` stands in.
-    fn result(&mut self, response: &ToolResponse, open: Option<(EventId, String)>, message: usize) {
+    /// Add the `tool/result` event for `response`, unless the `open` call it answers already
+    /// has one from when the tool returned. The event is caused by its call, which is in
+    /// this batch, or is the `open` one from an earlier commit, or else is unknown, in which
+    /// case the message at `message` stands in.
+    fn result(&mut self, response: &ToolResponse, open: Option<OpenCall>, message: usize) {
+        self.closed.push(response.id.clone());
         let draft = Draft::new(Source::Environment, "tool/result");
         let (draft, tool) = match (self.opened.get(&response.id), open) {
             (Some((call, tool)), _) => (draft.cause_in_batch(*call), tool.clone()),
-            (None, Some((call, tool))) => (draft.cause(call), tool),
+            (None, Some(open)) if open.result.is_some() => return,
+            (None, Some(open)) => (draft.cause(open.event), open.tool),
             (None, None) => (draft.cause_in_batch(message), String::new()),
         };
         let (ok, output) = match &response.tool_result {
@@ -206,7 +370,59 @@ impl Batch {
         };
         let payload = json!({"id": response.id, "tool": tool, "ok": ok, "output": output});
         self.drafts.push(draft.payload(payload.to_string()));
-        self.closed.push(response.id.clone());
+    }
+}
+
+impl State {
+    /// Bring the projection up to date with one stored event of the session.
+    fn project(&mut self, event: &Event) -> Result<()> {
+        match event.topic.as_str() {
+            MESSAGE => {
+                let message: Message = serde_json::from_str(&event.payload)
+                    .with_context(|| format!("event {} is not a message", event.id))?;
+                // A call is open until its response is in the conversation.
+                let answered = message.content.iter().filter_map(|content| match content {
+                    MessageContent::ToolResponse(response) => Some(&response.id),
+                    _ => None,
+                });
+                for call in answered {
+                    self.calls.remove(call);
+                }
+                self.conversation.push(message);
+                self.unfinished = true;
+            }
+            TURN_END => (self.unfinished, self.restarts) = (false, 0),
+            RESTART => self.restarts = self.restarts.saturating_add(1),
+            "tool/call" | "tool/start" | "tool/result" => self.project_call(event)?,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Note what a `tool/call`, `tool/start` or `tool/result` event says about its call.
+    fn project_call(&mut self, event: &Event) -> Result<()> {
+        let payload: Value = serde_json::from_str(&event.payload)
+            .with_context(|| format!("event {} is not about a tool call", event.id))?;
+        let text = |name: &str| payload.get(name).and_then(Value::as_str).map(str::to_owned);
+        let Some(id) = text("id") else {
+            return Ok(());
+        };
+        if event.topic == "tool/call" {
+            let call = OpenCall {
+                event: event.id,
+                tool: text("tool").unwrap_or_default(),
+                started: false,
+                result: None,
+            };
+            self.calls.insert(id, call);
+        } else if let Some(call) = self.calls.get_mut(&id) {
+            call.started = true;
+            if event.topic == "tool/result" {
+                let ok = payload.get("ok").and_then(Value::as_bool) == Some(true);
+                call.result = Some((ok, text("output").unwrap_or_default()));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -236,36 +452,21 @@ impl Journal {
     ///
     /// # Errors
     ///
-    /// Fails if a `message` or `tool/call` event of the session cannot be decoded.
+    /// Fails if a `message` or tool-call event of the session cannot be decoded.
     pub fn new(id: SessionId, events: Arc<EventStream>) -> Result<Self> {
-        let mut conversation = Conversation::empty();
-        let mut calls = BTreeMap::new();
-        let (mut unfinished, mut restarts) = (false, 0_u32);
+        let mut state = State {
+            conversation: Conversation::empty(),
+            calls: BTreeMap::new(),
+            unfinished: false,
+            restarts: 0,
+        };
         for event in events.session(&id) {
-            if event.topic == MESSAGE {
-                let message = serde_json::from_str(&event.payload)
-                    .with_context(|| format!("event {} is not a message", event.id))?;
-                conversation.push(message);
-                unfinished = true;
-            } else if event.topic == TURN_END {
-                (unfinished, restarts) = (false, 0);
-            } else if event.topic == RESTART {
-                restarts = restarts.saturating_add(1);
-            } else if event.topic == "tool/call"
-                && let Some((id, tool)) = call_of(&event)?
-            {
-                calls.insert(id, (event.id, tool));
-            }
+            state.project(&event)?;
         }
         Ok(Self {
             id,
             events,
-            state: Mutex::new(State {
-                conversation,
-                calls,
-                unfinished,
-                restarts,
-            }),
+            state: Mutex::new(state),
         })
     }
 
@@ -333,6 +534,55 @@ impl Journal {
         self.state().unfinished
     }
 
+    /// How far the log says the unanswered tool call `call` got.
+    pub(crate) fn progress(&self, call: &str) -> Progress {
+        match self.state().calls.get(call) {
+            Some(OpenCall {
+                result: Some((ok, output)),
+                ..
+            }) => Progress::Finished {
+                ok: *ok,
+                output: output.clone(),
+            },
+            Some(OpenCall { started: true, .. }) => Progress::Started,
+            _ => Progress::NotStarted,
+        }
+    }
+
+    /// Record that the tool behind `call` is about to run. This is its own commit, so that
+    /// after a crash the log tells a call that was running from one that never began.
+    pub(crate) fn start_call(&self, call: &str) -> Result<()> {
+        let (draft, tool) = self.about_call(call, Source::Host, "tool/start");
+        self.events
+            .emit(draft.payload(json!({"id": call, "tool": tool}).to_string()))?;
+        if let Some(open) = self.state().calls.get_mut(call) {
+            open.started = true;
+        }
+        Ok(())
+    }
+
+    /// Record what the tool behind `call` returned, as soon as it has. This is its own
+    /// commit, so a result is not lost with whatever else the step was still doing.
+    pub(crate) fn finish_call(&self, call: &str, ok: bool, output: &str) -> Result<()> {
+        let (draft, tool) = self.about_call(call, Source::Environment, "tool/result");
+        let payload = json!({"id": call, "tool": tool, "ok": ok, "output": output});
+        self.events.emit(draft.payload(payload.to_string()))?;
+        if let Some(open) = self.state().calls.get_mut(call) {
+            open.result = Some((ok, output.to_owned()));
+        }
+        Ok(())
+    }
+
+    /// An event of this session on `topic` caused by the open tool call `call`, and the name
+    /// of the call's tool.
+    fn about_call(&self, call: &str, source: Source, topic: &str) -> (Draft, String) {
+        let draft = Draft::new(source, topic).session(self.id.clone());
+        match self.state().calls.get(call) {
+            Some(open) => (draft.cause(open.event), open.tool.clone()),
+            None => (draft, String::new()),
+        }
+    }
+
     /// Record that the run is over.
     pub(crate) fn end_turn(&self) -> Result<()> {
         self.events
@@ -368,9 +618,16 @@ impl Journal {
             state.unfinished = true;
         }
         for (call, (position, tool)) in batch.opened {
-            if let Some(id) = ids.get(position) {
-                state.calls.insert(call, (*id, tool));
-            }
+            let Some(event) = ids.get(position).copied() else {
+                continue;
+            };
+            let open = OpenCall {
+                event,
+                tool,
+                started: false,
+                result: None,
+            };
+            state.calls.insert(call, open);
         }
         for call in batch.closed {
             state.calls.remove(&call);
@@ -382,14 +639,6 @@ impl Journal {
     fn state(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
-}
-
-/// The tool-call id and tool name a `tool/call` event records.
-fn call_of(event: &Event) -> Result<Option<(String, String)>> {
-    let call: Value = serde_json::from_str(&event.payload)
-        .with_context(|| format!("event {} is not a tool call", event.id))?;
-    let field = |name: &str| call.get(name).and_then(Value::as_str).map(str::to_owned);
-    Ok(field("id").zip(field("tool")))
 }
 
 /// The text blocks of a tool result, joined.

@@ -122,10 +122,11 @@ async fn every_event_records_its_source_and_cause() {
             "#3 user message in main",
             "#5 agent message in main",
             "#6 agent tool/call in main <- #5",
-            "#7 environment message in main",
+            "#7 host tool/start in main <- #6",
             "#8 environment tool/result in main <- #6",
-            "#10 agent message in main",
-            "#11 host turn/end in main",
+            "#9 environment message in main",
+            "#11 agent message in main",
+            "#12 host turn/end in main",
         ]
     );
 }

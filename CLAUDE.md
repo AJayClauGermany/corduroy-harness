@@ -100,6 +100,10 @@ as design guidance, not noise.
   which stores the batch in the `Log` before any listener or the next step sees it. Events of
   a run carry its `SessionId`. A refused commit closes the stream and is the one event failure
   that must reach the caller: propagate the `LogError` where there is a caller to give it to.
+- **Each tool call has its own trail.** `PluginTools` commits `tool/start` before a tool runs
+  and `tool/result` when it returns; `continue_run` reads them to tell a call that never
+  started, one that was running and one that finished. Anything else that runs tools must
+  do the same through the session's `Journal`.
 - **A tool is repeated after a crash only if it says so.** `ToolSpec::replay_safe` (and
   `replay-safe` in the WIT) is true only when calling twice equals calling once.
 - **Tool failures are data, not control flow.** A `ToolError` becomes an error tool result and

@@ -96,9 +96,10 @@ async fn each_step_of_the_loop_is_one_line_of_the_log() {
 
     harness.run("go").await.unwrap();
 
-    // The prompt, the model's call (message, tool/call and usage together), the tool's
-    // result (message and tool/result together), the answer, and the end of the turn.
-    assert_eq!(lines(&path) - setup, 5);
+    // The prompt; the model's call (message, tool/call and usage together); the tool
+    // starting; its result; the message handing the result to the model; the answer; and
+    // the end of the turn.
+    assert_eq!(lines(&path) - setup, 7);
 }
 
 /// A log that stores nothing and refuses every commit after the first `healthy` ones.
@@ -168,16 +169,24 @@ fn rocketry(launches: &Arc<AtomicUsize>, peeks: &Arc<AtomicUsize>) -> impl Plugi
     })
 }
 
-/// The events of a run that stopped after the model asked for `peek` and `launch` and
-/// before either result was stored, as a crash in the middle of the tools would leave it.
-async fn interrupted_run() -> Vec<Event> {
-    let asks = call("c1", "peek", &json!({}))
-        .with_tool_request("c2", Ok(CallToolRequestParams::new("launch")));
+/// A model reply asking for each `(id, tool)` in turn, all in one message.
+fn asks(calls: &[(&str, &str)]) -> Message {
+    calls
+        .iter()
+        .fold(Message::assistant(), |message, (id, tool)| {
+            message.with_tool_request(*id, Ok(CallToolRequestParams::new((*tool).to_owned())))
+        })
+}
+
+/// The events of a run in which the model made `request` and the process then died after
+/// `stored` more commits, part of the way through the tools.
+async fn interrupted_run(request: Message, stored: usize) -> Vec<Event> {
+    // The session's start, the plugin's activation, the prompt and the model's message.
     let log = Failing {
-        healthy: 4,
+        healthy: 4 + stored,
         commits: Arc::new(AtomicUsize::new(0)),
     };
-    let model = Arc::new(ScriptedProvider::new([asks]));
+    let model = Arc::new(ScriptedProvider::new([request]));
     let mut harness = Harness::resume(model, Arc::new(EventStream::new().with_log(log))).unwrap();
     harness.plugin(rocketry(&Arc::default(), &Arc::default()));
     harness.run("launch it").await.unwrap_err();
@@ -206,9 +215,12 @@ fn payloads(harness: &Harness, topic: &str) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn an_interrupted_run_continues_without_repeating_what_is_not_safe_to_repeat() {
-    let events = interrupted_run().await;
-    let (harness, launches, peeks) = restarted(events, [say("it may have launched")]);
+async fn a_continued_run_treats_each_call_by_how_far_it_got() {
+    // Three calls in one message. The process died while the second was running: the log
+    // has the first one's start and result and the second one's start.
+    let request = asks(&[("c1", "launch"), ("c2", "launch"), ("c3", "launch")]);
+    let events = interrupted_run(request, 3).await;
+    let (harness, launches, _peeks) = restarted(events, [say("two of three, perhaps")]);
     let main = SessionId::new(MAIN);
 
     let refused = harness.run_in(&main, "hello?").await.unwrap_err();
@@ -221,23 +233,62 @@ async fn an_interrupted_run_continues_without_repeating_what_is_not_safe_to_repe
     assert_eq!(
         outcome.status,
         Status::Finished {
-            answer: "it may have launched".into()
+            answer: "two of three, perhaps".into()
         }
     );
-    // `peek` ran again; `launch` did not, and the model was told why.
-    assert_eq!(
-        (
-            peeks.load(Ordering::SeqCst),
-            launches.load(Ordering::SeqCst)
-        ),
-        (1, 0)
-    );
+    // Only the call that never started ran in this process.
+    assert_eq!(launches.load(Ordering::SeqCst), 1);
     assert_eq!(payloads(&harness, "run/restart"), [r#"{"attempt":1}"#]);
     assert_eq!(
         payloads(&harness, "tool/result"),
         [
-            r#"{"id":"c2","tool":"launch","ok":false,"output":"interrupted: the harness stopped while `launch` may have been running, and it is not safe to run twice. Check what it did before calling it again."}"#,
-            r#"{"id":"c1","tool":"peek","ok":true,"output":"done"}"#,
+            // Finished before the crash: its result is handed over from the log as it is.
+            r#"{"id":"c1","tool":"launch","ok":true,"output":"done"}"#,
+            // Running at the crash, and not safe to run twice.
+            r#"{"id":"c2","tool":"launch","ok":false,"output":"interrupted: the harness stopped while `launch` was running, and it is not safe to run twice. Check what it did before calling it again."}"#,
+            // Never started: run now.
+            r#"{"id":"c3","tool":"launch","ok":true,"output":"done"}"#,
+        ]
+    );
+    // The model got all three results, in one message, after its own.
+    assert_eq!(outcome.session.conversation().len(), 5);
+    assert_eq!(
+        payloads(&harness, "tool/start"),
+        [
+            r#"{"id":"c1","tool":"launch"}"#,
+            r#"{"id":"c2","tool":"launch"}"#,
+            r#"{"id":"c3","tool":"launch"}"#,
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_call_that_was_running_is_made_again_only_if_its_tool_says_it_is_safe() {
+    // The process died while `peek` was running, after `launch` had returned.
+    let request = asks(&[("c1", "launch"), ("c2", "peek")]);
+    let events = interrupted_run(request, 3).await;
+    let (harness, launches, peeks) = restarted(events, [say("launched and looked")]);
+
+    let outcome = harness.continue_run(&SessionId::new(MAIN)).await.unwrap();
+
+    assert_eq!(
+        outcome.status,
+        Status::Finished {
+            answer: "launched and looked".into()
+        }
+    );
+    assert_eq!(
+        (
+            launches.load(Ordering::SeqCst),
+            peeks.load(Ordering::SeqCst)
+        ),
+        (0, 1)
+    );
+    assert_eq!(
+        payloads(&harness, "tool/result"),
+        [
+            r#"{"id":"c1","tool":"launch","ok":true,"output":"done"}"#,
+            r#"{"id":"c2","tool":"peek","ok":true,"output":"done"}"#,
         ]
     );
 }
@@ -257,7 +308,7 @@ async fn continuing_a_finished_run_changes_nothing() {
 
 #[tokio::test]
 async fn a_run_that_keeps_being_restarted_is_given_up() {
-    let mut events = interrupted_run().await;
+    let mut events = interrupted_run(asks(&[("c1", "peek"), ("c2", "launch")]), 1).await;
     let main = SessionId::new(MAIN);
     // Two processes in a row pick the run up and die before finishing a step of it.
     for _ in 0..2 {

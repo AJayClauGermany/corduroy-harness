@@ -73,5 +73,5 @@ pub use corduroy_core as core;
 pub use corduroy_jsonl as jsonl;
 pub use corduroy_wasm as wasm;
 pub use harness::{Harness, HarnessError, Outcome, Status, shell_kernel};
-pub use session::{Effect, Journal, MAIN, Session, SessionInfo};
+pub use session::{Effect, Journal, MAIN, Session, SessionInfo, Sessions};
 pub use {oi_kit_agent, oi_kit_provider_types};

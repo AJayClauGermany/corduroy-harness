@@ -32,8 +32,9 @@ let harness = Harness::resume(provider, events)?;       // sessions come back fr
 harness.continue_run(&MAIN.into()).await?;              // finish what a crash interrupted
 ```
 
-Tool calls that may already have run are repeated only if their tool says that is safe; the
-model is told about the rest and decides for itself.
+Each tool call is logged when it starts and when it returns, so after a crash a finished
+call's result is reused, a call that never started simply runs, and the one that was running
+is repeated only if its tool says that is safe; otherwise the model is told and decides.
 
 ## Where the ideas come from
 
