@@ -5,7 +5,8 @@ a programmable loop; **everything else is a plugin**: the tools a model can call
 its system prompt, the kernels it computes in, and the reactions to what happens.
 
 Plugins are native Rust or **WebAssembly components** typed with [WIT](wit/corduroy.wit), so
-they can be written in any language that compiles to a component. A WebAssembly plugin starts
+they can be written in any language that compiles to a component (Rust today; JavaScript and
+Python have been [tried](docs/guest-languages.md)). A WebAssembly plugin starts
 with no authority at all and is granted scoped **capabilities**, in the spirit of Deno's
 permissions and Tauri's capabilities:
 
