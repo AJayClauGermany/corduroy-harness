@@ -192,9 +192,12 @@ no WASI in the linker, so a plugin has no clock, environment, filesystem or netw
 | `kernel` | run code in a host kernel | kernel name |
 | `events` | publish to the event stream | topic |
 
-- **Declared by imports.** A plugin's requirements are its component's imports, which the
-  toolchain derives from the host functions the code actually calls. `WasmPlugin::requires`
-  reports them; there is no separate manifest to fall out of step.
+- **Declared by imports.** A plugin's requirements are its component's imports;
+  `WasmPlugin::requires` reports them, and there is no separate manifest to fall out of step.
+  For Rust the toolchain derives the imports from the host functions the code actually calls.
+  JavaScript and Python components import every interface of the world they were built
+  against, used or not, so there the author declares by choosing a world (see
+  [Guest languages](guest-languages.md)).
 - **Granted by the host.** `WasmPlugin::grant(capability, scope)`. A scope is allow and deny
   globs; deny wins. `Scope::none()` links the interface but lets nothing through.
 - **Enforced twice.** At load time only granted interfaces are linked, so a plugin missing a
@@ -223,7 +226,7 @@ Everything else is a plugin, and a plugin may itself offer primitives to other p
 
 | Primitive | Status | Target |
 | --- | --- | --- |
-| Plugin tree (`App`, `Context`, effects, `inject`) | built | Add a restart limit so a plugin that keeps faulting is suspended, not retried forever. |
+| Plugin tree (`App`, `Context`, effects, `inject`) | built | Add a restart limit so a plugin that keeps faulting is suspended, not retried forever. A trapped WebAssembly plugin is re-instantiated on its next use and counts against that limit; in Python a stray `print` is a trap, so this is not a rare path. |
 | Event log | built | A fallible `Log` trait. A step's events are one atomic commit, stored before any listener or the model sees them. The core has the trait and the in-memory stream; stores are separate crates. |
 | Sessions | built | Many sessions, each with an id and an optional parent. Every event of a run names its session; events about the plugin tree name none. Still to do: events a plugin emits while serving a tool call do not carry that call's session. |
 | Tool lifecycle | partly built | Built: `tool/call`, `tool/start` and `tool/result` are each committed as they happen, per call, and `ToolSpec::replay_safe` says whether a call that was running at a crash may be repeated. Still to do: `read-only` (wanted by gates), results as content blocks rather than one string, progress and cancellation. |
@@ -248,7 +251,9 @@ Capabilities to add, each a WIT interface with a scope:
 | `plugins` | load, unload and list plugins | plugin name | an extension manager |
 | `http` | make a request | host | web fetch, remote MCP |
 | `secret` | read a named credential | secret name | providers, MCP servers |
-| `clock` | read the time | (none) | schedulers, timestamps in output |
+| `clock` | read the time | (none) | schedulers, timestamps in output, every JavaScript and Python plugin |
+| `random` | random bytes | (none) | identifiers, tokens |
+| `log` | write a diagnostic line to the event stream under the plugin's name | (none) | every plugin; where a guest's `print` goes |
 | `tools` | call a registered tool, through the gates | tool name | automations, code mode |
 
 Two rules follow from adding these:
@@ -258,7 +263,9 @@ Two rules follow from adding these:
 - **Time and randomness are host calls.** A WebAssembly plugin has no clock of its own, so
   given the same host-call results it computes the same thing. That is what makes
   [replaying a plugin](#durability) possible, and WASI stays out of the linker to
-  keep it true.
+  keep it true. The guest-language spike confirmed it for JavaScript and Python, with a
+  catch: built without WASI their clocks trap or stand still and their random numbers repeat,
+  so `clock`, `random` and `log` are needed as soon as either language is.
 
 ## Events, gates and hooks (*planned*)
 
@@ -407,8 +414,8 @@ What the core must guarantee, because the author is now the agent:
 - **Loading is a decision point.** `plugin/load` is asked of the gates with the component's
   hash and the capabilities it requests, so an approval plugin can ask the user. The answer
   and the hash are in the log.
-- **The core's own files are out of reach.** The log, grant files, the plugin store and the
-  host binary are denied to every `fs-write` and kernel-independent path scope, whatever a
+- **The core's own files are out of reach.** The log, grant files, the plugin store, the
+  cache of compiled plugins (machine code the host runs) and the host binary are denied to every `fs-write` and kernel-independent path scope, whatever a
   grant says. A plugin cannot edit its own grants.
 - **Cascades end.** An automation reacts to events and causes events. Each event already
   records its cause; the stream refuses a chain deeper than a limit, and fuel bounds each
@@ -421,14 +428,33 @@ harnesses' extensions are written in; the two existing Rust plugins are the refe
 the expected norm. There are two ways to run them, and they suit different authors:
 
 - *Compiled components* (`componentize-js`, `componentize-py`): each plugin is its own
-  component. Best for plugins people write and ship. To be checked: these toolchains
-  normally emit components that import WASI, which the linker deliberately lacks. The
-  options are building with those features disabled, or linking WASI interfaces that refuse
-  everything.
+  component. Best for plugins people write and ship.
 - *A script host*: one interpreter component, instantiated once per automation with that
   automation's script as its configuration and its own grants. Nothing is compiled, so the
   agent can write an automation as a file, and the core still enforces each one's grants
   separately. Best for automations the agent writes.
+
+Both were tried against the current world and both work; [Guest languages](guest-languages.md)
+has the measurements. What it settled:
+
+- **No WASI, and no change to the host.** Both toolchains can build a component that imports
+  only `corduroy:plugin/*` (`disableFeatures` for JavaScript, `--stub-wasi` for Python). A
+  default build imports WASI and is refused at load. Linking WASI interfaces that refuse
+  everything is not needed.
+- **A stubbed call is a trap.** `print`, `time.time()` and `open()` in Python, `fetch` and
+  `performance.now()` in JavaScript take the instance down, and JavaScript's `Date.now()`
+  returns the build time. Each language needs an SDK that routes these to `log`, `clock` and
+  `random`, and turns an uncaught exception into a tool error.
+- **These plugins import the whole world.** A plugin states what it needs by the world it is
+  built against; the SDK generates that world from a list of capabilities. The script host
+  imports everything and each automation is granted `Scope::none()` for what it may not use.
+- **Compiled code must be cached.** The components are 12 and 18 MB and take 25 to 30
+  seconds to compile at load (6 to 9 with parallel compilation), against milliseconds to
+  instantiate. A component is to be compiled once per process, and wasmtime's own cache,
+  which covers components, keeps the compiled code on disk: later loads took 0.6 to 0.7
+  seconds. Each instance holds 9 to 13 MB.
+- **The script host needs "compile once, instantiate many".** `WasmRuntime::load` compiles
+  on every call today.
 
 ## Sandboxing
 
@@ -492,14 +518,24 @@ the step it waits on is done.
    `tool/result`), `replay_safe`, `Harness::continue_run` and the restart limit. *Moved to step 4,* where their first users are: `read-only` (gates),
    and content blocks, progress and cancellation (which change the tool calling convention
    and are better settled together with waits).
-4. Gates, waits and signals; the rest of the tool lifecycle.
-5. Services across the WebAssembly boundary; `state`; `tools`.
+4. Gates, waits and signals; the rest of the tool lifecycle. Each export this adds to the
+   world is one every guest language must implement, so check a new export against
+   JavaScript and Python before it is fixed, async exports included (not yet tried).
+5. Services across the WebAssembly boundary; `state`; `tools`. Also `log`, `clock` and
+   `random`, brought forward from step 7 because JavaScript and Python plugins cannot do
+   without them, and re-instantiating a trapped plugin under the restart limit.
 6. Loading plugins safely: `plugins` with no amplification, the `plugin/load` decision
-   point, protected paths, the cascade limit.
+   point, protected paths, the cascade limit. With it, the compiled-code cache: a component
+   compiled once per process, wasmtime's `cache` and `parallel-compilation` features switched
+   on, and the cache directory among the protected paths.
 7. The remaining capabilities, each when its first plugin needs it; `provider` as a service;
    `ShellKernel` out of the core.
-8. A guest-language spike: one JavaScript and one Python plugin against the world, settling
-   the WASI question and the script host.
+8. Guest languages. *Spike done early:* one JavaScript and one Python plugin ran against the
+   world, which settled the WASI question (build without it) and showed the script host
+   works in both; see [Guest languages](guest-languages.md). *Still to do,* once steps 5 and
+   6 have landed: an SDK per language (bindings, `print` and clocks routed to host calls,
+   exceptions as tool errors, a world generated from a capability list, the build flags),
+   the script host as a shipped component, and one example plugin per language built in CI.
 9. Shipped plugins, MCP first.
 
 ## Open questions
@@ -522,5 +558,9 @@ the step it waits on is done.
 - **Blocking.** Tool calls run on blocking threads, but event listeners run inline on the
   thread that emitted, including inside the async loop. Slow listeners would need a queue.
 - **Guest SDK.** Each plugin repeats the same `generate!` and error-mapping boilerplate; a
-  small shared guest crate would remove it, and a second-language example would prove the
-  "any language" claim.
+  small shared guest crate would remove it. For JavaScript and Python an SDK is required
+  rather than nice to have (see [Guest languages](guest-languages.md)).
+- **Shipping precompiled plugins.** wasmtime's cache removes the cost of every load but the
+  first on a machine. Removing that one too means distributing compiled code, which is read
+  back with the `unsafe` `Component::deserialize`. Not needed now; if it ever is, that is the
+  place for one documented exception in a crate of its own.
