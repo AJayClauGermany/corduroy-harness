@@ -1,0 +1,17 @@
+[package]
+name = "corduroy-core"
+description = "Dependency-free core of the corduroy harness: plugin contexts, capabilities, the event stream, tools and kernels."
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
