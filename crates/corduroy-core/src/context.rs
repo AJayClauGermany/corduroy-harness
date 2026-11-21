@@ -45,7 +45,7 @@ pub enum FiberState {
 }
 
 /// A unit of functionality that can be loaded into, and cleanly removed from, an [`App`].
-pub trait Plugin: Send {
+pub trait Plugin: Send + Sync {
     /// Name used in events and diagnostics.
     fn name(&self) -> &str;
 
@@ -83,7 +83,7 @@ impl<F> fmt::Debug for FnPlugin<F> {
 /// Build a [`Plugin`] from a name, the services it injects and an `apply` closure.
 pub fn plugin_fn<F>(name: impl Into<String>, inject: &[&str], apply: F) -> FnPlugin<F>
 where
-    F: FnMut(&mut Context<'_>) -> Result<(), PluginError> + Send,
+    F: FnMut(&mut Context<'_>) -> Result<(), PluginError> + Send + Sync,
 {
     FnPlugin {
         name: name.into(),
@@ -94,7 +94,7 @@ where
 
 impl<F> Plugin for FnPlugin<F>
 where
-    F: FnMut(&mut Context<'_>) -> Result<(), PluginError> + Send,
+    F: FnMut(&mut Context<'_>) -> Result<(), PluginError> + Send + Sync,
 {
     fn name(&self) -> &str {
         &self.name
@@ -186,7 +186,7 @@ pub struct FiberInfo {
 }
 
 enum Effect {
-    Callback(Box<dyn FnOnce() + Send>),
+    Callback(Box<dyn FnOnce() + Send + Sync>),
     Service(String),
     Listener(ListenerId),
     Child(FiberId),
@@ -568,7 +568,7 @@ impl Context<'_> {
 
     /// Record a side effect by giving the function that undoes it. Disposers run in reverse
     /// order of registration when the plugin is unloaded.
-    pub fn effect(&mut self, dispose: impl FnOnce() + Send + 'static) {
+    pub fn effect(&mut self, dispose: impl FnOnce() + Send + Sync + 'static) {
         self.push(Effect::Callback(Box::new(dispose)));
     }
 

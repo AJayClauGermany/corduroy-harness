@@ -1,39 +1,71 @@
-//! A minimal agent harness.
+//! A plugin-first agent harness.
 //!
-//! The harness runs a simple loop:
+//! Almost everything here is a plugin. The harness provides a small frame (a plugin tree, an
+//! event stream, three registries and a loop) and plugins fill it in: the tools a model can
+//! call, the text in its system prompt, the kernels it computes in, and the reactions to
+//! what happens. Plugins can be native Rust or WebAssembly components, and WebAssembly
+//! plugins hold only the capabilities they were granted.
 //!
-//! 1. Ask the [`Model`] for the next [`Action`], given everything seen so far.
-//! 2. If the action is [`Action::CallTool`], run the tool and record its output
-//!    (or its error) in the [`Transcript`]. Tool errors are fed back to the model
-//!    rather than aborting the run, so it can recover.
-//! 3. If the action is [`Action::Finish`], stop. Otherwise repeat, up to
-//!    [`Config::max_steps`].
+//! The design borrows one idea from each of six harnesses:
 //!
-//! The model is a trait, so tests can drive the loop with a [`ScriptedModel`] or a
-//! plain closure and no network or LLM is needed.
+//! | From | Idea | Where |
+//! | --- | --- | --- |
+//! | Cordis | Plugins whose effects revert on unload and which follow their dependencies | [`corduroy_core::context`] |
+//! | Prime Intellect | Long-lived kernels that keep state between calls | [`corduroy_core::kernel`] |
+//! | Hermes | Skills the agent writes and repairs for itself | the `skills` plugin |
+//! | Pi | A minimal toolset: read, write, edit, bash | the `pi-tools` plugin |
+//! | `OpenHands` | An append-only event stream as the source of truth | [`corduroy_core::event`], [`session`] |
+//! | Goose | The base abstractions, from oi-kit | [`harness`] |
+//!
+//! oi-kit supplies the provider, message and conversation types and the state machine that
+//! runs the loop; this crate re-exports them as [`oi_kit_agent`] and [`oi_kit_provider_types`].
 //!
 //! ```
-//! use corduroy_harness::{Action, Agent, Echo, ScriptedModel, Status, ToolRegistry};
+//! use std::sync::Arc;
+//! use corduroy_harness::scripted::{ScriptedProvider, call, say};
+//! use corduroy_harness::{Harness, Status};
+//! use corduroy_harness::core::{TOOLS, ToolSpec, Tools, plugin_fn, tool_fn};
+//! use serde_json::json;
 //!
-//! let model = ScriptedModel::new([
-//!     Action::CallTool { name: "echo".into(), input: "hi".into() },
-//!     Action::Finish { answer: "done".into() },
+//! # tokio::runtime::Runtime::new()?.block_on(async {
+//! // A model that calls one tool and then answers. No network, no LLM.
+//! let model = ScriptedProvider::new([
+//!     call("call-1", "shout", &json!({"text": "hi"})),
+//!     say("done"),
 //! ]);
-//! let mut agent = Agent::new(model, ToolRegistry::new().with(Echo));
+//! let mut harness = Harness::new(Arc::new(model))?;
 //!
-//! let outcome = agent.run("say hi")?;
+//! // A native plugin that contributes the tool. Unloading it would take the tool away.
+//! harness.plugin(plugin_fn("shouter", &[TOOLS], |ctx| {
+//!     let spec = ToolSpec {
+//!         name: "shout".into(),
+//!         description: "Upper-case the input.".into(),
+//!         input_schema: r#"{"type":"object"}"#.into(),
+//!     };
+//!     let tools = ctx.service::<Tools>(TOOLS)?;
+//!     tools.register(ctx, "shout", Arc::new(tool_fn(spec, |input| Ok(input.to_uppercase()))))?;
+//!     Ok(())
+//! }));
+//!
+//! let outcome = harness.run("say hi loudly").await?;
 //! assert_eq!(outcome.status, Status::Finished { answer: "done".into() });
-//! # Ok::<(), corduroy_harness::ModelError>(())
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! # })?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
-pub mod agent;
-pub mod builtin;
-pub mod model;
-pub mod tool;
-pub mod transcript;
+#![expect(
+    clippy::multiple_crate_versions,
+    reason = "the wasmtime and oi-kit dependency trees each pull several versions of shared crates"
+)]
 
-pub use agent::{Agent, Config, Outcome, Status};
-pub use builtin::{Add, Echo};
-pub use model::{Action, Model, ModelError, ScriptedModel};
-pub use tool::{Tool, ToolError, ToolRegistry};
-pub use transcript::{Entry, Transcript};
+pub mod harness;
+pub mod scripted;
+pub mod session;
+pub mod tools;
+
+pub use corduroy_core as core;
+pub use corduroy_wasm as wasm;
+pub use harness::{Harness, HarnessError, Outcome, Status, shell_kernel};
+pub use session::{Effect, Journal, Session};
+pub use {oi_kit_agent, oi_kit_provider_types};

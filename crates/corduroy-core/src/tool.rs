@@ -64,6 +64,41 @@ pub trait Tool: Send + Sync {
     fn call(&self, input: &str) -> Result<String, ToolError>;
 }
 
+/// A [`Tool`] built from a spec and a closure. See [`tool_fn`].
+pub struct FnTool<F> {
+    spec: ToolSpec,
+    call: F,
+}
+
+impl<F> fmt::Debug for FnTool<F> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FnTool")
+            .field("spec", &self.spec)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Build a [`Tool`] from its spec and the function that runs it.
+pub const fn tool_fn<F>(spec: ToolSpec, call: F) -> FnTool<F>
+where
+    F: Fn(&str) -> Result<String, ToolError> + Send + Sync,
+{
+    FnTool { spec, call }
+}
+
+impl<F> Tool for FnTool<F>
+where
+    F: Fn(&str) -> Result<String, ToolError> + Send + Sync,
+{
+    fn spec(&self) -> ToolSpec {
+        self.spec.clone()
+    }
+
+    fn call(&self, input: &str) -> Result<String, ToolError> {
+        (self.call)(input)
+    }
+}
+
 impl Registry<dyn Tool> {
     /// The specs of every registered tool, sorted by name.
     #[must_use]
@@ -91,29 +126,24 @@ mod tests {
 
     use super::*;
 
-    struct Shout;
-
-    impl Tool for Shout {
-        fn spec(&self) -> ToolSpec {
-            ToolSpec {
-                name: "shout".into(),
-                description: "Upper-cases its input.".into(),
-                input_schema: "{}".into(),
-            }
-        }
-
-        fn call(&self, input: &str) -> Result<String, ToolError> {
+    fn shout() -> impl Tool {
+        let spec = ToolSpec {
+            name: "shout".into(),
+            description: "Upper-cases its input.".into(),
+            input_schema: "{}".into(),
+        };
+        tool_fn(spec, |input| {
             if input.is_empty() {
                 return Err(ToolError::InvalidInput("nothing to shout".into()));
             }
             Ok(input.to_uppercase())
-        }
+        })
     }
 
     #[test]
     fn dispatches_by_name_and_reports_failures_as_data() {
         let tools = Tools::new();
-        tools.insert("shout", Arc::new(Shout)).unwrap();
+        tools.insert("shout", Arc::new(shout())).unwrap();
 
         assert_eq!(tools.call("shout", "hi"), Ok("HI".to_owned()));
         assert_eq!(tools.specs().len(), 1);

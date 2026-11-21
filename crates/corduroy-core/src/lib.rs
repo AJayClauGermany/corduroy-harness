@@ -55,4 +55,4 @@ pub use kernel::{Cell, KERNELS, Kernel, KernelError, Kernels, ShellKernel};
 pub use pattern::Pattern;
 pub use prompt::{PROMPTS, PromptPart, Prompts};
 pub use registry::{Duplicate, Registry};
-pub use tool::{TOOLS, Tool, ToolError, ToolSpec, Tools};
+pub use tool::{FnTool, TOOLS, Tool, ToolError, ToolSpec, Tools, tool_fn};
