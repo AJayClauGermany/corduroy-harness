@@ -457,6 +457,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "corduroy-core",
+ "corduroy-jsonl",
  "corduroy-test-support",
  "corduroy-wasm",
  "futures",
@@ -466,6 +467,15 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "corduroy-jsonl"
+version = "0.1.0"
+dependencies = [
+ "corduroy-core",
+ "corduroy-test-support",
+ "serde_json",
 ]
 
 [[package]]

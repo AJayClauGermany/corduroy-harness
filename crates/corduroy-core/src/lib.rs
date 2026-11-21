@@ -50,7 +50,7 @@ pub use context::{
     App, Context, ContextError, FiberId, FiberInfo, FiberState, FnPlugin, Plugin, PluginError,
     plugin_fn,
 };
-pub use event::{Draft, Event, EventId, EventStream, ListenerId, Source};
+pub use event::{Draft, Event, EventId, EventStream, ListenerId, Log, LogError, Source};
 pub use kernel::{Cell, KERNELS, Kernel, KernelError, Kernels, ShellKernel};
 pub use pattern::Pattern;
 pub use prompt::{PROMPTS, PromptPart, Prompts};

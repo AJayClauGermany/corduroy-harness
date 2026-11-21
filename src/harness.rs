@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use corduroy_core::{
-    App, ContextError, Draft, EventStream, FiberId, KERNELS, Kernel, Kernels, PROMPTS, Plugin,
-    Prompts, ShellKernel, Source, TOOLS, Tools, plugin_fn,
+    App, ContextError, Draft, EventStream, FiberId, KERNELS, Kernel, Kernels, LogError, PROMPTS,
+    Plugin, Prompts, ShellKernel, Source, TOOLS, Tools, plugin_fn,
 };
 use oi_kit_agent::inference::InferenceRunner;
 use oi_kit_agent::machine::{StateMachine, Step};
@@ -34,6 +34,8 @@ pub enum HarnessError {
     Context(ContextError),
     /// The agent loop failed in a way no operation recovered from.
     Run(String),
+    /// The event log could not store a commit. Nothing after it was recorded or shown.
+    Log(LogError),
 }
 
 impl fmt::Display for HarnessError {
@@ -41,6 +43,7 @@ impl fmt::Display for HarnessError {
         match self {
             Self::Context(error) => write!(f, "plugin tree: {error}"),
             Self::Run(reason) => write!(f, "run failed: {reason}"),
+            Self::Log(error) => write!(f, "{error}"),
         }
     }
 }
@@ -53,9 +56,19 @@ impl From<ContextError> for HarnessError {
     }
 }
 
+impl From<LogError> for HarnessError {
+    fn from(error: LogError) -> Self {
+        Self::Log(error)
+    }
+}
+
 impl From<anyhow::Error> for HarnessError {
     fn from(error: anyhow::Error) -> Self {
-        Self::Run(format!("{error:#}"))
+        // A refused commit keeps its type on the way up through the loop.
+        match error.downcast::<LogError>() {
+            Ok(error) => Self::Log(error),
+            Err(error) => Self::Run(format!("{error:#}")),
+        }
     }
 }
 
@@ -281,7 +294,8 @@ impl Harness {
     /// # Errors
     ///
     /// Returns [`HarnessError::Run`] if an operation fails outright, for example because two
-    /// plugins registered tools the model cannot tell apart.
+    /// plugins registered tools the model cannot tell apart, or [`HarnessError::Log`] if the
+    /// event log could not store a step.
     pub async fn run(&self, prompt: &str) -> Result<Outcome, HarnessError> {
         let prompt = Message::user()
             .with_text(prompt)
@@ -295,7 +309,7 @@ impl Harness {
         let session = machine
             .run(self.journal.as_ref(), SESSION, &emitter)
             .await?;
-        self.events().emit(Draft::new(Source::Host, "turn/end"));
+        self.events().emit(Draft::new(Source::Host, "turn/end"))?;
         Ok(Outcome {
             status: status_of(&session),
             session,

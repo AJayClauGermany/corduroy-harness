@@ -19,7 +19,7 @@ use std::fmt;
 use std::mem;
 use std::sync::Arc;
 
-use crate::event::{Draft, Event, EventId, EventStream, ListenerId, Source};
+use crate::event::{Draft, Event, EventId, EventStream, ListenerId, LogError, Source};
 use crate::json;
 use crate::pattern::Pattern;
 
@@ -128,6 +128,12 @@ impl fmt::Display for PluginError {
 }
 
 impl Error for PluginError {}
+
+impl From<LogError> for PluginError {
+    fn from(error: LogError) -> Self {
+        Self(error.to_string())
+    }
+}
 
 impl From<ContextError> for PluginError {
     fn from(error: ContextError) -> Self {
@@ -529,8 +535,12 @@ impl App {
             payload.push_str(&json::string(reason));
         }
         payload.push('}');
-        self.events
-            .emit(Draft::new(Source::Host, topic).payload(payload));
+        // Nobody is waiting on a lifecycle event. If the log refused it the stream is closed,
+        // and whoever commits next is told.
+        drop(
+            self.events
+                .emit(Draft::new(Source::Host, topic).payload(payload)),
+        );
     }
 }
 
@@ -620,7 +630,15 @@ impl Context<'_> {
     }
 
     /// Emit an event with this plugin as its source.
-    pub fn emit(&self, topic: impl Into<String>, payload: impl Into<String>) -> EventId {
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`LogError`] if the event could not be stored.
+    pub fn emit(
+        &self,
+        topic: impl Into<String>,
+        payload: impl Into<String>,
+    ) -> Result<EventId, LogError> {
         let source = Source::Plugin(self.name().to_owned());
         self.app
             .events
@@ -830,15 +848,17 @@ mod tests {
         let id = app.plugin(plugin_fn("ears", &[], move |ctx| {
             let heard = Arc::clone(&heard);
             ctx.on("note/*", move |event| note(&heard, &event.payload));
-            ctx.emit("note/hello", "from apply");
+            ctx.emit("note/hello", "from apply")?;
             Ok(())
         }));
 
         app.events()
-            .emit(Draft::new(Source::User, "note/a").payload("while loaded"));
+            .emit(Draft::new(Source::User, "note/a").payload("while loaded"))
+            .unwrap();
         app.dispose(id).unwrap();
         app.events()
-            .emit(Draft::new(Source::User, "note/b").payload("after dispose"));
+            .emit(Draft::new(Source::User, "note/b").payload("after dispose"))
+            .unwrap();
 
         assert_eq!(entries(&log), ["from apply", "while loaded"]);
         let lifecycle: Vec<String> = app

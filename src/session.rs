@@ -24,7 +24,9 @@ use oi_kit_agent::inference::InferenceEffect;
 use oi_kit_agent::machine::{EffectHandler, MachineSession, SessionLoader};
 use oi_kit_agent::operation::{Emitter, MachineEffect};
 use oi_kit_provider_types::conversation::Conversation;
-use oi_kit_provider_types::conversation::message::{Message, MessageContent};
+use oi_kit_provider_types::conversation::message::{
+    Message, MessageContent, ToolRequest, ToolResponse,
+};
 use oi_kit_provider_types::conversation::token_usage::ProviderUsage;
 use rmcp::model::Role;
 use serde_json::{Value, json};
@@ -94,7 +96,58 @@ struct State {
     calls: BTreeMap<String, (EventId, String)>,
 }
 
+/// One step's worth of events, and what they change in the projection once stored.
+#[derive(Default)]
+struct Batch {
+    drafts: Vec<Draft>,
+    messages: Vec<Message>,
+    /// Tool-call id to the position of its `tool/call` draft and the tool's name.
+    opened: BTreeMap<String, (usize, String)>,
+    /// Ids of the tool calls answered in this batch.
+    closed: Vec<String>,
+}
+
+impl Batch {
+    /// Add the `tool/call` event for `request`, caused by the message at `message`.
+    fn call(&mut self, request: &ToolRequest, message: usize) {
+        let (tool, input) = request.tool_call.as_ref().map_or_else(
+            |error| ("<malformed>".to_owned(), json!({"error": error.message})),
+            |call| (call.name.to_string(), json!(call.arguments)),
+        );
+        let payload = json!({"id": request.id, "tool": tool, "input": input});
+        self.opened
+            .insert(request.id.clone(), (self.drafts.len(), tool));
+        self.drafts.push(
+            Draft::new(Source::Agent, "tool/call")
+                .payload(payload.to_string())
+                .cause_in_batch(message),
+        );
+    }
+
+    /// Add the `tool/result` event for `response`. It is caused by its call, which is in this
+    /// batch, or is the `open` one from an earlier commit, or else is unknown, in which case
+    /// the message at `message` stands in.
+    fn result(&mut self, response: &ToolResponse, open: Option<(EventId, String)>, message: usize) {
+        let draft = Draft::new(Source::Environment, "tool/result");
+        let (draft, tool) = match (self.opened.get(&response.id), open) {
+            (Some((call, tool)), _) => (draft.cause_in_batch(*call), tool.clone()),
+            (None, Some((call, tool))) => (draft.cause(call), tool),
+            (None, None) => (draft.cause_in_batch(message), String::new()),
+        };
+        let (ok, output) = match &response.tool_result {
+            Ok(result) => (result.is_error != Some(true), text_of(result)),
+            Err(error) => (false, error.message.to_string()),
+        };
+        let payload = json!({"id": response.id, "tool": tool, "ok": ok, "output": output});
+        self.drafts.push(draft.payload(payload.to_string()));
+        self.closed.push(response.id.clone());
+    }
+}
+
 /// Records a session's effects on the event stream and rebuilds the session from it.
+///
+/// The effects of one step of the loop become one commit: they are stored together or not
+/// at all, and the conversation the next step sees changes only once they are.
 pub struct Journal {
     id: String,
     events: Arc<EventStream>,
@@ -153,58 +206,64 @@ impl Journal {
     }
 
     /// Append `message` to the conversation and publish it, along with an event for each
-    /// tool call and tool result it carries.
+    /// tool call and tool result it carries, as one commit.
     ///
     /// # Errors
     ///
-    /// Fails if the message cannot be encoded as JSON.
+    /// Fails if the message cannot be encoded as JSON or the commit cannot be stored.
     pub fn record(&self, message: &Message) -> Result<EventId> {
+        let mut batch = Batch::default();
+        let position = self.draft_message(&mut batch, message)?;
+        let ids = self.commit(batch)?;
+        ids.get(position)
+            .copied()
+            .context("the commit returned no id for the message")
+    }
+
+    /// Add `message` to `batch`, with an event for each tool call and tool result it carries.
+    /// Returns the position of the `message` event in the batch.
+    fn draft_message(&self, batch: &mut Batch, message: &Message) -> Result<usize> {
         let payload = serde_json::to_string(message).context("message is not valid JSON")?;
         let source = match message.role {
             Role::Assistant => Source::Agent,
             Role::User if message.is_tool_response() => Source::Environment,
             Role::User => Source::User,
         };
-        self.state().conversation.push(message.clone());
-        // Emitting happens with the state unlocked: a listener may record in turn.
-        let recorded = self
-            .events
-            .emit(Draft::new(source, MESSAGE).payload(payload));
+        let recorded = batch.drafts.len();
+        batch
+            .drafts
+            .push(Draft::new(source, MESSAGE).payload(payload));
+        batch.messages.push(message.clone());
         for content in &message.content {
             match content {
-                MessageContent::ToolRequest(request) => {
-                    let (tool, input) = request.tool_call.as_ref().map_or_else(
-                        |error| ("<malformed>".to_owned(), json!({"error": error.message})),
-                        |call| (call.name.to_string(), json!(call.arguments)),
-                    );
-                    let payload = json!({"id": request.id, "tool": tool, "input": input});
-                    let draft = Draft::new(Source::Agent, "tool/call")
-                        .payload(payload.to_string())
-                        .cause(recorded);
-                    let call = self.events.emit(draft);
-                    self.state().calls.insert(request.id.clone(), (call, tool));
-                }
+                MessageContent::ToolRequest(request) => batch.call(request, recorded),
                 MessageContent::ToolResponse(response) => {
-                    let (cause, tool) = self
-                        .state()
-                        .calls
-                        .remove(&response.id)
-                        .unwrap_or((recorded, String::new()));
-                    let (ok, output) = match &response.tool_result {
-                        Ok(result) => (result.is_error != Some(true), text_of(result)),
-                        Err(error) => (false, error.message.to_string()),
-                    };
-                    let payload =
-                        json!({"id": response.id, "tool": tool, "ok": ok, "output": output});
-                    let draft = Draft::new(Source::Environment, "tool/result")
-                        .payload(payload.to_string())
-                        .cause(cause);
-                    self.events.emit(draft);
+                    let open = self.state().calls.get(&response.id).cloned();
+                    batch.result(response, open, recorded);
                 }
                 _ => {}
             }
         }
         Ok(recorded)
+    }
+
+    /// Store `batch` as one commit, then bring the projection up to date with it.
+    fn commit(&self, batch: Batch) -> Result<Vec<EventId>> {
+        let ids = self.events.commit(batch.drafts)?;
+        let mut state = self.state();
+        for message in batch.messages {
+            state.conversation.push(message);
+        }
+        for (call, (position, tool)) in batch.opened {
+            if let Some(id) = ids.get(position) {
+                state.calls.insert(call, (*id, tool));
+            }
+        }
+        for call in batch.closed {
+            state.calls.remove(&call);
+        }
+        drop(state);
+        Ok(ids)
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
@@ -237,18 +296,21 @@ impl EffectHandler<Session, Effect> for Journal {
         effects: &mut [Effect],
         _emit: &Emitter,
     ) -> Result<()> {
+        let mut batch = Batch::default();
         for effect in effects {
             match effect {
                 Effect::Message(message) => {
-                    self.record(message)?;
+                    self.draft_message(&mut batch, message)?;
                 }
                 Effect::Usage(usage) => {
                     let payload = serde_json::to_string(usage).context("usage is not JSON")?;
-                    self.events
-                        .emit(Draft::new(Source::Agent, "usage").payload(payload));
+                    batch
+                        .drafts
+                        .push(Draft::new(Source::Agent, "usage").payload(payload));
                 }
             }
         }
+        self.commit(batch)?;
         Ok(())
     }
 }

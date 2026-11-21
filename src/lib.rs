@@ -65,6 +65,7 @@ pub mod session;
 pub mod tools;
 
 pub use corduroy_core as core;
+pub use corduroy_jsonl as jsonl;
 pub use corduroy_wasm as wasm;
 pub use harness::{Harness, HarnessError, Outcome, Status, shell_kernel};
 pub use session::{Effect, Journal, Session};
