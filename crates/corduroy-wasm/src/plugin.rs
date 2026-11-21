@@ -225,6 +225,7 @@ impl Plugin for WasmPlugin {
                     name: spec.name,
                     description: spec.description,
                     input_schema: spec.input_schema,
+                    replay_safe: spec.replay_safe,
                 },
             };
             tools.register(ctx, name, Arc::new(tool))?;
@@ -267,6 +268,10 @@ fn deliver(instance: &Instance, event: &Event) {
     }
     let event = types::Event {
         id: event.id.get(),
+        session: event
+            .session
+            .as_ref()
+            .map(|session| session.as_str().to_owned()),
         source: event.source.to_string(),
         cause: event.cause.map(corduroy_core::EventId::get),
         topic: event.topic.clone(),

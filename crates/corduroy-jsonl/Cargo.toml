@@ -1,0 +1,22 @@
+[package]
+name = "corduroy-jsonl"
+description = "An append-only JSON Lines file as the durable log behind a corduroy event stream."
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+corduroy-core = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+corduroy-test-support = { workspace = true }

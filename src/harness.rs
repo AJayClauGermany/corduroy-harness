@@ -6,26 +6,25 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use corduroy_core::{
-    App, ContextError, Draft, EventStream, FiberId, KERNELS, Kernel, Kernels, PROMPTS, Plugin,
-    Prompts, ShellKernel, Source, TOOLS, Tools, plugin_fn,
+    App, ContextError, EventStream, FiberId, KERNELS, Kernel, Kernels, LogError, PROMPTS, Plugin,
+    Prompts, SessionId, ShellKernel, TOOLS, Tools, plugin_fn,
 };
 use oi_kit_agent::inference::InferenceRunner;
 use oi_kit_agent::machine::{StateMachine, Step};
 use oi_kit_agent::max_turns::MaxTurnsOperation;
-use oi_kit_agent::operation::{Emitter, Operation, ends_turn};
+use oi_kit_agent::operation::{Emitter, Operation, ends_turn, messages_since_kickoff};
 use oi_kit_agent::tool::ToolOperation;
+use oi_kit_agent::tool_call_state::pending_tool_requests;
 use oi_kit_agent::unhandled_tool_calls::UnhandledToolCallsOperation;
 use oi_kit_provider_types::base::Provider;
 use oi_kit_provider_types::conversation::message::{Message, MessageErrorKind};
 use oi_kit_provider_types::model::ModelConfig;
+use rmcp::model::{CallToolResult, ContentBlock};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::session::{Effect, Journal, Session};
+use crate::session::{Effect, Journal, MAIN, Progress, Session, SessionInfo, Sessions};
 use crate::tools::{PluginTools, PromptOperation};
-
-/// The id of the one session a [`Harness`] runs.
-const SESSION: &str = "main";
 
 /// Why the harness could not be set up or a run could not complete.
 #[derive(Debug)]
@@ -34,6 +33,15 @@ pub enum HarnessError {
     Context(ContextError),
     /// The agent loop failed in a way no operation recovered from.
     Run(String),
+    /// The event log could not store a commit. Nothing after it was recorded or shown.
+    Log(LogError),
+    /// No session has this id.
+    UnknownSession(SessionId),
+    /// A session with this id already exists.
+    DuplicateSession(SessionId),
+    /// The session has a run that never reached its end, so it cannot take a new prompt.
+    /// [`Harness::continue_run`] finishes it.
+    Unfinished(SessionId),
 }
 
 impl fmt::Display for HarnessError {
@@ -41,6 +49,12 @@ impl fmt::Display for HarnessError {
         match self {
             Self::Context(error) => write!(f, "plugin tree: {error}"),
             Self::Run(reason) => write!(f, "run failed: {reason}"),
+            Self::Log(error) => write!(f, "{error}"),
+            Self::UnknownSession(id) => write!(f, "there is no session `{id}`"),
+            Self::DuplicateSession(id) => write!(f, "session `{id}` already exists"),
+            Self::Unfinished(id) => {
+                write!(f, "session `{id}` has an unfinished run: continue it first")
+            }
         }
     }
 }
@@ -53,9 +67,19 @@ impl From<ContextError> for HarnessError {
     }
 }
 
+impl From<LogError> for HarnessError {
+    fn from(error: LogError) -> Self {
+        Self::Log(error)
+    }
+}
+
 impl From<anyhow::Error> for HarnessError {
     fn from(error: anyhow::Error) -> Self {
-        Self::Run(format!("{error:#}"))
+        // A refused commit keeps its type on the way up through the loop.
+        match error.downcast::<LogError>() {
+            Ok(error) => Self::Log(error),
+            Err(error) => Self::Run(format!("{error:#}")),
+        }
     }
 }
 
@@ -101,6 +125,9 @@ pub struct Outcome {
 
 /// An agent: a plugin tree, an event stream and a programmable loop around a model.
 ///
+/// A harness holds any number of sessions, each a conversation of its own on the one stream.
+/// It starts with the session [`MAIN`], which [`run`](Self::run) uses.
+///
 /// The harness itself does very little. It provides the three registries plugins contribute
 /// to ([`Tools`], [`Prompts`], [`Kernels`]), journals the conversation to the event stream,
 /// and lines up oi-kit operations into a loop. Tools, prompt text, kernels and reactions to
@@ -110,11 +137,12 @@ pub struct Harness {
     tools: Arc<Tools>,
     prompts: Arc<Prompts>,
     kernels: Arc<Kernels>,
-    journal: Arc<Journal>,
+    sessions: Arc<Sessions>,
     provider: Arc<dyn Provider>,
     model: ModelConfig,
     system: String,
     max_turns: u32,
+    restart_limit: u32,
     operations: Vec<Arc<dyn Operation<Session, Effect>>>,
 }
 
@@ -140,18 +168,19 @@ impl Harness {
     }
 
     /// A harness that continues from an existing event stream, such as one rebuilt with
-    /// [`EventStream::replay`]. The conversation is whatever the stream's `message` events
-    /// add up to.
+    /// [`EventStream::replay`] or opened from a log on disk. Its sessions are the ones the
+    /// stream holds, and each conversation is whatever that session's `message` events add
+    /// up to.
     ///
     /// # Errors
     ///
-    /// Returns [`HarnessError::Run`] if the stream's messages cannot be decoded, or
-    /// [`HarnessError::Context`] if the built-in services cannot be provided.
+    /// Returns [`HarnessError::Log`] if the stream cannot store the start of the main
+    /// session, or [`HarnessError::Context`] if the built-in services cannot be provided.
     pub fn resume(
         provider: Arc<dyn Provider>,
         events: Arc<EventStream>,
     ) -> Result<Self, HarnessError> {
-        let journal = Arc::new(Journal::new(SESSION, Arc::clone(&events))?);
+        let sessions = Arc::new(Sessions::load(Arc::clone(&events))?);
         let tools = Arc::new(Tools::new());
         let prompts = Arc::new(Prompts::new());
         let kernels = Arc::new(Kernels::new());
@@ -164,11 +193,12 @@ impl Harness {
             tools,
             prompts,
             kernels,
-            journal,
+            sessions,
             provider,
             model: ModelConfig::new("default"),
             system: String::new(),
             max_turns: 25,
+            restart_limit: 5,
             operations: Vec::new(),
         })
     }
@@ -191,6 +221,15 @@ impl Harness {
     #[must_use]
     pub const fn with_max_turns(mut self, max_turns: u32) -> Self {
         self.max_turns = max_turns;
+        self
+    }
+
+    /// Give up on an unfinished run once it has been picked up this many times without
+    /// reaching its end, so a step that crashes the process every time does not do so
+    /// forever. See [`continue_run`](Self::continue_run).
+    #[must_use]
+    pub const fn with_restart_limit(mut self, restart_limit: u32) -> Self {
+        self.restart_limit = restart_limit;
         self
     }
 
@@ -231,11 +270,37 @@ impl Harness {
         &self.kernels
     }
 
-    /// The journal that persists effects to the event stream. It is the `runtime` argument
-    /// for callers that drive a [`StateMachine`] themselves.
+    /// Start a session called `id`, recording `parent` as the session it came from. The new
+    /// session has an empty conversation of its own.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HarnessError::DuplicateSession`] if `id` is taken,
+    /// [`HarnessError::UnknownSession`] if `parent` does not exist, or [`HarnessError::Log`]
+    /// if the start could not be stored.
+    pub fn start_session(
+        &self,
+        id: impl Into<SessionId>,
+        parent: Option<&SessionId>,
+    ) -> Result<SessionId, HarnessError> {
+        self.sessions.start(id.into(), parent)
+    }
+
+    /// Every session, in order of id.
     #[must_use]
-    pub const fn journal(&self) -> &Arc<Journal> {
-        &self.journal
+    pub fn session_list(&self) -> Vec<SessionInfo> {
+        self.sessions.list()
+    }
+
+    /// The journal that persists the effects of `session` to the event stream. It is the
+    /// `runtime` argument for callers that drive a [`StateMachine`] themselves.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HarnessError::UnknownSession`] if there is no such session, or
+    /// [`HarnessError::Run`] if its events cannot be decoded.
+    pub fn journal(&self, session: &SessionId) -> Result<Arc<Journal>, HarnessError> {
+        self.sessions.journal(session)
     }
 
     /// The loop, as the ordered steps a [`StateMachine`] walks: custom operations, the
@@ -243,8 +308,10 @@ impl Harness {
     /// the model.
     #[must_use]
     pub fn steps(&self) -> Vec<Step<'static, Session, Effect>> {
-        let tools =
-            ToolOperation::new().with_provider(Arc::new(PluginTools::new(Arc::clone(&self.tools))));
+        let tools = ToolOperation::new().with_provider(Arc::new(PluginTools::new(
+            Arc::clone(&self.tools),
+            Arc::clone(&self.sessions),
+        )));
         let prompt = PromptOperation::new(self.system.clone(), Arc::clone(&self.prompts));
         let model: InferenceRunner<'static, Session, Effect> =
             InferenceRunner::new(Arc::clone(&self.provider), self.model.clone());
@@ -265,41 +332,150 @@ impl Harness {
         steps
     }
 
-    /// A state machine over [`steps`](Self::steps). Call its `step` and `apply` with
-    /// [`journal`](Self::journal) to advance the loop one step at a time.
+    /// A state machine over [`steps`](Self::steps). Call its `step` and `apply` with a
+    /// session's [`journal`](Self::journal) to advance the loop one step at a time.
     #[must_use]
     pub fn machine(&self, cancel: CancellationToken) -> StateMachine<'static, Session, Effect> {
         StateMachine::new(self.steps(), cancel)
     }
 
-    /// Add `prompt` to the conversation as the user and run the loop until the model
-    /// answers, runs out of turns or fails.
+    /// Add `prompt` to the main session's conversation as the user and run the loop until
+    /// the model answers, runs out of turns or fails. See [`run_in`](Self::run_in).
+    ///
+    /// # Errors
+    ///
+    /// As [`run_in`](Self::run_in).
+    pub async fn run(&self, prompt: &str) -> Result<Outcome, HarnessError> {
+        self.run_in(&SessionId::new(MAIN), prompt).await
+    }
+
+    /// Add `prompt` to the conversation of `session` as the user and run the loop until the
+    /// model answers, runs out of turns or fails.
     ///
     /// Tool failures and model failures are recorded in the conversation, not returned from
     /// here: see [`Status`].
     ///
     /// # Errors
     ///
-    /// Returns [`HarnessError::Run`] if an operation fails outright, for example because two
-    /// plugins registered tools the model cannot tell apart.
-    pub async fn run(&self, prompt: &str) -> Result<Outcome, HarnessError> {
+    /// Returns [`HarnessError::UnknownSession`] if there is no such session,
+    /// [`HarnessError::Unfinished`] if its last run never reached its end,
+    /// [`HarnessError::Run`] if an operation fails outright, for example because two plugins
+    /// registered tools the model cannot tell apart, or [`HarnessError::Log`] if the event
+    /// log could not store a step.
+    pub async fn run_in(&self, session: &SessionId, prompt: &str) -> Result<Outcome, HarnessError> {
+        let journal = self.journal(session)?;
+        if journal.unfinished() {
+            return Err(HarnessError::Unfinished(session.clone()));
+        }
         let prompt = Message::user()
             .with_text(prompt)
             .with_generated_id_if_missing();
-        self.journal.record(&prompt)?;
+        journal.record(&prompt)?;
+        self.drive(&journal).await
+    }
+
+    /// Pick up the run of `session` that never reached its end, because the process died or
+    /// [`run_in`](Self::run_in) returned an error, and take it to its end without a new
+    /// prompt. If the session has no such run, nothing happens and the outcome is that of
+    /// its last one.
+    ///
+    /// The log says how far each tool call the model is still waiting on got:
+    ///
+    /// - It returned, and only handing the result to the model was cut short: the result is
+    ///   taken from the log and the tool is not run again.
+    /// - It never started: it runs now, like any other call.
+    /// - It was started and nothing more is known: it is made again if its tool is
+    ///   [`replay_safe`](corduroy_core::ToolSpec::replay_safe). Otherwise it is answered
+    ///   with an error saying it was interrupted, and the model decides what to do, as with
+    ///   any other tool failure.
+    ///
+    /// Each call counts as a restart of the run. Past the
+    /// [restart limit](Self::with_restart_limit) the run ends as [`Status::Failed`].
+    ///
+    /// # Errors
+    ///
+    /// As [`run_in`](Self::run_in), except that an unfinished run is what this is for.
+    pub async fn continue_run(&self, session: &SessionId) -> Result<Outcome, HarnessError> {
+        let journal = self.journal(session)?;
+        if !journal.unfinished() {
+            return Ok(outcome_of(journal.session()));
+        }
+        let attempt = journal.restart()?;
+        if attempt > self.restart_limit {
+            let reason = format!(
+                "the run was restarted {} times without finishing and was given up",
+                self.restart_limit
+            );
+            let failure = Message::assistant()
+                .with_error(MessageErrorKind::Other, reason)
+                .with_generated_id_if_missing();
+            journal.record(&failure)?;
+            journal.end_turn()?;
+            return Ok(outcome_of(journal.session()));
+        }
+        if let Some(settled) = self.settled(&journal) {
+            journal.record(&settled)?;
+        }
+        self.drive(&journal).await
+    }
+
+    /// Results for the unanswered tool calls of an interrupted run that must not simply be
+    /// run: those the log already has a result for, and those that were started and are
+    /// not safe to make again. Calls left out are for the tools step to run.
+    fn settled(&self, journal: &Journal) -> Option<Message> {
+        let session = journal.session();
+        let turn = messages_since_kickoff(session.conversation()).ok()?;
+        let mut results = Message::user();
+        for request in pending_tool_requests(turn) {
+            // A call that could not be decoded never ran; the tools step answers it.
+            let Ok(call) = request.tool_call.as_ref() else {
+                continue;
+            };
+            let result = match journal.progress(&request.id) {
+                Progress::NotStarted => continue,
+                Progress::Started if self.replay_safe(&call.name) => continue,
+                Progress::Started => CallToolResult::error(vec![ContentBlock::text(format!(
+                    "interrupted: the harness stopped while `{}` was running, and it is not \
+                     safe to run twice. Check what it did before calling it again.",
+                    call.name
+                ))]),
+                Progress::Finished { ok: true, output } => {
+                    CallToolResult::success(vec![ContentBlock::text(output)])
+                }
+                Progress::Finished { ok: false, output } => {
+                    CallToolResult::error(vec![ContentBlock::text(output)])
+                }
+            };
+            results = results.with_tool_response(request.id.clone(), Ok(result));
+        }
+        (!results.content.is_empty()).then(|| results.with_generated_id_if_missing())
+    }
+
+    fn replay_safe(&self, tool: &str) -> bool {
+        self.tools
+            .get(tool)
+            .is_some_and(|tool| tool.spec().replay_safe)
+    }
+
+    /// Run the loop over `journal`'s session until it stops, and mark the end of the turn.
+    async fn drive(&self, journal: &Journal) -> Result<Outcome, HarnessError> {
         let cancel = CancellationToken::new();
         let machine = self.machine(cancel.clone());
         // Streaming updates have no audience here; the event stream is the record.
         let (updates, _unwatched) = mpsc::unbounded_channel();
         let emitter = Emitter::new(updates, cancel);
         let session = machine
-            .run(self.journal.as_ref(), SESSION, &emitter)
+            .run(journal, journal.id().as_str(), &emitter)
             .await?;
-        self.events().emit(Draft::new(Source::Host, "turn/end"));
-        Ok(Outcome {
-            status: status_of(&session),
-            session,
-        })
+        journal.end_turn()?;
+        Ok(outcome_of(session))
+    }
+}
+
+fn outcome_of(session: Session) -> Outcome {
+    Outcome {
+        status: status_of(&session),
+        session,
     }
 }
 

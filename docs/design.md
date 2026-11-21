@@ -28,7 +28,7 @@ them. Sections and table rows marked *planned* describe that target, not the cod
         ┌──────── corduroy-core (no dependencies) ────────┐   ┌──── corduroy-wasm ────┐
         │ App / Context / Plugin   (fibers, effects)      │   │ WasmRuntime, WasmPlugin │
         │ Grants / Scope           (capabilities)         │◄──┤ linker = granted WIT    │
-        │ EventStream              (log + pub/sub)        │   │ interfaces only         │
+        │ EventStream, Log, SessionId (commits + pub/sub) │   │ interfaces only         │
         │ Tools, Prompts, Kernels  (registries)           │   └───────────┬─────────────┘
         └─────────────────────────────────────────────────┘               │ wit/corduroy.wit
                                                               ┌───────────┴─────────────┐
@@ -38,7 +38,8 @@ them. Sections and table rows marked *planned* describe that target, not the cod
 ```
 
 The core knows nothing about WebAssembly or models. The WebAssembly host knows nothing about
-models. Only the top crate depends on oi-kit.
+models. Only the top crate depends on oi-kit. `corduroy-jsonl`, not drawn, is a store for the
+event stream: it implements the core's `Log` trait over a file.
 
 ## The six inspirations
 
@@ -132,7 +133,7 @@ property of the loop and the log, so it belongs in the core. Its mechanisms:
 - A restart limit (default 5) turns a crash loop into an error.
 - Storage is pluggable (memory, JSONL, SQLite) and single-writer.
 
-See [Durability](#durability-planned) for what is adopted.
+See [Durability](#durability) for what is adopted.
 
 ### OpenHands: event stream and programmable loop
 
@@ -142,15 +143,16 @@ the events immutable and typed, the agent stateless, and the conversation a *vie
 append-only log, with condensation as an event rather than a rewrite.
 
 **Here.** `corduroy_core::event` is an append-only log with synchronous, ordered delivery, and
-every event has a source and an optional cause. `src/session.rs` makes the conversation a
-projection of it: the `Journal` turns each effect of the loop into `message`, `tool/call`
-(caused by its message), `tool/result` (caused by its call) and `usage` events, and
-`Harness::resume` rebuilds a session from a replayed stream. Plugin lifecycle, capability
-denials and plugin-defined topics share the same stream, so plugins and the model see one
-history.
+every event has a source, an optional cause and, if it belongs to one, a session.
+`src/session.rs` makes the conversation a projection of it: the `Journal` turns the effects
+of one step of the loop into one commit of `message`, `tool/call` (caused by its message),
+`tool/result` (caused by its call) and `usage` events, and `Harness::resume` rebuilds every
+session from a replayed stream. Plugin lifecycle, capability denials and plugin-defined
+topics share the same stream, so plugins and the model see one history. The stream writes
+each commit to a `Log` before showing it to anyone; `corduroy-jsonl` is the store on disk.
+See [Durability](#durability).
 
-**Left out.** Condensation, a security analyser and confirmation policy, and persistence to
-disk (the log is in memory; `EventStream::replay` is the seam for a store).
+**Left out.** Condensation, and a security analyser and confirmation policy.
 
 ### Goose: the base abstractions, from oi-kit
 
@@ -222,9 +224,9 @@ Everything else is a plugin, and a plugin may itself offer primitives to other p
 | Primitive | Status | Target |
 | --- | --- | --- |
 | Plugin tree (`App`, `Context`, effects, `inject`) | built | Add a restart limit so a plugin that keeps faulting is suspended, not retried forever. |
-| Event log | in memory | A fallible `Log` trait. A step's events are one atomic commit, stored before any listener or the model sees them. |
-| Sessions | one, hardcoded | Many sessions, each with an id and an optional parent. Every event names its session. |
-| Tool lifecycle | derived from messages | `tool/call` committed before the tool runs, `tool/result` after. `ToolSpec` gains `replay` (safe or not) and `read-only`. Results are content blocks, not one string; tools can report progress and be cancelled. |
+| Event log | built | A fallible `Log` trait. A step's events are one atomic commit, stored before any listener or the model sees them. The core has the trait and the in-memory stream; stores are separate crates. |
+| Sessions | built | Many sessions, each with an id and an optional parent. Every event of a run names its session; events about the plugin tree name none. Still to do: events a plugin emits while serving a tool call do not carry that call's session. |
+| Tool lifecycle | partly built | Built: `tool/call`, `tool/start` and `tool/result` are each committed as they happen, per call, and `ToolSpec::replay_safe` says whether a call that was running at a crash may be repeated. Still to do: `read-only` (wanted by gates), results as content blocks rather than one string, progress and cancellation. |
 | Gates | native `Operation` only | A fourth registry. A gate is asked at a named decision point before something happens and answers allow, deny or ask. Reachable from WebAssembly through a world export. See [Events, gates and hooks](#events-gates-and-hooks-planned). |
 | Waits and signals | none | A step can end by waiting for a named signal (a user's answer, a child session finishing). The wait is an event, so it survives a restart. |
 | Services | native only | Calls between plugins across the WebAssembly boundary, as a capability scoped by service name. |
@@ -232,7 +234,7 @@ Everything else is a plugin, and a plugin may itself offer primitives to other p
 | Kernels | built | The trait and registry stay. `ShellKernel` is an implementation, not a primitive, and moves out to a plugin crate. |
 | Conversation projection | messages only | Understands a `compaction` event (a summary and the first message kept). Producing the summary is a plugin's job. |
 | Model access | constructor argument | A `provider` service that a plugin supplies, so the model is swappable like everything else. |
-| Versioning | WIT package version | A schema version in each log's header, a version on each plugin's stored state, and a rule for what a minor version of the world may change. |
+| Versioning | WIT package version, log schema version | Built: a schema version in each log's header. Still to do: a version on each plugin's stored state, and a rule for what a minor version of the world may change. |
 
 Capabilities to add, each a WIT interface with a scope:
 
@@ -255,7 +257,7 @@ Two rules follow from adding these:
   functions that take one (an HTTP header, say) record that it was used, not what it was.
 - **Time and randomness are host calls.** A WebAssembly plugin has no clock of its own, so
   given the same host-call results it computes the same thing. That is what makes
-  [replaying a plugin](#durability-planned) possible, and WASI stays out of the linker to
+  [replaying a plugin](#durability) possible, and WASI stays out of the linker to
   keep it true.
 
 ## Events, gates and hooks (*planned*)
@@ -298,34 +300,67 @@ input. Its uses are covered elsewhere:
 return a value decides. It is more general, but it gives events return values, and "first
 wins" lets a permissive plugin loaded early pre-empt a strict one.
 
-## Durability (*planned*)
+## Durability
 
 The oi-kit state machine already has the right shape: an operation reads the persisted
 conversation and returns effects for the host to persist. One step is therefore one commit.
+The first five points are built; the last two are *planned*.
 
-- **Commit, then deliver.** `Journal::apply_effects` turns a step's effects into one batch.
-  The batch is written to the `Log`; only then are listeners called and is the next step
-  allowed to start. A failed write is a broken pipeline and returns `Err` from `Harness::run`.
-- **Stores are plugins of the log.** The core carries the trait, the in-memory log and an
-  append-only JSONL log (std only, so the core stays dependency-free). SQLite and anything
-  else live in their own crates. A log has one writer.
-- **Tool intent first.** `tool/call` is committed before the tool is invoked. On resume, a call
-  with no result is run again if its tool is `replay: safe`; otherwise the harness records an
-  `interrupted` error result and the model recovers, as with any other tool failure.
-- **Continue, not only resume.** `Harness::resume` rebuilds state; a new `Harness::continue`
-  picks up an unfinished run without a new prompt.
-- **Plugin state.** Replayed events are not delivered to listeners, so state a plugin builds
-  from events is lost today. A plugin keeps durable state through the `state` capability,
-  whose writes join the commit of the step that made them. State is explicit so that it is
-  visible in the log and bounded: restoring a plugin reads its current keys, not its history.
-  **Decided against, for now:** journaling every host-call result and rebuilding a plugin by
-  replaying them. It needs nothing from the plugin author, but the log grows with every file
-  read and recovery slows as a session ages. It can be added later without changing `state`.
-- **Kernel state.** A kernel's processes do not survive a crash. The `Kernel` trait gains
-  optional `snapshot` and `restore` (Prime Agent has both); a kernel without them reports on
-  resume that its state was lost, as a timeout does today.
-- **Crash loops.** Each restart of an unfinished step is counted in the log; past a limit the
-  run ends as `Status::Failed`.
+- **Commit, then deliver.** `Journal::apply_effects` turns a step's effects into one batch
+  and hands it to `EventStream::commit`. The batch is written to the `Log`; only then is it
+  added to the stream, are listeners called and is the next step allowed to start. A refused
+  write closes the stream, since the log may hold part of the batch, and is a broken
+  pipeline: `Harness::run` returns `HarnessError::Log`. Emitters with nobody to report to
+  (plugin lifecycle, events a plugin queued) drop the error, because the next commit of the
+  run fails with the same one.
+- **Stores are plugins of the log.** The core carries the `Log` trait and nothing that
+  touches a disk. `corduroy-jsonl` is the first store: a header line with the schema
+  version, then one line per commit, written with one `write` and synced. An unfinished last
+  line, which is all a crash can leave, is cut off when the file is opened, and the file is
+  locked because a log has one writer. *Changed from the plan:* the JSONL store was to live
+  in the core, std only. Reading it back needs a JSON parser, and a hand-written parser on
+  the path every event takes is not something the core should own, so the store is a crate
+  of its own with `serde_json`, like SQLite would be.
+- **Sessions are in the log.** A session begins with `session/start`, which records its
+  parent, and each session's conversation is rebuilt from its own events. The core knows
+  only `SessionId`; which sessions exist and how they relate is a projection the harness
+  makes (`Harness::start_session`, `run_in`, `session_list`).
+- **Tool intent first, one call at a time.** The model's message and its `tool/call` events
+  are one commit, stored before the tools step starts. Each call then leaves a trail of
+  its own: `tool/start` is committed just before the tool runs and `tool/result` as soon as
+  it returns, each a commit, and only then does the message carrying the step's results go
+  to the model. oi-kit's tools step runs every call of a message and returns the results
+  together, and nothing in it splits that up; but every call passes through our
+  `ToolProvider` (`PluginTools`), which is where the two events are written, so the step
+  itself is still oi-kit's and the conversation keeps one result message per step.
+- **Continue, not only resume.** A run is *unfinished* from its first message to its
+  `turn/end`, and a session with an unfinished run refuses a new prompt.
+  `Harness::continue_run` picks the run up without one, and treats each unanswered call by
+  how far the log says it got:
+
+  | The log has | Then |
+  | --- | --- |
+  | `tool/result` | The result is handed to the model from the log. The tool is not run again. |
+  | no `tool/start` | The tool never ran. It runs now, like any other call. |
+  | `tool/start` only | It may or may not have run. It is made again if its tool is `replay_safe`; otherwise the harness records an `interrupted` error result and the model recovers, as with any other tool failure. |
+
+  Only the call that was actually running when the process died is ever in doubt. Results
+  that do not come from a plugin's tool (a custom operation refusing a call, a call nobody
+  handles) are still recorded with their message, as before.
+- **Crash loops.** Each `continue_run` of an unfinished run is a `run/restart` event; past
+  `Harness::with_restart_limit` (default 5) the run ends as `Status::Failed`, recorded in the
+  conversation, and the session takes prompts again.
+- **Plugin state** (*planned*). Replayed events are not delivered to listeners, so state a
+  plugin builds from events is lost today. A plugin keeps durable state through the `state`
+  capability, whose writes join the commit of the step that made them. State is explicit so
+  that it is visible in the log and bounded: restoring a plugin reads its current keys, not
+  its history. **Decided against, for now:** journaling every host-call result and rebuilding
+  a plugin by replaying them. It needs nothing from the plugin author, but the log grows with
+  every file read and recovery slows as a session ages. It can be added later without
+  changing `state`.
+- **Kernel state** (*planned*). A kernel's processes do not survive a crash. The `Kernel`
+  trait gains optional `snapshot` and `restore` (Prime Agent has both); a kernel without them
+  reports on resume that its state was lost, as a timeout does today.
 
 ## Plugins extending plugins (*planned*)
 
@@ -450,11 +485,14 @@ harness from outside and need nothing from the core beyond sessions and signals.
 The core first, in the order its parts depend on each other. No new plugin is started until
 the step it waits on is done.
 
-1. `Log` trait, atomic commit before delivery, JSONL store, log header with a schema version.
-2. Sessions: ids, parents, a session on every event.
-3. Tool lifecycle: intent before execution, `replay` and `read-only`, content blocks,
-   progress, cancellation. `Harness::continue` and the restart limit.
-4. Gates, waits and signals.
+1. *Done.* `Log` trait, atomic commit before delivery, JSONL store, log header with a schema
+   version.
+2. *Done.* Sessions: ids, parents, a session on every event of a run.
+3. *Done for durability:* intent before execution and a result per call (`tool/start`,
+   `tool/result`), `replay_safe`, `Harness::continue_run` and the restart limit. *Moved to step 4,* where their first users are: `read-only` (gates),
+   and content blocks, progress and cancellation (which change the tool calling convention
+   and are better settled together with waits).
+4. Gates, waits and signals; the rest of the tool lifecycle.
 5. Services across the WebAssembly boundary; `state`; `tools`.
 6. Loading plugins safely: `plugins` with no amplification, the `plugin/load` decision
    point, protected paths, the cascade limit.

@@ -23,6 +23,19 @@ harness.plugin(
 A plugin that imports an interface it was not granted is never instantiated; a call outside a
 grant's scope is refused and recorded on the event stream.
 
+Runs are **durable**. Each step of the loop is one atomic commit to a log, stored before
+anyone sees it, and a run that was cut short is picked up from the log:
+
+```rust
+let events = Arc::new(corduroy_harness::jsonl::open("run.jsonl")?);
+let harness = Harness::resume(provider, events)?;       // sessions come back from the file
+harness.continue_run(&MAIN.into()).await?;              // finish what a crash interrupted
+```
+
+Each tool call is logged when it starts and when it returns, so after a crash a finished
+call's result is reused, a call that never started simply runs, and the one that was running
+is repeated only if its tool says that is safe; otherwise the model is told and decides.
+
 ## Where the ideas come from
 
 | From | Idea | Where it lives |
@@ -64,9 +77,10 @@ demo drive the loop with a scripted provider.
 
 | Path | Purpose |
 | --- | --- |
-| `crates/corduroy-core` | Dependency-free core: plugin contexts, capabilities, event stream, tool / prompt / kernel registries |
+| `crates/corduroy-core` | Dependency-free core: plugin contexts, capabilities, event stream with sessions and a `Log` trait, tool / prompt / kernel registries |
+| `crates/corduroy-jsonl` | A JSON Lines file as the durable log behind an event stream |
 | `crates/corduroy-wasm` | wasmtime host that loads components as capability-gated plugins |
-| `src/` | `corduroy-harness`: the agent loop assembled from oi-kit, journaled to the event stream |
+| `src/` | `corduroy-harness`: the agent loop assembled from oi-kit, journaled to the event stream one commit per step; sessions, and continuing an interrupted run |
 | `wit/corduroy.wit` | The plugin world: host capabilities in, tools / event handlers / prompt text out |
 | `plugins/pi-tools` | read, write, edit, and bash on a persistent kernel |
 | `plugins/skills` | Agent-written `SKILL.md` files with a prompt index and a review nudge |

@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
-use corduroy_core::{ToolError, Tools};
+use corduroy_core::{SessionId, ToolError, Tools};
+use oi_kit_agent::machine::MachineSession as _;
 use oi_kit_agent::operation::{Emitter, Operation};
 use oi_kit_agent::tool::ToolProvider;
 use oi_kit_provider_types::conversation::Conversation;
@@ -13,23 +14,39 @@ use rmcp::model::{
 };
 use serde_json::Value;
 
-use crate::session::{Effect, Session};
+use crate::session::{Effect, Session, Sessions};
 
 /// Exposes whatever is in the [`Tools`] registry right now.
 ///
 /// The registry is read before every model request and again before every tool call, so
 /// loading or unloading a plugin changes what the model can do from the next step on.
+///
+/// oi-kit's tools step runs every call of a model message and hands back all the results
+/// at once. Each call passes through here on its way, so this is where a call gets a trail
+/// of its own in the log: a `tool/start` stored before the tool runs and a `tool/result`
+/// stored as soon as it returns.
 #[derive(Debug)]
 pub struct PluginTools {
     tools: Arc<Tools>,
+    sessions: Arc<Sessions>,
 }
 
 impl PluginTools {
-    /// Serve the tools registered in `tools`.
+    /// Serve the tools registered in `tools`, journaling each call to its session's journal
+    /// in `sessions`.
     #[must_use]
-    pub const fn new(tools: Arc<Tools>) -> Self {
-        Self { tools }
+    pub const fn new(tools: Arc<Tools>, sessions: Arc<Sessions>) -> Self {
+        Self { tools, sessions }
     }
+}
+
+/// A journal that cannot be reached or written to. The tool is not run, and the step that
+/// carries this back fails on the same log.
+fn unrecorded(error: &dyn std::fmt::Display) -> ErrorData {
+    ErrorData::internal_error(
+        format!("the tool call could not be recorded: {error}"),
+        None,
+    )
 }
 
 #[async_trait]
@@ -48,11 +65,19 @@ impl ToolProvider<Session> for PluginTools {
 
     async fn call(
         &self,
-        _session: &Session,
-        _request_id: &str,
+        session: &Session,
+        request_id: &str,
         call: CallToolRequestParams,
         _emit: &Emitter,
     ) -> Result<CallToolResult, ErrorData> {
+        let journal = self
+            .sessions
+            .journal(&SessionId::new(session.id()))
+            .map_err(|error| unrecorded(&error))?;
+        // Intent first: if this cannot be stored, the tool must not run.
+        journal
+            .start_call(request_id)
+            .map_err(|error| unrecorded(&error))?;
         let tools = Arc::clone(&self.tools);
         let name = call.name.to_string();
         let input = Value::Object(call.arguments.unwrap_or_default()).to_string();
@@ -61,9 +86,18 @@ impl ToolProvider<Session> for PluginTools {
             .await
             .unwrap_or_else(|error| Err(ToolError::Failed(format!("the tool panicked: {error}"))));
         // A failed tool is data for the model, not an error for the run.
-        Ok(match outcome {
-            Ok(output) => CallToolResult::success(vec![ContentBlock::text(output)]),
-            Err(error) => CallToolResult::error(vec![ContentBlock::text(error.to_string())]),
+        let (ok, output) = match outcome {
+            Ok(output) => (true, output),
+            Err(error) => (false, error.to_string()),
+        };
+        journal
+            .finish_call(request_id, ok, &output)
+            .map_err(|error| unrecorded(&error))?;
+        let content = vec![ContentBlock::text(output)];
+        Ok(if ok {
+            CallToolResult::success(content)
+        } else {
+            CallToolResult::error(content)
         })
     }
 }

@@ -16,6 +16,9 @@ interface types {
         description: string,
         /// JSON Schema for the tool's input object, as JSON text.
         input-schema: string,
+        /// Whether a call may simply be made again when the host cannot tell if it already
+        /// ran, as after a crash. Say yes only if twice is the same as once.
+        replay-safe: bool,
     }
 
     /// Why a tool call failed. Shown to the model so it can recover.
@@ -29,6 +32,8 @@ interface types {
     /// One entry of the harness event stream.
     record event {
         id: u64,
+        /// The session the event belongs to. Events about the harness itself have none.
+        session: option<string>,
         /// `user`, `agent`, `environment`, `host` or `plugin:<name>`.
         source: string,
         /// The earlier event this one answers.

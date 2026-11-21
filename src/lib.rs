@@ -17,6 +17,10 @@
 //! | `OpenHands` | An append-only event stream as the source of truth | [`corduroy_core::event`], [`session`] |
 //! | Goose | The base abstractions, from oi-kit | [`harness`] |
 //!
+//! Runs are durable. Each step of the loop is one commit to the stream's log, a harness holds
+//! many sessions on one stream, and [`Harness::continue_run`] finishes a run that a crash
+//! cut short. [`jsonl`] keeps the log in a file.
+//!
 //! oi-kit supplies the provider, message and conversation types and the state machine that
 //! runs the loop; this crate re-exports them as [`oi_kit_agent`] and [`oi_kit_provider_types`].
 //!
@@ -41,6 +45,7 @@
 //!         name: "shout".into(),
 //!         description: "Upper-case the input.".into(),
 //!         input_schema: r#"{"type":"object"}"#.into(),
+//!         replay_safe: true,
 //!     };
 //!     let tools = ctx.service::<Tools>(TOOLS)?;
 //!     tools.register(ctx, "shout", Arc::new(tool_fn(spec, |input| Ok(input.to_uppercase()))))?;
@@ -65,7 +70,8 @@ pub mod session;
 pub mod tools;
 
 pub use corduroy_core as core;
+pub use corduroy_jsonl as jsonl;
 pub use corduroy_wasm as wasm;
 pub use harness::{Harness, HarnessError, Outcome, Status, shell_kernel};
-pub use session::{Effect, Journal, Session};
+pub use session::{Effect, Journal, MAIN, Session, SessionInfo, Sessions};
 pub use {oi_kit_agent, oi_kit_provider_types};

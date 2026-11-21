@@ -5,7 +5,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 use corduroy_harness::core::{
-    Context, Pattern, PluginError, TOOLS, ToolError, ToolSpec, Tools, plugin_fn, tool_fn,
+    Context, EventStream, Pattern, PluginError, SessionId, TOOLS, ToolError, ToolSpec, Tools,
+    plugin_fn, tool_fn,
 };
 use corduroy_harness::oi_kit_agent::operation::{
     Emitter, Operation, OperationResult, RunStatus, applied, not_applicable,
@@ -14,7 +15,7 @@ use corduroy_harness::oi_kit_agent::tool_call_state::pending_tool_requests;
 use corduroy_harness::oi_kit_provider_types::conversation::Conversation;
 use corduroy_harness::oi_kit_provider_types::conversation::message::Message;
 use corduroy_harness::scripted::{ScriptedProvider, call, say};
-use corduroy_harness::{Effect, Harness, HarnessError, Session, Status};
+use corduroy_harness::{Effect, Harness, HarnessError, MAIN, Session, SessionInfo, Status};
 use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -25,6 +26,7 @@ fn calculator(ctx: &mut Context<'_>) -> Result<(), PluginError> {
         name: "add".into(),
         description: "Sum a list of integers.".into(),
         input_schema: r#"{"type":"object","properties":{"terms":{"type":"array"}}}"#.into(),
+        replay_safe: true,
     };
     let add = tool_fn(spec, |input| {
         let input: serde_json::Value = serde_json::from_str(input)
@@ -102,20 +104,29 @@ async fn every_event_records_its_source_and_cause() {
             let cause = event
                 .cause
                 .map_or_else(String::new, |id| format!(" <- {id}"));
-            format!("{} {} {}{cause}", event.id, event.source, event.topic)
+            let session = event
+                .session
+                .map_or_else(String::new, |session| format!(" in {session}"));
+            format!(
+                "{} {} {}{session}{cause}",
+                event.id, event.source, event.topic
+            )
         })
         .collect();
+    // Events of the run name its session; the plugin tree's own events name none.
     assert_eq!(
         trace,
         [
-            "#1 host plugin/activated",
-            "#2 user message",
-            "#4 agent message",
-            "#5 agent tool/call <- #4",
-            "#6 environment message",
-            "#7 environment tool/result <- #5",
-            "#9 agent message",
-            "#10 host turn/end",
+            "#1 host session/start in main",
+            "#2 host plugin/activated",
+            "#3 user message in main",
+            "#5 agent message in main",
+            "#6 agent tool/call in main <- #5",
+            "#7 host tool/start in main <- #6",
+            "#8 environment tool/result in main <- #6",
+            "#9 environment message in main",
+            "#11 agent message in main",
+            "#12 host turn/end in main",
         ]
     );
 }
@@ -242,23 +253,18 @@ async fn the_loop_can_be_driven_one_step_at_a_time() {
     let machine = harness.machine(cancel.clone());
     let (updates, _unwatched) = tokio::sync::mpsc::unbounded_channel();
     let emitter = Emitter::new(updates, cancel);
-    harness
-        .journal()
+    let journal = harness.journal(&MAIN.into()).unwrap();
+    journal
         .record(&Message::user().with_text("what is 20 + 22?"))
         .unwrap();
 
     let mut applied_steps = Vec::new();
     loop {
-        let session = harness.journal().session();
+        let session = journal.session();
         let mut result = machine.step(&session, &emitter).await.unwrap();
         applied_steps.extend(result.applied_step);
         machine
-            .apply(
-                harness.journal().as_ref(),
-                &session,
-                &mut result.effects,
-                &emitter,
-            )
+            .apply(journal.as_ref(), &session, &mut result.effects, &emitter)
             .await
             .unwrap();
         if result.status != RunStatus::Continuing {
@@ -267,7 +273,7 @@ async fn the_loop_can_be_driven_one_step_at_a_time() {
     }
 
     assert_eq!(applied_steps, ["llm", "tools", "llm"]);
-    assert_eq!(harness.journal().session().conversation().len(), 4);
+    assert_eq!(journal.session().conversation().len(), 4);
 }
 
 #[tokio::test]
@@ -277,7 +283,7 @@ async fn a_run_can_be_resumed_from_its_event_log() {
     first.run("add 1 and 2").await.unwrap();
     let log = first.events().events();
 
-    let stream = Arc::new(corduroy_harness::core::EventStream::replay(log));
+    let stream = Arc::new(EventStream::replay(log));
     let model = Arc::new(ScriptedProvider::new([say("still 3")]));
     let provider: Arc<ScriptedProvider> = Arc::clone(&model);
     let resumed = Harness::resume(provider, stream).unwrap();
@@ -291,4 +297,81 @@ async fn a_run_can_be_resumed_from_its_event_log() {
     );
     // The earlier conversation came back from the log: four messages, plus the new prompt.
     assert_eq!(model.requests()[0].messages, 5);
+}
+
+#[tokio::test]
+async fn sessions_keep_separate_conversations_on_one_stream() {
+    let (harness, model) = harness([say("main one"), say("child one"), say("main two")]).unwrap();
+    let main = SessionId::new(MAIN);
+
+    harness.run("first").await.unwrap();
+    let child = harness.start_session("child", Some(&main)).unwrap();
+    let outcome = harness.run_in(&child, "hello").await.unwrap();
+    harness.run("second").await.unwrap();
+
+    assert_eq!(
+        outcome.status,
+        Status::Finished {
+            answer: "child one".into()
+        }
+    );
+    // The child started empty and the main session never saw the child's messages.
+    let messages: Vec<usize> = model.requests().iter().map(|r| r.messages).collect();
+    assert_eq!(messages, [1, 1, 3]);
+    assert_eq!(
+        harness.session_list(),
+        [
+            SessionInfo {
+                id: child.clone(),
+                parent: Some(main.clone()),
+            },
+            SessionInfo {
+                id: main,
+                parent: None,
+            },
+        ]
+    );
+    assert!(
+        harness
+            .events()
+            .session(&child)
+            .iter()
+            .all(|event| event.session.as_ref() == Some(&child))
+    );
+}
+
+#[tokio::test]
+async fn sessions_come_back_from_the_log_with_their_parents() {
+    let (first, _model) = harness([say("from the child")]).unwrap();
+    let main = SessionId::new(MAIN);
+    let child = first.start_session("child", Some(&main)).unwrap();
+    first.run_in(&child, "hello").await.unwrap();
+
+    let stream = Arc::new(EventStream::replay(first.events().events()));
+    let model = Arc::new(ScriptedProvider::new([say("still here")]));
+    let provider: Arc<ScriptedProvider> = Arc::clone(&model);
+    let resumed = Harness::resume(provider, stream).unwrap();
+    resumed.run_in(&child, "again?").await.unwrap();
+
+    assert_eq!(resumed.session_list(), first.session_list());
+    // The child's two earlier messages, and the new prompt. The main session was not
+    // started a second time.
+    assert_eq!(model.requests()[0].messages, 3);
+    let starts = resumed.events().matching(&Pattern::new("session/start"));
+    assert_eq!(starts.len(), 2);
+}
+
+#[tokio::test]
+async fn a_session_must_be_new_and_its_parent_must_exist() {
+    let (harness, _model) = harness([]).unwrap();
+    let nobody = SessionId::new("nobody");
+
+    let duplicate = harness.start_session(MAIN, None).unwrap_err();
+    let orphan = harness.start_session("child", Some(&nobody)).unwrap_err();
+    let missing = harness.run_in(&nobody, "hello").await.unwrap_err();
+
+    assert_eq!(duplicate.to_string(), "session `main` already exists");
+    assert_eq!(orphan.to_string(), "there is no session `nobody`");
+    assert!(matches!(missing, HarnessError::UnknownSession(_)));
+    assert_eq!(harness.session_list().len(), 1);
 }

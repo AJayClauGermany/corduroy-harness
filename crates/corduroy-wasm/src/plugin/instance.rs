@@ -87,9 +87,9 @@ impl Instance {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .run(self.fuel_per_call, call);
-        for draft in outbox {
-            self.events.emit(draft);
-        }
+        // The plugin's call has returned, so there is nobody to hand a refused commit to. The
+        // stream is closed by then and the next commit of the run reports it.
+        drop(self.events.commit(outbox));
         result.map_err(|error| {
             let reason = format!("{error:#}");
             if !self.trapped.swap(true, Ordering::SeqCst) {
@@ -98,8 +98,10 @@ impl Instance {
                     json::string(&self.name),
                     json::string(&reason)
                 );
-                self.events
-                    .emit(Draft::new(Source::Host, "plugin/trapped").payload(payload));
+                drop(
+                    self.events
+                        .emit(Draft::new(Source::Host, "plugin/trapped").payload(payload)),
+                );
             }
             format!("plugin `{}` trapped: {reason}", self.name)
         })
