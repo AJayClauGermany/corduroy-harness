@@ -11,9 +11,10 @@
 //! * [`event`]: the append-only event stream that records a run and connects plugins. Events
 //!   are committed in batches to a [`Log`] before anyone sees them, and name the session
 //!   they belong to. The core defines what a log is; stores live in other crates.
-//! * [`registry`], [`tool`], [`prompt`], [`kernel`]: the well-known services plugins
-//!   contribute to: tools the model can call, text for the system prompt, and long-lived
-//!   kernels that keep state between calls.
+//! * [`registry`], [`tool`], [`prompt`], [`kernel`], [`gate`]: the well-known services
+//!   plugins contribute to: tools the model can call, text for the system prompt, long-lived
+//!   kernels that keep state between calls, and gates that decide whether something may
+//!   happen.
 //!
 //! Nothing here knows about WebAssembly or about any particular model. `corduroy-wasm` loads
 //! WebAssembly components as [`Plugin`]s, and `corduroy-harness` assembles an agent loop.
@@ -40,6 +41,7 @@
 pub mod capability;
 pub mod context;
 pub mod event;
+pub mod gate;
 pub mod json;
 pub mod kernel;
 pub mod pattern;
@@ -53,6 +55,7 @@ pub use context::{
     plugin_fn,
 };
 pub use event::{Draft, Event, EventId, EventStream, ListenerId, Log, LogError, SessionId, Source};
+pub use gate::{Decision, GATES, Gate, Gates, POINTS, TOOL_CALL, Verdict};
 pub use kernel::{Cell, KERNELS, Kernel, KernelError, Kernels, ShellKernel};
 pub use pattern::Pattern;
 pub use prompt::{PROMPTS, PromptPart, Prompts};

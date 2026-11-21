@@ -27,6 +27,7 @@ fn echo(ctx: &mut Context<'_>) -> Result<(), PluginError> {
         description: "Return the input.".into(),
         input_schema: r#"{"type":"object"}"#.into(),
         replay_safe: true,
+        read_only: true,
     };
     ctx.service::<Tools>(TOOLS)?.register(
         ctx,
@@ -157,6 +158,7 @@ fn rocketry(launches: &Arc<AtomicUsize>, peeks: &Arc<AtomicUsize>) -> impl Plugi
                 description: String::new(),
                 input_schema: r#"{"type":"object"}"#.into(),
                 replay_safe,
+                read_only: replay_safe,
             };
             let calls = Arc::clone(calls);
             let tool = tool_fn(spec, move |_| {

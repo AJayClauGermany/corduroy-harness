@@ -37,6 +37,16 @@ Each tool call is logged when it starts and when it returns, so after a crash a 
 call's result is reused, a call that never started simply runs, and the one that was running
 is repeated only if its tool says that is safe; otherwise the model is told and decides.
 
+**Gates** decide whether a tool call may run. Any plugin can be one, WebAssembly included;
+the strictest answer wins, and an "ask" makes the run wait, across restarts, for a person:
+
+```rust
+harness.plugin(runtime.load("plugins/…/approval.wasm")?.config(r#"{"mode":"smart"}"#));
+if let Status::Waiting { asks } = harness.run("tidy the repo").await?.status {
+    harness.answer(&MAIN.into(), &asks[0].call, Answer::Allow).await?;   // run the write
+}
+```
+
 ## Where the ideas come from
 
 | From | Idea | Where it lives |

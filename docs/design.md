@@ -21,7 +21,7 @@ them. Sections and table rows marked *planned* describe that target, not the cod
 
 ```
                  ┌───────────────────────── corduroy-harness (src/) ─────────────────────────┐
-                 │  Harness: oi-kit StateMachine over [custom ops, prompt, tools, limit, LLM]  │
+                 │  Harness: oi-kit StateMachine over [ops, prompt, gates, tools, limit, LLM]  │
                  │  Journal: effects ──► events            PluginTools: registry ──► oi-kit   │
                  └───────────────┬───────────────────────────────────────┬───────────────────┘
                                  │                                       │
@@ -29,11 +29,11 @@ them. Sections and table rows marked *planned* describe that target, not the cod
         │ App / Context / Plugin   (fibers, effects)      │   │ WasmRuntime, WasmPlugin │
         │ Grants / Scope           (capabilities)         │◄──┤ linker = granted WIT    │
         │ EventStream, Log, SessionId (commits + pub/sub) │   │ interfaces only         │
-        │ Tools, Prompts, Kernels  (registries)           │   └───────────┬─────────────┘
+        │ Tools, Prompts, Kernels, Gates (registries)     │   └───────────┬─────────────┘
         └─────────────────────────────────────────────────┘               │ wit/corduroy.wit
                                                               ┌───────────┴─────────────┐
-                                                              │ plugins/pi-tools, skills │
-                                                              │ (wasm32, any language)   │
+                                                              │ plugins/: pi-tools,      │
+                                                              │ skills, approval (wasm32)│
                                                               └──────────────────────────┘
 ```
 
@@ -229,9 +229,9 @@ Everything else is a plugin, and a plugin may itself offer primitives to other p
 | Plugin tree (`App`, `Context`, effects, `inject`) | built | Add a restart limit so a plugin that keeps faulting is suspended, not retried forever. A trapped WebAssembly plugin is re-instantiated on its next use and counts against that limit; in Python a stray `print` is a trap, so this is not a rare path. |
 | Event log | built | A fallible `Log` trait. A step's events are one atomic commit, stored before any listener or the model sees them. The core has the trait and the in-memory stream; stores are separate crates. |
 | Sessions | built | Many sessions, each with an id and an optional parent. Every event of a run names its session; events about the plugin tree name none. Still to do: events a plugin emits while serving a tool call do not carry that call's session. |
-| Tool lifecycle | partly built | Built: `tool/call`, `tool/start` and `tool/result` are each committed as they happen, per call, and `ToolSpec::replay_safe` says whether a call that was running at a crash may be repeated. Still to do: `read-only` (wanted by gates), results as content blocks rather than one string, progress and cancellation. |
-| Gates | native `Operation` only | A fourth registry. A gate is asked at a named decision point before something happens and answers allow, deny or ask. Reachable from WebAssembly through a world export. See [Events, gates and hooks](#events-gates-and-hooks-planned). |
-| Waits and signals | none | A step can end by waiting for a named signal (a user's answer, a child session finishing). The wait is an event, so it survives a restart. |
+| Tool lifecycle | partly built | Built: `tool/call`, `tool/start` and `tool/result` are each committed as they happen, per call; `ToolSpec::replay_safe` says whether a call that was running at a crash may be repeated, and `read_only` whether it changes anything. Still to do: results as content blocks rather than one string, progress and cancellation. |
+| Gates | built for `tool/call` | A fourth registry. A gate is asked at a named decision point before something happens and answers allow, deny or ask; the strictest answer wins and is recorded. Reachable from WebAssembly through the `gate` export. Still to do: more decision points (`plugin/load` first). See [Events, gates and hooks](#events-gates-and-hooks). |
+| Waits and signals | built for a gate's ask | A run whose tool call a gate asked about waits for `Harness::answer`; the ask and the answer are events, so the wait survives a restart. Still to do: the general form, a step that waits for any named signal (a child session finishing, a timer). |
 | Services | native only | Calls between plugins across the WebAssembly boundary, as a capability scoped by service name. |
 | Capabilities | four | The mechanism is settled; the set grows (below). |
 | Kernels | built | The trait and registry stay. `ShellKernel` is an implementation, not a primitive, and moves out to a plugin crate. |
@@ -267,7 +267,7 @@ Two rules follow from adding these:
   catch: built without WASI their clocks trap or stand still and their random numbers repeat,
   so `clock`, `random` and `log` are needed as soon as either language is.
 
-## Events, gates and hooks (*planned*)
+## Events, gates and hooks
 
 What other harnesses call hooks are two different things here, and both are plugins.
 
@@ -280,14 +280,34 @@ What other harnesses call hooks are two different things here, and both are plug
   (deny over ask over allow). The outcome does not depend on which plugin loaded first. The
   decision itself is then recorded as an event.
 
-The core defines a small, fixed set of decision points, starting with `tool/call`. Likely
-additions are the user's input and the request about to be sent to the model, each added
-when a plugin needs it. A plugin that wants to ask other plugins a question of its own does
+The core defines a small, fixed set of decision points (`corduroy_core::POINTS`), starting
+with `tool/call`. Likely additions are `plugin/load`, the user's input and the request about
+to be sent to the model, each added when a plugin needs it. A WebAssembly plugin that lists
+a point the core does not define is refused at activation. A plugin that wants to ask other plugins a question of its own does
 so through a [service](#plugins-extending-plugins-planned), not through the event stream.
 
 A deny or an ask always carries a reason. A denied tool call becomes an error tool result
 holding that reason, so the model learns what was wrong and can try again, as with any other
 tool failure.
+
+**How `tool/call` is gated (built).** A loop step, `GateOperation`, sits between the prompt
+and the tools step. For each call of the model's message it asks the gates once, with
+`{"session", "id", "tool", "input", "read-only"}`, and stores the decision as `gate/decision`
+in that step's commit, so the decision is in the log before the tool can start. An allowed
+call goes on to the tools step; a denied one is answered with an error result. A call a gate
+asked about makes the whole message wait: none of its calls runs, the run stops with
+`Status::Waiting` and no `turn/end`, and the session refuses a new prompt.
+`Harness::answer(session, call, Answer)` stores a `gate/answer` and, once nothing else is
+waiting, takes the run on; a declined call goes to the model with the person's reason.
+`continue_run` leaves a waiting run alone and does not count it as a restart, so a run can
+wait across any number of process lifetimes. With no gate registered nothing is asked or
+recorded, and the loop is as it was.
+
+- A gate that cannot answer fails closed: a WebAssembly gate that traps denies.
+- Gates are asked in name order and only the first gate to give the strictest kind is
+  recorded, so the reason the model or the person sees comes from one gate.
+- Remembering an answer ("always allow this tool") is the gate plugin's business: it can
+  subscribe to `gate/answer`.
 
 **Decided against, for now:** gates that rewrite a call's input and let it run, as Pi's hooks
 can. A rewrite saves a model round trip and guarantees the outcome, but the model then
@@ -488,7 +508,7 @@ harness.
 | Developer: `write`, `edit`, `shell`, `tree`, `read_image` | `pi-tools`, extended | WebAssembly | content blocks |
 | MCP extensions (stdio, streamable HTTP) | `mcp` | native (`rmcp`) | kernels for subprocesses, `secret` |
 | Providers | `providers` (`oi-kit-providers`) | native | `provider` service, `secret` |
-| Permission modes, per-tool permissions | `approval` | WebAssembly | gates, waits |
+| Permission modes, per-tool permissions | `approval` (exists: `auto`, `smart`, `approve`, `chat`, allow and deny lists) | WebAssembly | done |
 | Tool inspection, prompt-injection scan | `inspect` | WebAssembly | gates |
 | Auto-compaction | `compact` | WebAssembly | `llm`, compaction event |
 | Summon: `load`, `delegate` | `subagents` | WebAssembly | sessions, `session`, waits |
@@ -521,6 +541,11 @@ the step it waits on is done.
 4. Gates, waits and signals; the rest of the tool lifecycle. Each export this adds to the
    world is one every guest language must implement, so check a new export against
    JavaScript and Python before it is fixed, async exports included (not yet tried).
+   *Done:* the `Gates` registry, the `tool/call` decision point, the `gate` export (checked
+   from JavaScript and Python, see [Guest languages](guest-languages.md#the-gate-export)),
+   `read-only`, and waiting for a person's answer to an ask, with the `approval` plugin as
+   the first gate. *Still to do:* general waits and signals, content blocks, progress and
+   cancellation.
 5. Services across the WebAssembly boundary; `state`; `tools`. Also `log`, `clock` and
    `random`, brought forward from step 7 because JavaScript and Python plugins cannot do
    without them, and re-instantiating a trapped plugin under the restart limit.
@@ -555,6 +580,14 @@ the step it waits on is done.
   of another" without changing the log.
 - **Operations from plugins.** Loop steps are native `Operation`s. Letting plugins contribute
   steps needs an async-friendly, effect-returning export.
+- **Gates and plugins calling tools.** A gate is asked from the loop, never while a plugin
+  is running. Once the `tools` capability lets a plugin call a tool through the gates, a
+  plugin that is also a gate would be asked while its own call is in progress; that must be
+  refused or queued, like any other re-entry, rather than deadlock on the instance.
+- **Exports every guest must write.** Each export of the world is mandatory: the
+  JavaScript and Python toolchains refuse to build a plugin without `gate`, and Rust's
+  bindings will not compile. Plugins that guard nothing carry a stub. The guest SDKs should
+  supply defaults, or generate the world without exports a plugin does not use.
 - **Blocking.** Tool calls run on blocking threads, but event listeners run inline on the
   thread that emitted, including inside the async loop. Slow listeners would need a queue.
 - **Guest SDK.** Each plugin repeats the same `generate!` and error-mapping boilerplate; a

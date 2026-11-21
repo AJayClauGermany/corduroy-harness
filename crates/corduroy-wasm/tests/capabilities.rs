@@ -6,8 +6,8 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use corduroy_core::{
-    App, FiberState, KERNELS, Kernels, PROMPTS, Pattern, Prompts, Scope, ShellKernel, TOOLS,
-    ToolError, Tools,
+    App, FiberState, GATES, Gates, KERNELS, Kernels, PROMPTS, Pattern, Prompts, Scope, ShellKernel,
+    TOOL_CALL, TOOLS, ToolError, Tools, Verdict,
 };
 use corduroy_test_support::{plugin, scratch};
 use corduroy_wasm::{Limits, WasmError, WasmPlugin, WasmRuntime};
@@ -16,6 +16,7 @@ struct Host {
     app: App,
     tools: Arc<Tools>,
     prompts: Arc<Prompts>,
+    gates: Arc<Gates>,
 }
 
 /// An app providing the services WebAssembly plugins inject, with a shell kernel in `dir`.
@@ -23,6 +24,7 @@ fn host(dir: &Path) -> Result<Host, Box<dyn Error>> {
     let tools = Arc::new(Tools::new());
     let prompts = Arc::new(Prompts::new());
     let kernels = Arc::new(Kernels::new());
+    let gates = Arc::new(Gates::new());
     kernels.insert(
         "shell",
         Arc::new(Mutex::new(ShellKernel::new().in_dir(dir))),
@@ -30,11 +32,13 @@ fn host(dir: &Path) -> Result<Host, Box<dyn Error>> {
     let mut app = App::new();
     app.provide(TOOLS, Arc::clone(&tools))?;
     app.provide(PROMPTS, Arc::clone(&prompts))?;
+    app.provide(GATES, Arc::clone(&gates))?;
     app.provide(KERNELS, kernels)?;
     Ok(Host {
         app,
         tools,
         prompts,
+        gates,
     })
 }
 
@@ -227,6 +231,52 @@ fn unloading_a_plugin_removes_everything_it_registered() {
 
     assert_eq!(host.tools.names(), Vec::<String>::new());
     assert_eq!(host.prompts.names(), Vec::<String>::new());
+}
+
+#[test]
+fn a_gate_answers_at_its_point_and_leaves_with_its_plugin() {
+    let dir = scratch("gate");
+    let mut host = host(&dir).unwrap();
+    let approval = load("approval", &dir)
+        .unwrap()
+        .config(r#"{"mode":"smart","deny":["bash"]}"#);
+    // A gate holds no authority of its own.
+    assert!(approval.requires().is_empty(), "{:?}", approval.requires());
+
+    let id = host.app.plugin(approval);
+    let verdict = |tool: &str, read_only: bool| {
+        let request = format!(r#"{{"tool":"{tool}","input":{{}},"read-only":{read_only}}}"#);
+        host.gates
+            .decide(TOOL_CALL, &request)
+            .map(|decision| decision.verdict)
+    };
+
+    assert_eq!(host.gates.names(), ["approval"]);
+    assert_eq!(verdict("read", true), Some(Verdict::Allow));
+    assert_eq!(
+        verdict("write", false),
+        Some(Verdict::Ask("`write` can change things".into()))
+    );
+    assert_eq!(
+        verdict("bash", false),
+        Some(Verdict::Deny("`bash` is on the deny list".into()))
+    );
+    assert_eq!(host.gates.decide("model/request", "{}"), None);
+
+    host.app.dispose(id).unwrap();
+    assert_eq!(host.gates.names(), Vec::<String>::new());
+}
+
+#[test]
+fn a_gate_that_cannot_be_configured_does_not_start() {
+    let dir = scratch("gate-config");
+    let mut host = host(&dir).unwrap();
+    let approval = load("approval", &dir).unwrap().config(r#"{"mode":"yolo"}"#);
+
+    let id = host.app.plugin(approval);
+
+    assert!(matches!(host.app.state(id), Some(FiberState::Failed(_))));
+    assert_eq!(host.gates.names(), Vec::<String>::new());
 }
 
 #[test]

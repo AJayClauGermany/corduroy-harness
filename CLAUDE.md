@@ -9,12 +9,12 @@ oi-kit's state machine. `docs/design.md` explains where each idea comes from and
 
 | Path | What it is |
 | --- | --- |
-| `crates/corduroy-core` | **Zero dependencies, synchronous.** Plugin contexts (`App`, `Context`, `Plugin`), capabilities (`Grants`, `Scope`), the `EventStream` (commits, `SessionId`, the `Log` trait), and the `Tools` / `Prompts` / `Kernels` registries. |
+| `crates/corduroy-core` | **Zero dependencies, synchronous.** Plugin contexts (`App`, `Context`, `Plugin`), capabilities (`Grants`, `Scope`), the `EventStream` (commits, `SessionId`, the `Log` trait), and the `Tools` / `Prompts` / `Kernels` / `Gates` registries. |
 | `crates/corduroy-jsonl` | A store for the event stream: `JsonlLog`, one line per commit under a versioned header. Stores implement `corduroy_core::Log` and live outside the core. |
 | `crates/corduroy-wasm` | wasmtime host. Loads components built against `wit/corduroy.wit` as `Plugin`s; links only granted interfaces. |
-| `src/` (`corduroy-harness`) | Assembles the loop from oi-kit: `Harness` (sessions, `run_in`, `continue_run`), `Journal` (one step's effects to one commit), `PluginTools`, `ScriptedProvider`. Async (tokio). |
+| `src/` (`corduroy-harness`) | Assembles the loop from oi-kit: `Harness` (sessions, `run_in`, `continue_run`, `answer`), `Journal` (one step's effects to one commit), `GateOperation`, `PluginTools`, `ScriptedProvider`. Async (tokio). |
 | `wit/corduroy.wit` | The typed plugin boundary. Each imported interface is one capability. |
-| `plugins/` | **Separate workspace**, built for `wasm32-unknown-unknown`: `pi-tools` (read, write, edit, bash) and `skills`. |
+| `plugins/` | **Separate workspace**, built for `wasm32-unknown-unknown`: `pi-tools` (read, write, edit, bash), `skills` and `approval` (a gate: permission modes). |
 | `crates/corduroy-test-support` | Test-only helpers: finds built plugins, makes scratch directories. |
 
 ## Commands
@@ -106,6 +106,14 @@ as design guidance, not noise.
   do the same through the session's `Journal`.
 - **A tool is repeated after a crash only if it says so.** `ToolSpec::replay_safe` (and
   `replay-safe` in the WIT) is true only when calling twice equals calling once.
+- **Decisions go through gates, observations through events.** A step that needs an answer
+  before something happens asks the `Gates` registry at a decision point in
+  `corduroy_core::POINTS`; the strictest verdict wins and is recorded before the thing
+  happens. A gate that cannot answer denies. Do not give events return values.
+- **Waiting is in the log.** A run waiting for a person (a gate asked) has no `turn/end`;
+  `Harness::answer` resumes it and `continue_run` must not count it as a restart.
+- **Every world export is mandatory for every guest.** Adding one means a stub in each
+  plugin under `plugins/`, and a check that JavaScript and Python can implement it.
 - **Tool failures are data, not control flow.** A `ToolError` becomes an error tool result and
   goes back to the model so it can recover. A model failure ends the run as `Status::Failed`,
   also recorded in the conversation. Only a broken pipeline returns `Err` from `Harness::run`.

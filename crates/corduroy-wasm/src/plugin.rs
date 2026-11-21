@@ -4,8 +4,9 @@ use std::fmt;
 use std::sync::Arc;
 
 use corduroy_core::{
-    Context, Event, Grants, KERNELS, Kernels, PROMPTS, Plugin, PluginError, PromptPart, Prompts,
-    Scope, Source, TOOLS, Tool, ToolError, ToolSpec, Tools,
+    Context, Event, GATES, Gate, Gates, Grants, KERNELS, Kernels, POINTS, PROMPTS, Plugin,
+    PluginError, PromptPart, Prompts, Scope, Source, TOOLS, Tool, ToolError, ToolSpec, Tools,
+    Verdict,
 };
 use wasmtime::component::{Component, HasSelf, Linker};
 use wasmtime::{Store, StoreLimitsBuilder};
@@ -196,7 +197,9 @@ impl Plugin for WasmPlugin {
     }
 
     fn inject(&self) -> Vec<String> {
-        let mut services = vec![TOOLS.to_owned(), PROMPTS.to_owned()];
+        // What a plugin contributes is known only once it is running, so every registry it
+        // might contribute to is a dependency.
+        let mut services = vec![TOOLS.to_owned(), PROMPTS.to_owned(), GATES.to_owned()];
         if self
             .requires
             .iter()
@@ -226,6 +229,7 @@ impl Plugin for WasmPlugin {
                     description: spec.description,
                     input_schema: spec.input_schema,
                     replay_safe: spec.replay_safe,
+                    read_only: spec.read_only,
                 },
             };
             tools.register(ctx, name, Arc::new(tool))?;
@@ -240,6 +244,27 @@ impl Plugin for WasmPlugin {
             let prompts = ctx.service::<Prompts>(PROMPTS)?;
             let part: Arc<dyn PromptPart> = Arc::new(WasmPrompt(Arc::clone(&instance)));
             prompts.register(ctx, self.name.clone(), part)?;
+        }
+
+        if !info.gates.is_empty() {
+            if let Some(unknown) = info
+                .gates
+                .iter()
+                .find(|point| !POINTS.contains(&point.as_str()))
+            {
+                return Err(PluginError::new(format!(
+                    "plugin `{}` wants to gate `{unknown}`, which is not a decision point; \
+                     the points are: {}",
+                    self.name,
+                    POINTS.join(", ")
+                )));
+            }
+            let gates = ctx.service::<Gates>(GATES)?;
+            let gate: Arc<dyn Gate> = Arc::new(WasmGate {
+                instance: Arc::clone(&instance),
+                points: info.gates,
+            });
+            gates.register(ctx, self.name.clone(), gate)?;
         }
         Ok(())
     }
@@ -313,5 +338,30 @@ impl PromptPart for WasmPrompt {
             .call(|plugin, store| plugin.call_prompt_part(store))
             .ok()
             .flatten()
+    }
+}
+
+/// A plugin's `gate` export, asked only at the points the plugin listed.
+struct WasmGate {
+    instance: Arc<Instance>,
+    points: Vec<String>,
+}
+
+impl Gate for WasmGate {
+    fn check(&self, point: &str, request: &str) -> Option<Verdict> {
+        if !self.points.iter().any(|guarded| guarded == point) {
+            return None;
+        }
+        let verdict = self
+            .instance
+            .call(|plugin, store| plugin.call_gate(store, point, request));
+        // A gate that cannot answer fails closed: a policy that trapped is no reason to let
+        // through what it was there to stop.
+        Some(match verdict {
+            Ok(types::Verdict::Allow) => Verdict::Allow,
+            Ok(types::Verdict::Ask(reason)) => Verdict::Ask(reason),
+            Ok(types::Verdict::Deny(reason)) => Verdict::Deny(reason),
+            Err(trapped) => Verdict::Deny(trapped),
+        })
     }
 }

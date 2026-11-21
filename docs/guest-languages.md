@@ -118,12 +118,36 @@ processes. Instantiating an already compiled component is milliseconds.
   does anything, so twenty automations are a few hundred megabytes. Acceptable; worth
   knowing before sub-agents multiply instances.
 
+## The gate export
+
+Checked in November 2026, before the export was fixed, as step 4 of the order of work asks:
+the world gained `export gate: func(point: string, request: string) -> verdict`, the
+`verdict` variant (`allow`, `ask(string)`, `deny(string)`), `read-only` in `tool-spec` and
+`gates` in `plugin-info`. One JavaScript and one Python plugin, built WASI-free with the
+toolchains and flags above, were loaded by the host, registered as gates, and gave each
+verdict correctly; their `echo` tool's `read-only` came through.
+
+| | JavaScript | Python |
+| --- | --- | --- |
+| `allow` | `{tag: 'allow'}` | `types.Verdict_Allow()` |
+| `ask` / `deny` | `{tag: 'deny', val: 'reason'}` | `types.Verdict_Deny("reason")` |
+| `read-only` in `tool-spec` | `readOnly` | `read_only=` |
+| A plugin without `gate` | build fails: *does not export a "gate" function as expected by the world* | build fails: *Can't instantiate abstract class WitWorld without an implementation for abstract method 'gate'* |
+
+Two consequences:
+
+- **Every export is mandatory.** A plugin that guards nothing still has to write a `gate`
+  that is never called. Neither toolchain builds a component that would trap instead, which
+  is the better failure, but it is boilerplate the SDKs should absorb.
+- **Records are renamed; JSON is not.** Record fields reach each language in its own case,
+  but the `request` a gate receives is JSON text and keeps its kebab-case keys, so a gate
+  reads `request['read-only']`. The host keeps every JSON key it defines in the same case as
+  the WIT, so there is one spelling per name.
+
 ## Not tested
 
 - Async exports, which both toolchains support and which gates, waits and plugin-contributed
   operations may want.
-- What either toolchain does when the world gains an export a plugin does not implement.
-  Step 4 adds one for gates.
 - Third-party packages (npm modules, wheels with native code).
 - TypeScript, which is a bundling step in front of the same toolchain.
 - Fuel and memory for a realistic workload rather than a string operation.

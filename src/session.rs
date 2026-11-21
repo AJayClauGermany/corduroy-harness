@@ -14,6 +14,8 @@
 //! | `session/start` | `host` | `{"parent"}`, or `{}` for a session with no parent |
 //! | `message` | `user`, `agent` or `environment` | the oi-kit message, as JSON |
 //! | `tool/call` | `agent` | `{"id", "tool", "input"}`, caused by its `message` |
+//! | `gate/decision` | `host` | `{"point", "id", "tool", "verdict", "reason", "gate"}`, caused by its `tool/call`: what the gates said |
+//! | `gate/answer` | `user` | `{"id", "tool", "allow", "reason"}`, caused by its `tool/call`: a person's answer to a gate that asked |
 //! | `tool/start` | `host` | `{"id", "tool"}`, caused by its `tool/call`: the tool is about to run |
 //! | `tool/result` | `environment` | `{"id", "tool", "ok", "output"}`, caused by its `tool/call` |
 //! | `usage` | `agent` | the provider's usage report, as JSON |
@@ -26,10 +28,16 @@
 //! model. After a crash the log therefore says of each call whether it never started, was
 //! running, or finished with a result that only needs handing over.
 //!
+//! Where a gate guards tool calls, its decision on each call is stored before the tool can
+//! start. A call a gate asked about waits for a `gate/answer`.
+//!
 //! A run is *unfinished* from its first `message` until its `turn/end`. A session whose
-//! events stop short of that was interrupted, and [`Harness::continue_run`] picks it up.
+//! events stop short of that was interrupted, and [`Harness::continue_run`] picks it up,
+//! unless it is *waiting*: a gate asked about one of its calls and nobody has answered yet.
+//! [`Harness::answer`] gives the answer and takes the run on.
 //!
 //! [`Harness::continue_run`]: crate::Harness::continue_run
+//! [`Harness::answer`]: crate::Harness::answer
 
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
@@ -37,7 +45,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
-use corduroy_core::{Draft, Event, EventId, EventStream, LogError, Pattern, SessionId, Source};
+use corduroy_core::{
+    Decision, Draft, Event, EventId, EventStream, LogError, Pattern, SessionId, Source, TOOL_CALL,
+    Verdict,
+};
 
 use crate::harness::HarnessError;
 use oi_kit_agent::inference::InferenceEffect;
@@ -59,6 +70,12 @@ const TURN_END: &str = "turn/end";
 
 /// Topic of the event that records an unfinished run being picked up again.
 const RESTART: &str = "run/restart";
+
+/// Topic of the event that records what the gates decided about a tool call.
+const GATE_DECISION: &str = "gate/decision";
+
+/// Topic of the event that records a person's answer to a gate that asked.
+const GATE_ANSWER: &str = "gate/answer";
 
 /// Topic of the event that begins a session.
 pub const SESSION_START: &str = "session/start";
@@ -261,6 +278,48 @@ pub enum Effect {
     Message(Box<Message>),
     /// Note what a model request cost.
     Usage(Box<ProviderUsage>),
+    /// Note what the gates decided about a tool call the model asked for.
+    Gated {
+        /// The tool call's id.
+        call: String,
+        /// The strictest verdict and the gate that gave it.
+        decision: Decision,
+    },
+}
+
+/// A person's answer to a gate that asked about a tool call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Answer {
+    /// Let the call run.
+    Allow,
+    /// Do not run it. The reason goes to the model.
+    Deny(String),
+}
+
+/// A tool call that waits for a person's answer because a gate asked about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ask {
+    /// The tool call's id, by which it is answered.
+    pub call: String,
+    /// The tool the model asked for.
+    pub tool: String,
+    /// The input the model gave it, as JSON text.
+    pub input: String,
+    /// Why the gate asked.
+    pub reason: String,
+    /// The gate that asked.
+    pub gate: String,
+}
+
+/// What the log holds about the gates' view of one tool call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Gated {
+    /// The strictest verdict the gates gave.
+    pub(crate) verdict: Verdict,
+    /// The gate that gave it.
+    pub(crate) gate: String,
+    /// A person's answer, if the gate asked and someone has answered.
+    pub(crate) answer: Option<Answer>,
 }
 
 impl From<Message> for Effect {
@@ -291,6 +350,10 @@ struct OpenCall {
     /// Its `tool/call` event.
     event: EventId,
     tool: String,
+    /// The input the model gave, as JSON text.
+    input: String,
+    /// What the gates decided, once a `gate/decision` was stored for it.
+    gated: Option<Gated>,
     /// Whether a `tool/start` was stored for it.
     started: bool,
     /// Whether it succeeded and what it returned, once a `tool/result` was stored for it.
@@ -328,10 +391,12 @@ struct State {
 struct Batch {
     drafts: Vec<Draft>,
     messages: Vec<Message>,
-    /// Tool-call id to the position of its `tool/call` draft and the tool's name.
-    opened: BTreeMap<String, (usize, String)>,
+    /// Tool-call id to the position of its `tool/call` draft, the tool's name and its input.
+    opened: BTreeMap<String, (usize, String, String)>,
     /// Ids of the tool calls answered in this batch.
     closed: Vec<String>,
+    /// What the gates decided about tool calls, by tool-call id.
+    gated: Vec<(String, Gated)>,
 }
 
 impl Batch {
@@ -342,8 +407,10 @@ impl Batch {
             |call| (call.name.to_string(), json!(call.arguments)),
         );
         let payload = json!({"id": request.id, "tool": tool, "input": input});
-        self.opened
-            .insert(request.id.clone(), (self.drafts.len(), tool));
+        self.opened.insert(
+            request.id.clone(),
+            (self.drafts.len(), tool, input.to_string()),
+        );
         self.drafts.push(
             Draft::new(Source::Agent, "tool/call")
                 .payload(payload.to_string())
@@ -359,7 +426,7 @@ impl Batch {
         self.closed.push(response.id.clone());
         let draft = Draft::new(Source::Environment, "tool/result");
         let (draft, tool) = match (self.opened.get(&response.id), open) {
-            (Some((call, tool)), _) => (draft.cause_in_batch(*call), tool.clone()),
+            (Some((call, tool, _)), _) => (draft.cause_in_batch(*call), tool.clone()),
             (None, Some(open)) if open.result.is_some() => return,
             (None, Some(open)) => (draft.cause(open.event), open.tool),
             (None, None) => (draft.cause_in_batch(message), String::new()),
@@ -393,7 +460,9 @@ impl State {
             }
             TURN_END => (self.unfinished, self.restarts) = (false, 0),
             RESTART => self.restarts = self.restarts.saturating_add(1),
-            "tool/call" | "tool/start" | "tool/result" => self.project_call(event)?,
+            "tool/call" | "tool/start" | "tool/result" | GATE_DECISION | GATE_ANSWER => {
+                self.project_call(event)?;
+            }
             _ => {}
         }
         Ok(())
@@ -411,15 +480,50 @@ impl State {
             let call = OpenCall {
                 event: event.id,
                 tool: text("tool").unwrap_or_default(),
+                input: payload
+                    .get("input")
+                    .map_or_else(String::new, Value::to_string),
+                gated: None,
                 started: false,
                 result: None,
             };
             self.calls.insert(id, call);
-        } else if let Some(call) = self.calls.get_mut(&id) {
-            call.started = true;
-            if event.topic == "tool/result" {
-                let ok = payload.get("ok").and_then(Value::as_bool) == Some(true);
-                call.result = Some((ok, text("output").unwrap_or_default()));
+            return Ok(());
+        }
+        let Some(call) = self.calls.get_mut(&id) else {
+            return Ok(());
+        };
+        let reason = text("reason").unwrap_or_default();
+        match event.topic.as_str() {
+            GATE_DECISION => {
+                let verdict = match text("verdict").as_deref() {
+                    Some("allow") => Verdict::Allow,
+                    Some("ask") => Verdict::Ask(reason),
+                    _ => Verdict::Deny(reason),
+                };
+                call.gated = Some(Gated {
+                    verdict,
+                    gate: text("gate").unwrap_or_default(),
+                    answer: None,
+                });
+            }
+            GATE_ANSWER => {
+                let allow = payload.get("allow").and_then(Value::as_bool) == Some(true);
+                let answer = if allow {
+                    Answer::Allow
+                } else {
+                    Answer::Deny(reason)
+                };
+                if let Some(gated) = &mut call.gated {
+                    gated.answer = Some(answer);
+                }
+            }
+            topic => {
+                call.started = true;
+                if topic == "tool/result" {
+                    let ok = payload.get("ok").and_then(Value::as_bool) == Some(true);
+                    call.result = Some((ok, text("output").unwrap_or_default()));
+                }
             }
         }
         Ok(())
@@ -549,6 +653,62 @@ impl Journal {
         }
     }
 
+    /// What the gates decided about the unanswered tool call `call`, if they were asked.
+    pub(crate) fn gated(&self, call: &str) -> Option<Gated> {
+        self.state()
+            .calls
+            .get(call)
+            .and_then(|open| open.gated.clone())
+    }
+
+    /// The tool calls a gate asked about that nobody has answered yet, in order of id. While
+    /// there are any, the run is waiting and goes no further.
+    #[must_use]
+    pub fn waiting(&self) -> Vec<Ask> {
+        self.state()
+            .calls
+            .iter()
+            .filter_map(|(call, open)| match &open.gated {
+                Some(Gated {
+                    verdict: Verdict::Ask(reason),
+                    gate,
+                    answer: None,
+                }) => Some(Ask {
+                    call: call.clone(),
+                    tool: open.tool.clone(),
+                    input: open.input.clone(),
+                    reason: reason.clone(),
+                    gate: gate.clone(),
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Record a person's answer to the gate that asked about `call`. Returns `false`, and
+    /// records nothing, if no gate is waiting for an answer about `call`.
+    pub(crate) fn answer(&self, call: &str, answer: &Answer) -> Result<bool> {
+        if !self.waiting().iter().any(|ask| ask.call == call) {
+            return Ok(false);
+        }
+        let (draft, tool) = self.about_call(call, Source::User, GATE_ANSWER);
+        let (allow, reason) = match answer {
+            Answer::Allow => (true, ""),
+            Answer::Deny(reason) => (false, reason.as_str()),
+        };
+        let payload = json!({"id": call, "tool": tool, "allow": allow, "reason": reason});
+        self.events.emit(draft.payload(payload.to_string()))?;
+        if let Some(gated) = self
+            .state()
+            .calls
+            .get_mut(call)
+            .and_then(|open| open.gated.as_mut())
+        {
+            gated.answer = Some(answer.clone());
+        }
+        Ok(true)
+    }
+
     /// Record that the tool behind `call` is about to run. This is its own commit, so that
     /// after a crash the log tells a call that was running from one that never began.
     pub(crate) fn start_call(&self, call: &str) -> Result<()> {
@@ -617,17 +777,24 @@ impl Journal {
             state.conversation.push(message);
             state.unfinished = true;
         }
-        for (call, (position, tool)) in batch.opened {
+        for (call, (position, tool, input)) in batch.opened {
             let Some(event) = ids.get(position).copied() else {
                 continue;
             };
             let open = OpenCall {
                 event,
                 tool,
+                input,
+                gated: None,
                 started: false,
                 result: None,
             };
             state.calls.insert(call, open);
+        }
+        for (call, gated) in batch.gated {
+            if let Some(open) = state.calls.get_mut(&call) {
+                open.gated = Some(gated);
+            }
         }
         for call in batch.closed {
             state.calls.remove(&call);
@@ -677,6 +844,24 @@ impl EffectHandler<Session, Effect> for Journal {
                     batch
                         .drafts
                         .push(Draft::new(Source::Agent, "usage").payload(payload));
+                }
+                Effect::Gated { call, decision } => {
+                    let (draft, tool) = self.about_call(call, Source::Host, GATE_DECISION);
+                    let payload = json!({
+                        "point": TOOL_CALL,
+                        "id": call,
+                        "tool": tool,
+                        "verdict": decision.verdict.kind(),
+                        "reason": decision.verdict.reason(),
+                        "gate": decision.gate,
+                    });
+                    batch.drafts.push(draft.payload(payload.to_string()));
+                    let gated = Gated {
+                        verdict: decision.verdict.clone(),
+                        gate: decision.gate.clone(),
+                        answer: None,
+                    };
+                    batch.gated.push((call.clone(), gated));
                 }
             }
         }

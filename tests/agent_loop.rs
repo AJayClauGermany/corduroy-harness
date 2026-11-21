@@ -27,6 +27,7 @@ fn calculator(ctx: &mut Context<'_>) -> Result<(), PluginError> {
         description: "Sum a list of integers.".into(),
         input_schema: r#"{"type":"object","properties":{"terms":{"type":"array"}}}"#.into(),
         replay_safe: true,
+        read_only: true,
     };
     let add = tool_fn(spec, |input| {
         let input: serde_json::Value = serde_json::from_str(input)

@@ -13,7 +13,7 @@ use super::host::HostState;
 /// A plugin's store and exports, shared by everything the plugin registered.
 ///
 /// The instance lives exactly as long as those registrations: when the plugin is unloaded
-/// its tools, listeners and prompt part are removed, the last reference goes, and the
+/// its tools, listeners, prompt part and gate are removed, the last reference goes, and the
 /// instance's memory is freed with it.
 pub(super) struct Instance {
     name: String,

@@ -3,8 +3,8 @@
 //! A plugin is a WebAssembly component built against the `corduroy:plugin/plugin` world in
 //! `wit/corduroy.wit`. Any language that compiles to a component can implement one. This crate
 //! turns such a component into a [`corduroy_core::Plugin`], so it joins the same context tree
-//! as native plugins: its tools, listeners and prompt part are effects that vanish when it is
-//! unloaded.
+//! as native plugins: its tools, listeners, prompt part and gate are effects that vanish when
+//! it is unloaded.
 //!
 //! # Capabilities
 //!

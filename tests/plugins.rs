@@ -6,11 +6,11 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
-use corduroy_harness::core::{FiberId, Pattern, Scope};
+use corduroy_harness::core::{FiberId, Pattern, Scope, SessionId};
 use corduroy_harness::oi_kit_provider_types::conversation::message::Message;
 use corduroy_harness::scripted::{ScriptedProvider, call, say};
 use corduroy_harness::wasm::WasmRuntime;
-use corduroy_harness::{Harness, Status, shell_kernel};
+use corduroy_harness::{Answer, Harness, MAIN, Status, shell_kernel};
 use corduroy_test_support::{plugin, scratch};
 use serde_json::json;
 
@@ -336,4 +336,64 @@ async fn a_kernel_lasts_as_long_as_the_plugin_that_provides_it() {
         outputs(&agent.harness),
         ["", "tool failed: unknown kernel `shell`", "[]\n"]
     );
+}
+
+#[tokio::test]
+async fn the_approval_gate_lets_reads_through_and_holds_writes_for_a_person() {
+    let work = scratch("approval");
+    fs::write(work.join("notes.txt"), "one\n").unwrap();
+    let mut agent = agent(
+        &work,
+        [
+            call("1", "read", &json!({"path": "notes.txt"})),
+            call(
+                "2",
+                "write",
+                &json!({"path": "notes.txt", "content": "two\n"}),
+            ),
+            call("3", "bash", &json!({"command": "rm notes.txt"})),
+            say("rewrote it"),
+        ],
+    )
+    .unwrap();
+    agent.harness.plugin(
+        WasmRuntime::new()
+            .unwrap()
+            .load(plugin("approval"))
+            .unwrap()
+            .config(json!({"mode": "smart", "deny": ["bash"]}).to_string()),
+    );
+
+    let first = agent.harness.run("rewrite notes.txt").await.unwrap();
+
+    let Status::Waiting { asks } = first.status else {
+        panic!("expected to wait for the write, got {:?}", first.status);
+    };
+    assert_eq!(asks[0].tool, "write");
+    assert_eq!(asks[0].gate, "approval");
+    assert_eq!(outputs(&agent.harness), ["one"]);
+    assert_eq!(fs::read_to_string(work.join("notes.txt")).unwrap(), "one\n");
+
+    let main = SessionId::new(MAIN);
+    let outcome = agent
+        .harness
+        .answer(&main, "2", Answer::Allow)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        outcome.status,
+        Status::Finished {
+            answer: "rewrote it".into()
+        }
+    );
+    assert_eq!(
+        outputs(&agent.harness),
+        [
+            "one",
+            "Wrote 4 bytes to notes.txt",
+            "denied by gate `approval`: `bash` is on the deny list"
+        ]
+    );
+    assert_eq!(fs::read_to_string(work.join("notes.txt")).unwrap(), "two\n");
 }

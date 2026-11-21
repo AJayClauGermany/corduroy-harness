@@ -19,6 +19,9 @@ interface types {
         /// Whether a call may simply be made again when the host cannot tell if it already
         /// ran, as after a crash. Say yes only if twice is the same as once.
         replay-safe: bool,
+        /// Whether the tool only looks and never changes anything. Gates may let such a
+        /// call through where they would ask about one that writes.
+        read-only: bool,
     }
 
     /// Why a tool call failed. Shown to the model so it can recover.
@@ -43,6 +46,17 @@ interface types {
         payload: string,
     }
 
+    /// A gate's answer at a decision point. Where several gates guard the same point the
+    /// strictest answer wins: deny over ask over allow.
+    variant verdict {
+        /// Let it happen.
+        allow,
+        /// Let it happen only once a person has agreed. The reason is shown to them.
+        ask(string),
+        /// Refuse it. The reason is shown to the model, so it can try something else.
+        deny(string),
+    }
+
     /// What a plugin contributes, returned from `activate`.
     record plugin-info {
         name: string,
@@ -52,6 +66,8 @@ interface types {
         subscriptions: list<string>,
         /// Whether the host should call `prompt-part` for each model request.
         prompt: bool,
+        /// Decision points (such as `tool/call`) at which the host should call `gate`.
+        gates: list<string>,
     }
 }
 
@@ -102,7 +118,7 @@ interface events {
 /// A plugin. Every import is a capability the host must grant before the plugin is
 /// instantiated; a plugin that imports nothing can only compute.
 world plugin {
-    use types.{plugin-info, tool-error, event};
+    use types.{plugin-info, tool-error, event, verdict};
 
     import fs-read;
     import fs-write;
@@ -117,4 +133,8 @@ world plugin {
     export on-event: func(event: event);
     /// Text to add to the system prompt for the next model request.
     export prompt-part: func() -> option<string>;
+    /// Decide whether something may happen at `point`, one of the points listed in
+    /// `plugin-info.gates`. `request` is JSON text describing it; for `tool/call` it is
+    /// `{"session", "id", "tool", "input", "read-only"}`.
+    export gate: func(point: string, request: string) -> verdict;
 }

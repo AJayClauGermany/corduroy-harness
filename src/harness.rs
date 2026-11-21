@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use corduroy_core::{
-    App, ContextError, EventStream, FiberId, KERNELS, Kernel, Kernels, LogError, PROMPTS, Plugin,
-    Prompts, SessionId, ShellKernel, TOOLS, Tools, plugin_fn,
+    App, ContextError, EventStream, FiberId, GATES, Gates, KERNELS, Kernel, Kernels, LogError,
+    PROMPTS, Plugin, Prompts, SessionId, ShellKernel, TOOLS, Tools, plugin_fn,
 };
 use oi_kit_agent::inference::InferenceRunner;
 use oi_kit_agent::machine::{StateMachine, Step};
@@ -23,7 +23,10 @@ use rmcp::model::{CallToolResult, ContentBlock};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::session::{Effect, Journal, MAIN, Progress, Session, SessionInfo, Sessions};
+use crate::gates::GateOperation;
+use crate::session::{
+    Answer, Ask, Effect, Journal, MAIN, Progress, Session, SessionInfo, Sessions,
+};
 use crate::tools::{PluginTools, PromptOperation};
 
 /// Why the harness could not be set up or a run could not complete.
@@ -42,6 +45,16 @@ pub enum HarnessError {
     /// The session has a run that never reached its end, so it cannot take a new prompt.
     /// [`Harness::continue_run`] finishes it.
     Unfinished(SessionId),
+    /// The session's run is waiting for answers to gates that asked about its tool calls, so
+    /// it cannot take a new prompt. [`Harness::answer`] gives them.
+    Waiting(SessionId),
+    /// No gate of this session is waiting for an answer about this tool call.
+    NotAsked {
+        /// The session.
+        session: SessionId,
+        /// The tool call that was answered.
+        call: String,
+    },
 }
 
 impl fmt::Display for HarnessError {
@@ -55,6 +68,16 @@ impl fmt::Display for HarnessError {
             Self::Unfinished(id) => {
                 write!(f, "session `{id}` has an unfinished run: continue it first")
             }
+            Self::Waiting(id) => {
+                write!(
+                    f,
+                    "session `{id}` is waiting for an answer: answer it first"
+                )
+            }
+            Self::NotAsked { session, call } => write!(
+                f,
+                "nothing in session `{session}` is waiting for an answer about `{call}`"
+            ),
         }
     }
 }
@@ -101,6 +124,12 @@ pub enum Status {
     /// The loop stopped with nothing left to do but no answer, for example because an
     /// operation is waiting on the user.
     Yielded,
+    /// Gates asked about tool calls the model wants to make, and the run waits for a
+    /// person's answer to each through [`Harness::answer`]. It survives a restart.
+    Waiting {
+        /// The calls waiting for an answer.
+        asks: Vec<Ask>,
+    },
 }
 
 impl fmt::Display for Status {
@@ -110,6 +139,7 @@ impl fmt::Display for Status {
             Self::TurnLimitReached => f.write_str("stopped: turn limit reached"),
             Self::Failed { reason } => write!(f, "failed: {reason}"),
             Self::Yielded => f.write_str("yielded"),
+            Self::Waiting { asks } => write!(f, "waiting for {} answer(s)", asks.len()),
         }
     }
 }
@@ -128,8 +158,8 @@ pub struct Outcome {
 /// A harness holds any number of sessions, each a conversation of its own on the one stream.
 /// It starts with the session [`MAIN`], which [`run`](Self::run) uses.
 ///
-/// The harness itself does very little. It provides the three registries plugins contribute
-/// to ([`Tools`], [`Prompts`], [`Kernels`]), journals the conversation to the event stream,
+/// The harness itself does very little. It provides the four registries plugins contribute
+/// to ([`Tools`], [`Prompts`], [`Kernels`], [`Gates`]), journals the conversation to the event stream,
 /// and lines up oi-kit operations into a loop. Tools, prompt text, kernels and reactions to
 /// events all come from plugins.
 pub struct Harness {
@@ -137,6 +167,7 @@ pub struct Harness {
     tools: Arc<Tools>,
     prompts: Arc<Prompts>,
     kernels: Arc<Kernels>,
+    gates: Arc<Gates>,
     sessions: Arc<Sessions>,
     provider: Arc<dyn Provider>,
     model: ModelConfig,
@@ -184,15 +215,18 @@ impl Harness {
         let tools = Arc::new(Tools::new());
         let prompts = Arc::new(Prompts::new());
         let kernels = Arc::new(Kernels::new());
+        let gates = Arc::new(Gates::new());
         let mut app = App::with_events(events);
         app.provide(TOOLS, Arc::clone(&tools))?;
         app.provide(PROMPTS, Arc::clone(&prompts))?;
         app.provide(KERNELS, Arc::clone(&kernels))?;
+        app.provide(GATES, Arc::clone(&gates))?;
         Ok(Self {
             app,
             tools,
             prompts,
             kernels,
+            gates,
             sessions,
             provider,
             model: ModelConfig::new("default"),
@@ -270,6 +304,12 @@ impl Harness {
         &self.kernels
     }
 
+    /// The gates plugins have registered.
+    #[must_use]
+    pub const fn gates(&self) -> &Arc<Gates> {
+        &self.gates
+    }
+
     /// Start a session called `id`, recording `parent` as the session it came from. The new
     /// session has an empty conversation of its own.
     ///
@@ -304,8 +344,8 @@ impl Harness {
     }
 
     /// The loop, as the ordered steps a [`StateMachine`] walks: custom operations, the
-    /// prompt, plugin tools, an answer for calls nobody handled, the turn limit and finally
-    /// the model.
+    /// prompt, the gates, plugin tools, an answer for calls nobody handled, the turn limit and
+    /// finally the model.
     #[must_use]
     pub fn steps(&self) -> Vec<Step<'static, Session, Effect>> {
         let tools = ToolOperation::new().with_provider(Arc::new(PluginTools::new(
@@ -321,6 +361,11 @@ impl Harness {
             .map(|operation| Step::Operation(Arc::clone(operation)))
             .collect();
         steps.push(Step::Operation(Arc::new(prompt)));
+        steps.push(Step::Operation(Arc::new(GateOperation::new(
+            Arc::clone(&self.gates),
+            Arc::clone(&self.tools),
+            Arc::clone(&self.sessions),
+        ))));
         steps.push(Step::Operation(Arc::new(tools)));
         steps.push(Step::Operation(
             Arc::new(UnhandledToolCallsOperation::new()),
@@ -358,12 +403,16 @@ impl Harness {
     /// # Errors
     ///
     /// Returns [`HarnessError::UnknownSession`] if there is no such session,
-    /// [`HarnessError::Unfinished`] if its last run never reached its end,
+    /// [`HarnessError::Waiting`] if its last run waits for an answer,
+    /// [`HarnessError::Unfinished`] if its last run never reached its end otherwise,
     /// [`HarnessError::Run`] if an operation fails outright, for example because two plugins
     /// registered tools the model cannot tell apart, or [`HarnessError::Log`] if the event
     /// log could not store a step.
     pub async fn run_in(&self, session: &SessionId, prompt: &str) -> Result<Outcome, HarnessError> {
         let journal = self.journal(session)?;
+        if !journal.waiting().is_empty() {
+            return Err(HarnessError::Waiting(session.clone()));
+        }
         if journal.unfinished() {
             return Err(HarnessError::Unfinished(session.clone()));
         }
@@ -392,13 +441,16 @@ impl Harness {
     /// Each call counts as a restart of the run. Past the
     /// [restart limit](Self::with_restart_limit) the run ends as [`Status::Failed`].
     ///
+    /// A run that is waiting for an answer is not picked up, nor counted: the outcome is
+    /// [`Status::Waiting`] until [`answer`](Self::answer) is called.
+    ///
     /// # Errors
     ///
     /// As [`run_in`](Self::run_in), except that an unfinished run is what this is for.
     pub async fn continue_run(&self, session: &SessionId) -> Result<Outcome, HarnessError> {
         let journal = self.journal(session)?;
-        if !journal.unfinished() {
-            return Ok(outcome_of(journal.session()));
+        if !journal.unfinished() || !journal.waiting().is_empty() {
+            return Ok(outcome_of(&journal));
         }
         let attempt = journal.restart()?;
         if attempt > self.restart_limit {
@@ -411,7 +463,7 @@ impl Harness {
                 .with_generated_id_if_missing();
             journal.record(&failure)?;
             journal.end_turn()?;
-            return Ok(outcome_of(journal.session()));
+            return Ok(outcome_of(&journal));
         }
         if let Some(settled) = self.settled(&journal) {
             journal.record(&settled)?;
@@ -451,32 +503,70 @@ impl Harness {
         (!results.content.is_empty()).then(|| results.with_generated_id_if_missing())
     }
 
+    /// Answer the gate that asked about the tool call `call` in `session`. Once every call
+    /// the run waits for is answered, the run goes on: allowed calls run, declined ones go
+    /// back to the model as errors carrying the reason, and the loop continues until the run
+    /// ends or waits again.
+    ///
+    /// The answer is stored before anything else happens, so a crash after it loses
+    /// nothing: [`continue_run`](Self::continue_run) takes the run on from there.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HarnessError::NotAsked`] if no gate of the session waits for an answer about
+    /// `call`, and otherwise as [`run_in`](Self::run_in).
+    pub async fn answer(
+        &self,
+        session: &SessionId,
+        call: &str,
+        answer: Answer,
+    ) -> Result<Outcome, HarnessError> {
+        let journal = self.journal(session)?;
+        if !journal.answer(call, &answer)? {
+            return Err(HarnessError::NotAsked {
+                session: session.clone(),
+                call: call.to_owned(),
+            });
+        }
+        if !journal.waiting().is_empty() {
+            return Ok(outcome_of(&journal));
+        }
+        self.drive(&journal).await
+    }
+
     fn replay_safe(&self, tool: &str) -> bool {
         self.tools
             .get(tool)
             .is_some_and(|tool| tool.spec().replay_safe)
     }
 
-    /// Run the loop over `journal`'s session until it stops, and mark the end of the turn.
+    /// Run the loop over `journal`'s session until it stops, and mark the end of the turn
+    /// unless the run is waiting for an answer.
     async fn drive(&self, journal: &Journal) -> Result<Outcome, HarnessError> {
         let cancel = CancellationToken::new();
         let machine = self.machine(cancel.clone());
         // Streaming updates have no audience here; the event stream is the record.
         let (updates, _unwatched) = mpsc::unbounded_channel();
         let emitter = Emitter::new(updates, cancel);
-        let session = machine
+        machine
             .run(journal, journal.id().as_str(), &emitter)
             .await?;
-        journal.end_turn()?;
-        Ok(outcome_of(session))
+        if journal.waiting().is_empty() {
+            journal.end_turn()?;
+        }
+        Ok(outcome_of(journal))
     }
 }
 
-fn outcome_of(session: Session) -> Outcome {
-    Outcome {
-        status: status_of(&session),
-        session,
-    }
+fn outcome_of(journal: &Journal) -> Outcome {
+    let session = journal.session();
+    let asks = journal.waiting();
+    let status = if asks.is_empty() {
+        status_of(&session)
+    } else {
+        Status::Waiting { asks }
+    };
+    Outcome { status, session }
 }
 
 fn status_of(session: &Session) -> Status {
