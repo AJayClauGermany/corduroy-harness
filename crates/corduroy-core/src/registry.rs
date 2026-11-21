@@ -179,6 +179,6 @@ mod tests {
 
         assert_eq!(registry.names(), ["p/entry"]);
         app.dispose(id).unwrap();
-        assert!(registry.names().is_empty());
+        assert_eq!(registry.names(), Vec::<String>::new());
     }
 }

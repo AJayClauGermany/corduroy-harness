@@ -107,15 +107,18 @@ mod tests {
 
     #[test]
     fn pages_by_line_and_stops_at_the_byte_limit() {
-        let page = super::page("a\nb\nc\nd", 2, 2, 1024);
-        assert_eq!((page.text.as_str(), page.shown, page.total), ("b\nc", 2, 4));
+        let middle = page("a\nb\nc\nd", 2, 2, 1024);
+        assert_eq!(
+            (middle.text.as_str(), middle.shown, middle.total),
+            ("b\nc", 2, 4)
+        );
 
-        let page = super::page("aaaa\nbbbb\ncccc", 1, 10, 9);
-        assert_eq!((page.text.as_str(), page.shown), ("aaaa\nbbbb", 2));
+        let capped = page("aaaa\nbbbb\ncccc", 1, 10, 9);
+        assert_eq!((capped.text.as_str(), capped.shown), ("aaaa\nbbbb", 2));
 
         // A single line over the limit is still returned.
-        assert_eq!(super::page("aaaa", 1, 10, 2).shown, 1);
-        assert_eq!(super::page("a", 5, 10, 10).shown, 0);
+        assert_eq!(page("aaaa", 1, 10, 2).shown, 1);
+        assert_eq!(page("a", 5, 10, 10).shown, 0);
     }
 
     #[test]

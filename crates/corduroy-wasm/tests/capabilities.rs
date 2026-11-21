@@ -77,7 +77,7 @@ fn a_plugin_without_its_capabilities_is_never_instantiated() {
             "plugin `pi_tools` was not granted: fs-write, kernel".into()
         ))
     );
-    assert!(host.tools.names().is_empty());
+    assert_eq!(host.tools.names(), Vec::<String>::new());
 }
 
 #[test]
@@ -225,8 +225,8 @@ fn unloading_a_plugin_removes_everything_it_registered() {
 
     host.app.dispose(id).unwrap();
 
-    assert!(host.tools.names().is_empty());
-    assert!(host.prompts.names().is_empty());
+    assert_eq!(host.tools.names(), Vec::<String>::new());
+    assert_eq!(host.prompts.names(), Vec::<String>::new());
 }
 
 #[test]

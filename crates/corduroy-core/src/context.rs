@@ -758,7 +758,7 @@ mod tests {
         app.dispose(parent).unwrap();
 
         assert_eq!(entries(&log), ["+child", "-child"]);
-        assert!(app.fibers().is_empty());
+        assert_eq!(app.fibers(), Vec::<FiberInfo>::new());
     }
 
     #[test]
