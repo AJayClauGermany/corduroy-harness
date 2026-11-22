@@ -12,7 +12,8 @@ use corduroy_harness::core::{
     SessionId, TOOLS, ToolCall, ToolSpec, Tools, plugin_fn, tool_fn,
 };
 use corduroy_harness::scripted::{ScriptedProvider, call, say};
-use corduroy_harness::{Harness, HarnessError, MAIN, Next, Operation, Session, Status, jsonl};
+use corduroy_harness::{Harness, HarnessError, MAIN, Next, Operation, Session, Status};
+use corduroy_jsonl as jsonl;
 use corduroy_test_support::scratch;
 use serde_json::{Value, json};
 

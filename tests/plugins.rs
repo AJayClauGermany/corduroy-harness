@@ -10,7 +10,8 @@ use corduroy_harness::core::Message;
 use corduroy_harness::core::{FiberId, Pattern, Scope, SessionId};
 use corduroy_harness::scripted::{ScriptedProvider, call, say};
 use corduroy_harness::wasm::WasmRuntime;
-use corduroy_harness::{Answer, Harness, MAIN, Status, shell_kernel};
+use corduroy_harness::{Answer, Harness, MAIN, Status};
+use corduroy_shell::shell_kernel;
 use corduroy_test_support::{plugin, scratch};
 use serde_json::json;
 

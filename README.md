@@ -39,7 +39,7 @@ Runs are **durable**. Each step of the loop is one atomic commit to a log, store
 anyone sees it, and a run that was cut short is picked up from the log:
 
 ```rust
-let events = Arc::new(corduroy_harness::jsonl::open("run.jsonl")?);
+let events = Arc::new(corduroy_jsonl::open("run.jsonl")?);
 let harness = Harness::resume(provider, events)?;       // sessions come back from the file
 harness.continue_run(&MAIN.into()).await?;              // finish what a crash interrupted
 ```

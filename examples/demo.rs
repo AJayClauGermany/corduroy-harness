@@ -2,21 +2,17 @@
 //!
 //! Run with `cargo plugins && cargo demo`. No network or LLM involved.
 
-#![expect(
-    clippy::multiple_crate_versions,
-    reason = "the wasmtime and oi-kit dependency trees each pull several versions of shared crates"
-)]
-
 use std::error::Error;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 use std::sync::Arc;
 
+use corduroy_harness::Harness;
 use corduroy_harness::core::Scope;
 use corduroy_harness::scripted::{ScriptedProvider, call, say};
 use corduroy_harness::wasm::WasmRuntime;
-use corduroy_harness::{Harness, shell_kernel};
+use corduroy_shell::shell_kernel;
 use serde_json::json;
 
 const PLUGINS: &str = "plugins/target/wasm32-unknown-unknown/release";

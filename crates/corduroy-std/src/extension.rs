@@ -13,20 +13,31 @@
 //! dir = "{workspace}/scratch"
 //! ```
 //!
-//! A kernel entry is built the same way: `[kernels.<name>]` with `kind = "shell"` asks for the
-//! kind `shell-kernel` ([`kernel_kind`]), so a command built for another system can bring a
-//! kernel of its own under a kind of its own, or under `shell-kernel` itself.
+//! The agent file's other native entries are built the same way. `[kernels.<name>]` with
+//! `kind = "shell"` asks for the kind `shell-kernel` ([`kernel_kind`]), `[mcp.<name>]` for the
+//! kind [`MCP`] and `[secrets.<name>]` for the kind [`ENV_SECRET`], each with the entry's keys
+//! as its configuration. So a command built for another system can bring a kernel, an MCP
+//! client or a source of secrets of its own, under a kind of its own or under the standard
+//! kind's name.
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
-use corduroy_harness::core::Plugin;
-use corduroy_harness::shell::{ShellKernel, shell_kernel_of};
+use corduroy_harness::core::{Plugin, SECRETS, Secret, Secrets, Spawn, plugin_fn};
+use corduroy_mcp::{Transport, mcp_server};
+use corduroy_shell::{ShellKernel, shell_kernel_of};
 use serde_json::Value;
 
 use crate::places::Places;
+
+/// The extension kind a `[mcp.<name>]` entry is built from.
+pub const MCP: &str = "mcp";
+
+/// The extension kind a `[secrets.<name>]` entry is built from.
+pub const ENV_SECRET: &str = "env-secret";
 
 /// The extension kind a `[kernels.<name>]` entry of `kind` is built from: `<kind>-kernel`.
 #[must_use]
@@ -52,6 +63,46 @@ impl Asked<'_> {
     #[must_use]
     pub fn text(&self, key: &str) -> Option<&str> {
         self.config.get(key).and_then(Value::as_str)
+    }
+
+    /// The strings under `key`: a list of strings, or none if there is no `key`.
+    ///
+    /// # Errors
+    ///
+    /// If `key` holds something other than a list of strings.
+    pub fn texts(&self, key: &str) -> Result<Vec<String>, String> {
+        let Some(value) = self.config.get(key) else {
+            return Ok(Vec::new());
+        };
+        value
+            .as_array()
+            .and_then(|items| {
+                items
+                    .iter()
+                    .map(|item| item.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .ok_or_else(|| format!("`{key}` must be a list of strings"))
+    }
+
+    /// The table of strings under `key`, or an empty one if there is no `key`.
+    ///
+    /// # Errors
+    ///
+    /// If `key` holds something other than a table of strings.
+    pub fn table(&self, key: &str) -> Result<BTreeMap<String, String>, String> {
+        let Some(value) = self.config.get(key) else {
+            return Ok(BTreeMap::new());
+        };
+        value
+            .as_object()
+            .and_then(|fields| {
+                fields
+                    .iter()
+                    .map(|(name, item)| item.as_str().map(|item| (name.clone(), item.to_owned())))
+                    .collect()
+            })
+            .ok_or_else(|| format!("`{key}` must be a table of strings"))
     }
 
     /// Refuse a configuration with a key other than `keys`, so that a misspelt key is an
@@ -88,6 +139,73 @@ fn shell_kernel_in(asked: &Asked<'_>, shell: ShellKernel) -> Built {
     )))
 }
 
+/// The MCP server `[mcp.<name>]` describes: a `command` started through a kernel (`shell` by
+/// default), or a `url`.
+fn mcp_server_in(asked: &Asked<'_>) -> Built {
+    asked.only(&[
+        "command",
+        "args",
+        "env",
+        "kernel",
+        "url",
+        "bearer_token_env",
+        "timeout_seconds",
+    ])?;
+    let transport = match (asked.text("command"), asked.text("url")) {
+        (Some(command), None) => Transport::Stdio {
+            kernel: asked.text("kernel").unwrap_or("shell").to_owned(),
+            spawn: Spawn {
+                program: command.to_owned(),
+                args: asked.texts("args")?,
+                env: asked.table("env")?.into_iter().collect(),
+            },
+        },
+        (None, Some(url)) => {
+            let bearer_token = asked
+                .text("bearer_token_env")
+                .map(|variable| {
+                    std::env::var(variable).map_err(|_| format!("${variable} is not set"))
+                })
+                .transpose()?;
+            Transport::Http {
+                url: url.to_owned(),
+                bearer_token,
+            }
+        }
+        _ => return Err("needs a `command` or a `url`, not both".to_owned()),
+    };
+    let server = mcp_server(asked.name, transport);
+    Ok(Box::new(match asked.config.get("timeout_seconds") {
+        None => server,
+        Some(seconds) => server.with_timeout(Duration::from_secs(
+            seconds
+                .as_u64()
+                .ok_or("`timeout_seconds` must be a whole number")?,
+        )),
+    }))
+}
+
+/// The secret `[secrets.<name>]` describes, read from the environment variable `env` each
+/// time a plugin's request needs it.
+fn env_secret_in(asked: &Asked<'_>) -> Built {
+    asked.only(&["env"])?;
+    let variable = asked.text("env").ok_or("`env` is required")?.to_owned();
+    let name = asked.name.to_owned();
+    Ok(Box::new(plugin_fn(
+        format!("secret-{name}"),
+        &[SECRETS],
+        move |ctx| {
+            let variable = variable.clone();
+            let secret: Arc<dyn Secret> = Arc::new(move || {
+                std::env::var(&variable).map_err(|_| format!("${variable} is not set"))
+            });
+            ctx.service::<Secrets>(SECRETS)?
+                .register(ctx, name.clone(), secret)?;
+            Ok(())
+        },
+    )))
+}
+
 /// The plugin of an extension, or what is wrong with its entry.
 pub type Built = Result<Box<dyn Plugin>, String>;
 
@@ -120,6 +238,8 @@ impl Extensions {
     /// | `shell-kernel` | `dir` (default `{workspace}`), `program` (default `sh`; any POSIX shell, such as `bash`, Git for Windows' included) | a persistent shell as the kernel named like the entry; what `[kernels.<name>]` with `kind = "shell"` builds |
     /// | `powershell-kernel` | `dir` (default `{workspace}`), `program` (default `powershell` on Windows, `pwsh` elsewhere) | a persistent PowerShell as the kernel named like the entry; what `[kernels.<name>]` with `kind = "powershell"` builds |
     /// | `http-client` | none | the client the `http` capability sends through, for `http` and `https` |
+    /// | `mcp` | `command` (with `args`, `env` and `kernel`, `shell` by default) or `url` (with `bearer_token_env`), and `timeout_seconds` | the tools of one MCP server, as `<name>__<tool>`; what `[mcp.<name>]` builds |
+    /// | `env-secret` | `env` | the secret named like the entry, read from that environment variable when it is used; what `[secrets.<name>]` builds |
     #[must_use]
     pub fn builtin() -> Self {
         Self::none()
@@ -139,6 +259,8 @@ impl Extensions {
                 asked.only(&[])?;
                 Ok(Box::new(corduroy_http::http_client()))
             })
+            .kind(MCP, mcp_server_in)
+            .kind(ENV_SECRET, env_secret_in)
     }
 
     /// Add the kind `name`, built by `build`. A kind of that name already there is replaced.

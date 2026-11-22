@@ -31,4 +31,4 @@
 //! To change more than the kinds (how the log is kept, whether add-ons load), start from
 //! [`corduroy_std::Standard`] and run [`main_standard`](crate::command::main_standard).
 
-pub use corduroy_std::extension::{Asked, Built, Extensions, kernel_kind};
+pub use corduroy_std::extension::{Asked, Built, ENV_SECRET, Extensions, MCP, kernel_kind};

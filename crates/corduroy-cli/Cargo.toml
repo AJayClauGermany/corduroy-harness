@@ -21,8 +21,7 @@ path = "src/main.rs"
 [dependencies]
 # The standard extensions; the harness with every part the command uses.
 corduroy-std = { workspace = true }
-corduroy-harness = { workspace = true, features = ["tokio", "wasm", "shell", "jsonl"] }
-corduroy-mcp = { workspace = true }
+corduroy-harness = { workspace = true, features = ["tokio", "wasm"] }
 corduroy-providers = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["std"] }

@@ -338,9 +338,11 @@ dropped in.** Trust follows from it: whatever can be added without a rebuild is 
 and whatever holds the host's authority was compiled in by whoever built the binary.
 
 - **Turning on an extension the command already has is configuration.** The shipped
-  command has the providers, the kernels, MCP, secrets, the HTTP client and the
-  `shell-kernel` kind; the agent file picks which are loaded (`[providers.*]`,
-  `[kernels.*]`, `[mcp.*]`, `[secrets.*]`, `[extensions.<name>]`). A new *kind* of
+  command has the providers and the kinds `shell-kernel`, `powershell-kernel`, `mcp`,
+  `env-secret` and `http-client`; the agent file picks which are loaded (`[providers.*]`,
+  `[kernels.*]`, `[mcp.*]`, `[secrets.*]`, `[extensions.<name>]`). Every entry but a
+  provider is built from a kind of the command's `Standard`, so a command of one's own can
+  swap any of them (secrets from a keychain, a sandboxed kernel) without touching the rest. A new *kind* of
   extension is Rust in a command of one's own (see [In the `corduroy`
   command](#in-the-corduroy-command) below). Native code is never loaded at run time.
 - **An add-on is built on its own** (`cargo plugins`, `corduroy-js build`, `corduroy-py
@@ -399,6 +401,23 @@ extensions could link host functions of their own, "what can an add-on do" would
 have one answer in one file. A service is the pressure valve: text in, text out, scoped by
 name, with the caller's name attached.
 
+**The standard extensions, and why each is one.** Each needs something no capability gives
+an add-on, which is what earns it a place outside the sandbox. Anything that could be built
+from the capabilities alone belongs in an add-on instead.
+
+| Extension | Kind | Needs, natively | Could it be an add-on? |
+| --- | --- | --- | --- |
+| `corduroy-shell` | `shell-kernel`, `powershell-kernel` | processes, pipes, process groups | No: the `kernel` capability is how add-ons reach it. |
+| `corduroy-http` | `http-client` | sockets and TLS | No: it is what the `http` capability sends through. |
+| `corduroy-providers` | `[providers.*]` | async HTTP clients, credentials, streaming | Not yet: the loop asks a `Provider` for every step, and the world has no export to serve one. A model API over `http` and `secret` is the route if one is added. |
+| `corduroy-mcp` | `mcp` | starting a server through `Kernel::spawn` and holding its pipes; a streaming HTTP client | Over stdio, no: no capability spawns. Over streamable HTTP, possibly, through `http` (one request at a time, no streams); not done. |
+| `corduroy-std` | `env-secret` | the process environment | No: an add-on has no environment, and must never see the value. |
+
+The loop's own built-ins are core tier, not extensions: `GateOperation` (every tool call
+passes it), `CompactOperation` (the bridge that lets an add-on provide the `compaction`
+service, since add-ons cannot contribute loop steps) and the `sessions` service (child runs
+are the harness's to run).
+
 **Where something goes.** The core if every effect passes through it, if plugins contribute
 to it, or if plugins must agree on it ([The core boundary](#the-core-boundary)). An
 extension if it needs the host's authority or a native library (a process, a socket, a
@@ -408,7 +427,8 @@ always if a third party or the agent wrote it.
 ### In the `corduroy` command
 
 The kernels, providers, MCP servers and secrets of an agent file are extensions with
-sections of their own. Any other goes under `[extensions.<name>]`, where `kind` names one of
+sections of their own; each section but `[providers.*]` builds a kind of the command's
+`Standard` (`<kind>-kernel`, `mcp`, `env-secret`), as `[extensions.*]` does. Any other goes under `[extensions.<name>]`, where `kind` names one of
 the kinds the command was built with and the remaining keys are its configuration. Kinds
 are compiled in, so a new kind means a command of one's own: the shipped one with more
 kinds (`corduroy_cli::command::main_with` and `extension::Extensions`), rebuilt. The agent
@@ -462,10 +482,11 @@ client), how the event log is kept, and whether add-ons are loaded at all. The `
 command is put together from a `Standard` (`main_standard`), so a command for another kind
 of machine changes the parts that do not fit and keeps the rest; one for a device leaves
 `corduroy-std` out and brings its own over the same core and loop: a log on flash, a kernel
-that is an embedded interpreter, an HTTP client over its network stack. The harness's
-features `wasm`, `shell` and `jsonl` (on by default) are how a build leaves those parts out
-altogether; without `wasm` the core tier has no WebAssembly host, and the agent has no
-add-ons.
+that is an embedded interpreter, an HTTP client over its network stack. The harness
+itself carries none of these: its one optional part is `wasm` (on by default), the core
+tier's WebAssembly host, and without it the agent has no add-ons. A build that wants the
+shell kernel or the file log depends on `corduroy-shell` or `corduroy-jsonl` (or on
+`corduroy-std`), not on a feature of the loop.
 
 **On Windows** the kernel is PowerShell, which every Windows has: `[kernels.<name>]` with
 `kind = "powershell"` (`ShellKernel::powershell`), and the default agent's kernel there, with

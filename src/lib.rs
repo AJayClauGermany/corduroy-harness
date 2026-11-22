@@ -20,7 +20,8 @@
 //!
 //! Runs are durable. Each step of the loop is one commit to the stream's log, a harness holds
 //! many sessions on one stream, and [`Harness::continue_run`] finishes a run that a crash
-//! cut short. [`jsonl`] keeps the log in a file.
+//! cut short. Where the log is kept is the host's choice: any [`Log`](corduroy_core::Log), such
+//! as `corduroy-jsonl`'s file.
 //!
 //! Gates decide whether a tool call may run. Plugins register them in the
 //! [`Gates`](corduroy_core::Gates) registry; a call a gate denies goes back to the model as
@@ -40,8 +41,12 @@
 //! the locks. The loop needs no particular executor: it is plain `async`, and a stop wakes it
 //! through the waker it left. The `tokio` feature (on by default) runs each tool call on
 //! tokio's blocking pool when the loop runs on a tokio runtime; without it, or on another
-//! executor, a tool runs where the loop does. The add-on host, the shell kernel and the file
-//! log (`wasm`, `shell`, `jsonl`) need the standard library.
+//! executor, a tool runs where the loop does. The add-on host (`wasm`) needs the standard
+//! library.
+//!
+//! The harness carries no extensions: kernels, log stores, HTTP clients and model providers
+//! are plugins and stores of their own crates, which `corduroy-std` gathers for an ordinary
+//! computer.
 //!
 //! ```
 //! use std::sync::Arc;
@@ -100,12 +105,6 @@ pub mod tools;
 pub use children::SESSIONS;
 pub use compact::CompactOperation;
 pub use corduroy_core as core;
-#[cfg(feature = "jsonl")]
-pub use corduroy_jsonl as jsonl;
-#[cfg(feature = "shell")]
-pub use corduroy_shell as shell;
-#[cfg(feature = "shell")]
-pub use corduroy_shell::shell_kernel;
 #[cfg(feature = "wasm")]
 pub use corduroy_wasm as wasm;
 pub use gates::GateOperation;

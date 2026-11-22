@@ -10,7 +10,8 @@ use corduroy_harness::core::{
 };
 use corduroy_harness::core::{Message, ToolCall};
 use corduroy_harness::scripted::{ScriptedProvider, call, say};
-use corduroy_harness::{Answer, Harness, HarnessError, MAIN, Status, jsonl};
+use corduroy_harness::{Answer, Harness, HarnessError, MAIN, Status};
+use corduroy_jsonl as jsonl;
 use corduroy_test_support::scratch;
 use serde_json::{Value, json};
 
