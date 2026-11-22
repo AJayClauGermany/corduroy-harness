@@ -202,6 +202,71 @@ fn a_plugin_loads_children_with_no_more_than_it_holds() {
 }
 
 #[test]
+fn a_child_cannot_take_the_name_of_a_plugin_that_is_loaded() {
+    let work = scratch("load-impostor");
+    let mut host = host(&work).unwrap();
+    let runtime = WasmRuntime::new().unwrap().with_root(&work);
+    // A plugin with something in its `state` store, which goes by the plugin's name.
+    let mut victim = runtime
+        .load(plugin("testbed"))
+        .unwrap()
+        .named("victim")
+        .config(json!({"prefix": "v."}).to_string());
+    for capability in corduroy_wasm::CAPABILITIES {
+        let scope = if capability == "state" {
+            Scope::any()
+        } else {
+            Scope::none()
+        };
+        victim = victim.grant(capability, scope);
+    }
+    host.app.plugin(victim);
+    let kept = json!({"op": "set", "key": "token", "value": "private"});
+    host.tools.call("v.state", &kept.to_string()).unwrap();
+    // A loader that may name its children anything and pass on a `state` of its own.
+    let loader = loader(&runtime, &work)
+        .unwrap()
+        .grant("plugins", Scope::any())
+        .grant("state", Scope::any());
+    host.app.plugin(loader);
+    let grants: Vec<Value> = corduroy_wasm::CAPABILITIES
+        .iter()
+        .map(|capability| {
+            let allow = if *capability == "state" {
+                vec!["*"]
+            } else {
+                vec![]
+            };
+            json!({"capability": capability, "allow": allow, "deny": []})
+        })
+        .collect();
+
+    load(&host, &plugin("testbed"), "victim", &json!(grants)).unwrap();
+    host.app.apply_requests();
+
+    // The impostor is in the tree but was never started, so it read nothing.
+    let impostor = host
+        .app
+        .fibers()
+        .into_iter()
+        .find(|fiber| fiber.name == "victim" && fiber.parent.is_some())
+        .unwrap();
+    assert_eq!(
+        impostor.state,
+        FiberState::Failed("another plugin named `victim` is already loaded".into())
+    );
+    assert!(host.tools.get("state").is_none());
+    let read = json!({"op": "get", "key": "token"});
+    assert_eq!(
+        host.tools
+            .call("v.state", &read.to_string())
+            .unwrap()
+            .to_text(),
+        r#""private""#
+    );
+}
+
+#[test]
 fn a_load_beyond_the_loaders_own_grants_is_refused() {
     let work = scratch("load-refused");
     let mut host = host(&work).unwrap();

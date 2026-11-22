@@ -126,6 +126,10 @@ carry their own prompt snippets, and everything else is an extension hooking typ
 **Here.** `plugins/pi-tools`, with the same four tools, schemas and limits. It is one plugin
 among others rather than a built-in: the harness has no tools of its own.
 
+**Tool results.** A tool returns content blocks, text or images, as MCP tools do, so an
+MCP server's image reaches the model and a plugin's tool can return one. Text is the
+common case and stays a one-liner in every guest language: a string is one text block.
+
 **Left out.** Fuzzy matching in `edit`, saving truncated `bash` output to a file, per-tool
 prompt snippets, and the session tree. Pi's gate-style hooks have an equivalent in
 [gates](#events-gates-and-hooks), which WebAssembly plugins can be, and in
@@ -276,7 +280,7 @@ Everything else is a plugin, and a plugin may itself offer primitives to other p
 | Plugin tree (`App`, `Context`, effects, `inject`) | built | A name belongs to one plugin at a time, and never to another event source (`host`, `agent`, `user`, `environment`). Built for WebAssembly: a call that traps kills the instance, and the next call makes a new one and activates it again, keeping the plugin's registrations; after `Limits::restarts` restarts (default 3) the next trap stops the plugin until it is reloaded (`plugin/trapped`, `plugin/restarted`, `plugin/stopped`). Still to do: the same limit in the plugin tree itself, so a stopped plugin shows as suspended in `App` rather than only refusing calls. |
 | Event log | built | A fallible `Log` trait. A step's events are one atomic commit, stored before any listener or the model sees them, and stamped with the time it was stored: one reading of the clock per commit, never earlier than the commit before. The core has the trait and the in-memory stream; stores are separate crates. |
 | Sessions | built | Many sessions, each with an id and an optional parent. Every event of a run names its session; events about the plugin tree name none. Events a plugin raises while serving a tool call carry that call's session (`corduroy_core::call`). A session may be started by another for a task (a child), and nests at most `MAX_DEPTH` deep. |
-| Tool lifecycle | partly built | Built: `tool/call`, `tool/start` and `tool/result` are each committed as they happen, per call; `ToolSpec::replay_safe` says whether a call that was running at a crash may be repeated, and `read_only` whether it changes anything. Still to do: results as content blocks rather than one string, progress and cancellation. |
+| Tool lifecycle | built | `tool/call`, `tool/start` and `tool/result` are each committed as they happen, per call; `ToolSpec::replay_safe` says whether a call that was running at a crash may be repeated, and `read_only` whether it changes anything. A result is a list of content blocks, text or images (`ToolOutput`, `content` in the WIT), which reach the model as they are; `tool/result` records the result's text as `output` and, when it is anything but one block of text, the blocks as `content`, so a finished result is handed over from the log after a crash. Still to do: progress and cancellation, which need no change to this contract (see [Open questions](#open-questions)). |
 | Gates | built | A fourth registry. A gate is asked at a named decision point before something happens and answers allow, deny or ask; the strictest answer wins and is recorded. Reachable from WebAssembly through the `gate` export. Decision points are declared: the core declares `tool/call` and `plugin/load`, an extension declares the points it asks at, and asking at an undeclared point is denied. Still to do: letting a person answer an ask at `plugin/load`. See [Events, gates and hooks](#events-gates-and-hooks). |
 | Waits and signals | built | A run whose tool call a gate asked about waits for `Harness::answer`. In general, a tool call may wait for a named signal: whatever serves it says so through `corduroy_core::call::wait_for`, the call gets a placeholder and a `tool/wait`, `WaitOperation` stops the run before the model is asked again, and a `signal` event (`Harness::signal`) brings the result. A child session's end is such a signal, which the harness raises itself. All of it is in the log, so a wait survives a restart. Still to do: a timer that raises signals. |
 | Services | built | A fifth registry, `Services`: calls between plugins in JSON text, with the caller's name, across the WebAssembly boundary in both directions. See [Plugins extending plugins](#plugins-extending-plugins). |
@@ -675,7 +679,7 @@ harness.
 
 | Goose feature | Plugin here | Kind | Waits on |
 | --- | --- | --- | --- |
-| Developer: `write`, `edit`, `shell`, `tree`, `read_image` | `pi-tools` (`tree` added) | WebAssembly | `read_image` waits on content blocks |
+| Developer: `write`, `edit`, `shell`, `tree`, `read_image` | `pi-tools` (`tree` added) | WebAssembly | `read_image` waits on reading a file as bytes (`fs-read` reads text); tool results already carry images |
 | MCP extensions (stdio, streamable HTTP) | `corduroy-mcp` | native (`rmcp`) | done: stdio servers start through a kernel |
 | Providers | `corduroy-providers` (`oi-kit-providers`) | native | done |
 | Permission modes, per-tool permissions | `approval` (exists: `auto`, `smart`, `approve`, `chat`, allow and deny lists) | WebAssembly | done |

@@ -76,7 +76,10 @@ pub enum Transport {
 
 /// A plugin that connects to one MCP server and offers its tools. See [`mcp_server`].
 pub struct McpPlugin {
+    /// The plugin's own name, `mcp-<server>`, which no WebAssembly plugin is given by chance.
     name: String,
+    /// The server's name, which its tools are prefixed with.
+    server: String,
     transport: Transport,
     timeout: Duration,
 }
@@ -91,11 +94,14 @@ impl fmt::Debug for McpPlugin {
     }
 }
 
-/// A plugin offering the tools of the MCP server `name`, reached through `transport`.
+/// A plugin offering the tools of the MCP server `name`, reached through `transport`. The
+/// plugin itself is called `mcp-<name>`.
 #[must_use]
 pub fn mcp_server(name: impl Into<String>, transport: Transport) -> McpPlugin {
+    let server = name.into();
     McpPlugin {
-        name: name.into(),
+        name: format!("mcp-{server}"),
+        server,
         transport,
         timeout: DEFAULT_TIMEOUT,
     }
@@ -127,7 +133,7 @@ impl Plugin for McpPlugin {
             Transport::Stdio { kernel, spawn } => {
                 let kernels = ctx.service::<Kernels>(KERNELS)?;
                 let process = kernels.spawn(kernel, spawn).map_err(|error| {
-                    PluginError::new(format!("MCP server `{}`: {error}", self.name))
+                    PluginError::new(format!("MCP server `{}`: {error}", self.server))
                 })?;
                 Connection::Process(process)
             }
@@ -137,7 +143,7 @@ impl Plugin for McpPlugin {
             },
         };
         let (client, tools) = Client::start(connection, self.timeout)
-            .map_err(|error| PluginError::new(format!("MCP server `{}`: {error}", self.name)))?;
+            .map_err(|error| PluginError::new(format!("MCP server `{}`: {error}", self.server)))?;
         let client = Arc::new(client);
         let registry = ctx.service::<Tools>(TOOLS)?;
         for tool in tools {
@@ -148,7 +154,7 @@ impl Plugin for McpPlugin {
             let idempotent = annotations
                 .and_then(|annotations| annotations.idempotent_hint)
                 .unwrap_or(false);
-            let name = format!("{}__{}", self.name, tool.name);
+            let name = format!("{}__{}", self.server, tool.name);
             let input_schema = serde_json::to_string(&*tool.input_schema)
                 .unwrap_or_else(|_| r#"{"type":"object"}"#.to_owned());
             let description = tool.description.as_deref().unwrap_or_default();

@@ -181,6 +181,11 @@ as design guidance, not noise.
   `PluginTools` sets; never block a tool call on another run.
 - **Every world export is mandatory for every guest.** Adding one means a stub in each
   plugin under `plugins/`, and a check that JavaScript and Python can implement it.
+- **A tool returns content blocks.** `Tool::call` gives a `ToolOutput` (text and images);
+  text converts into one (`Ok(text.into())`, or return a `String` from `tool_fn`). Build a
+  `ToolSpec` with `ToolSpec::new(..)` and its builder methods, never as a literal. Whatever
+  records a `tool/result` writes the text as `output` and the blocks as `content` when the
+  result is not exactly one text block (`src/session.rs` and the host's `tools.call`).
 - **Tool failures are data, not control flow.** A `ToolError` becomes an error tool result and
   goes back to the model so it can recover. A model failure ends the run as `Status::Failed`,
   also recorded in the conversation. Only a broken pipeline returns `Err` from `Harness::run`.
