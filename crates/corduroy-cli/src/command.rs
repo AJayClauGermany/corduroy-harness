@@ -13,8 +13,9 @@
 //! options: --agent <file>  --workspace <dir>  --session <name>  --model <name>  --provider <name>
 //! ```
 //!
-//! The command is a library function, [`main_with`], so that a binary of your own can be the
-//! same command with more [extension kinds](crate::extension) built in.
+//! The command is a library function, [`main_standard`], so that a binary of your own can be
+//! the same command with other [standard extensions](corduroy_std::Standard): more
+//! [extension kinds](crate::extension) ([`main_with`]), another kernel, another log.
 
 use std::error::Error;
 use std::io::{self, BufRead, Write};
@@ -25,7 +26,9 @@ use std::sync::{Arc, Mutex};
 use corduroy_harness::core::SessionId;
 use corduroy_harness::{Harness, MAIN, Status};
 
-use crate::agent::{AGENT_FILE, Agent, AgentFile, Places, assemble_with};
+use corduroy_std::Standard;
+
+use crate::agent::{AGENT_FILE, Agent, AgentFile, Places, assemble_from};
 use crate::extension::Extensions;
 use crate::terminal::{self, Out, say};
 
@@ -68,16 +71,23 @@ fn options(mut args: impl Iterator<Item = String>) -> Result<Options, String> {
     Ok(options)
 }
 
-/// Run the `corduroy` command on this process's arguments, with the extension kinds in
-/// `extensions` available to the agent file. Returns the process's exit code.
+/// Run the `corduroy` command on this process's arguments, with the standard extensions and
+/// the extension kinds in `extensions` available to the agent file. Returns the process's exit
+/// code.
 pub fn main_with(extensions: &Extensions) -> ExitCode {
+    main_standard(&Standard::new().with_kinds(extensions))
+}
+
+/// Run the `corduroy` command on this process's arguments, putting agents together from the
+/// parts in `standard`. Returns the process's exit code.
+pub fn main_standard(standard: &Standard) -> ExitCode {
     let out: Out = Arc::new(Mutex::new(io::stdout()));
     let result = options(std::env::args().skip(1))
         .map_err(Into::into)
         .and_then(|options| {
             tokio::runtime::Runtime::new()
                 .map_err(Into::into)
-                .and_then(|runtime| runtime.block_on(run(options, extensions, &out)))
+                .and_then(|runtime| runtime.block_on(run(options, standard, &out)))
         });
     match result {
         Ok(code) => code,
@@ -107,7 +117,7 @@ fn init(workspace: &Path, out: &Out) -> Result<ExitCode, Box<dyn Error>> {
 fn load(
     options: &Options,
     workspace: PathBuf,
-    extensions: &Extensions,
+    standard: &Standard,
     out: &Out,
 ) -> Result<Agent, Box<dyn Error>> {
     let file_path = options
@@ -125,7 +135,7 @@ fn load(
         file.provider.clone_from(provider);
     }
     let file_path = file_path.map(|path| path.canonicalize()).transpose()?;
-    let agent = assemble_with(&file, &Places::new(workspace, file_path), extensions)?;
+    let agent = assemble_from(&file, &Places::new(workspace, file_path), standard)?;
     for unstarted in &agent.failed {
         let line = format!(
             "! plugin {} did not start: {}",
@@ -136,11 +146,7 @@ fn load(
     Ok(agent)
 }
 
-async fn run(
-    options: Options,
-    extensions: &Extensions,
-    out: &Out,
-) -> Result<ExitCode, Box<dyn Error>> {
+async fn run(options: Options, standard: &Standard, out: &Out) -> Result<ExitCode, Box<dyn Error>> {
     let workspace = match &options.workspace {
         Some(dir) => dir.clone(),
         None => std::env::current_dir()?,
@@ -150,7 +156,7 @@ async fn run(
     if command.first() == Some(&"init") {
         return init(&workspace, out);
     }
-    let agent = load(&options, workspace, extensions, out)?;
+    let agent = load(&options, workspace, standard, out)?;
     let harness = &agent.harness;
     let session = SessionId::new(options.session.as_deref().unwrap_or(MAIN));
     if !harness.session_list().iter().any(|info| info.id == session) {

@@ -34,7 +34,9 @@
 //!
 //! Extensions (native plugins of a kind this command was built with, see
 //! [`extension`](crate::extension)) go under `[extensions.<name>]`; `kind` names the kind and
-//! every other key is the extension's own configuration:
+//! every other key is the extension's own configuration. A kernel is an extension too:
+//! `[kernels.<name>]` with `kind = "shell"` builds the kind `shell-kernel`, with the entry's
+//! other keys (`dir`, `program`) as its configuration:
 //!
 //! ```toml
 //! [extensions.scratch]
@@ -59,9 +61,11 @@ use corduroy_harness::core::{
     FiberId, FiberState, SECRETS, Scope, Secret, Secrets, Spawn, plugin_fn,
 };
 use corduroy_harness::wasm::{CAPABILITIES, WasmRuntime};
-use corduroy_harness::{Harness, jsonl, provider, shell_kernel};
+use corduroy_harness::{Harness, provider};
 use corduroy_mcp::{McpPlugin, Transport, mcp_server};
 use corduroy_providers::ProviderSpec;
+pub use corduroy_std::{DATA_DIR, Places};
+use corduroy_std::{Standard, kernel_kind};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -69,9 +73,6 @@ use crate::extension::{Asked, Extensions};
 
 /// The file an agent is read from when none is named.
 pub const AGENT_FILE: &str = "corduroy.toml";
-
-/// The agent's own directory in the workspace: its log, compiled-code cache and skills.
-pub const DATA_DIR: &str = ".corduroy";
 
 /// An agent file, as written.
 #[derive(Debug, Clone, Deserialize)]
@@ -132,15 +133,16 @@ pub struct ProviderEntry {
     pub serve: Vec<String>,
 }
 
-/// A kernel.
+/// A kernel: an extension of the kind `<kind>-kernel`, such as `shell-kernel`.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct KernelEntry {
-    /// `shell`: a persistent POSIX shell.
+    /// `shell`: a persistent POSIX shell, starting in `dir` (`{workspace}` by default) and
+    /// run by `program` (`sh` by default), unless the command brings other kinds.
     pub kind: String,
-    /// The directory it starts in, `{workspace}` by default.
-    #[serde(default)]
-    pub dir: Option<String>,
+    /// The kernel's own configuration: every other key of the entry. The kind refuses a key
+    /// it does not know.
+    #[serde(flatten)]
+    pub config: BTreeMap<String, toml::Value>,
 }
 
 /// A secret, read from the environment when a plugin's request needs it.
@@ -237,100 +239,6 @@ impl AgentError {
     }
 }
 
-/// Where an agent works and keeps its things.
-#[derive(Debug, Clone)]
-pub struct Places {
-    /// The directory the agent works in.
-    pub workspace: PathBuf,
-    /// The agent's own directory, `{workspace}/.corduroy`.
-    pub data: PathBuf,
-    /// The agent file, if it came from one.
-    pub file: Option<PathBuf>,
-    /// Directories searched for a plugin given by a relative path, in order.
-    pub plugin_path: Vec<PathBuf>,
-}
-
-impl Places {
-    /// The places for an agent working in `workspace`, described by `file`.
-    ///
-    /// The plugin path is the agent file's directory, then each directory in
-    /// `CORDUROY_PLUGIN_PATH`, then the plugins of the source tree this was built from.
-    #[must_use]
-    pub fn new(workspace: PathBuf, file: Option<PathBuf>) -> Self {
-        let mut plugin_path: Vec<PathBuf> = file
-            .as_deref()
-            .and_then(Path::parent)
-            .map(Path::to_owned)
-            .into_iter()
-            .collect();
-        if let Some(extra) = std::env::var_os("CORDUROY_PLUGIN_PATH") {
-            plugin_path.extend(std::env::split_paths(&extra));
-        }
-        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins/target");
-        plugin_path.push(source.join("wasm32-unknown-unknown/release"));
-        plugin_path.push(source.join("guests"));
-        Self {
-            data: workspace.join(DATA_DIR),
-            workspace,
-            file,
-            plugin_path,
-        }
-    }
-
-    /// `text` with `{workspace}`, `{data}` and `{home}` filled in.
-    #[must_use]
-    pub fn expand(&self, text: &str) -> String {
-        let home_dir = std::env::var("HOME").unwrap_or_default();
-        text.replace("{workspace}", &self.workspace.to_string_lossy())
-            .replace("{data}", &self.data.to_string_lossy())
-            .replace("{home}", &home_dir)
-    }
-
-    pub(crate) fn expand_json(&self, value: Value) -> Value {
-        match value {
-            Value::String(text) => Value::String(self.expand(&text)),
-            Value::Array(items) => Value::Array(
-                items
-                    .into_iter()
-                    .map(|item| self.expand_json(item))
-                    .collect(),
-            ),
-            Value::Object(fields) => Value::Object(
-                fields
-                    .into_iter()
-                    .map(|(key, value)| (key, self.expand_json(value)))
-                    .collect(),
-            ),
-            other => other,
-        }
-    }
-
-    /// The component a plugin entry names.
-    fn find(&self, path: &str) -> Result<PathBuf, AgentError> {
-        let path = PathBuf::from(self.expand(path));
-        if path.is_absolute() {
-            return Ok(path);
-        }
-        self.plugin_path
-            .iter()
-            .map(|dir| dir.join(&path))
-            .find(|candidate| candidate.is_file())
-            .ok_or_else(|| {
-                let searched: Vec<String> = self
-                    .plugin_path
-                    .iter()
-                    .map(|dir| dir.display().to_string())
-                    .collect();
-                AgentError::new(format!(
-                    "plugin `{}` not found in {}. Build the plugins (`cargo plugins`, \
-                     `scripts/guests.sh`) or set CORDUROY_PLUGIN_PATH",
-                    path.display(),
-                    searched.join(", ")
-                ))
-            })
-    }
-}
-
 impl AgentFile {
     /// Parse an agent file.
     ///
@@ -390,14 +298,6 @@ impl AgentFile {
                         "MCP server `{name}` needs a `command` or a `url`, not both"
                     )));
                 }
-            }
-        }
-        for (name, kernel) in &self.kernels {
-            if kernel.kind != "shell" {
-                return Err(AgentError::new(format!(
-                    "kernel `{name}` is of kind `{}`; the only kind is `shell`",
-                    kernel.kind
-                )));
             }
         }
         Ok(())
@@ -571,34 +471,47 @@ pub struct Unstarted {
     pub reason: String,
 }
 
-/// Put the agent `file` describes together in `places`, with the extension kinds the
-/// `corduroy` command ships with. See [`assemble_with`].
+/// Put the agent `file` describes together in `places`, from the standard extensions. See
+/// [`assemble_from`].
 ///
 /// # Errors
 ///
-/// As [`assemble_with`].
+/// As [`assemble_from`].
 pub fn assemble(file: &AgentFile, places: &Places) -> Result<Agent, AgentError> {
-    assemble_with(file, places, &Extensions::builtin())
+    assemble_from(file, places, &Standard::new())
 }
 
-/// Put the agent `file` describes together in `places`, building its `[extensions]` from
-/// the kinds in `extensions`.
-///
-/// Opens its log, builds its providers and kernels, registers its secrets, and loads its
-/// extensions and then its plugins with their grants. The log, the agent file and the compiled-code cache are out of
-/// reach of every plugin's `fs-read` and `fs-write`, so a plugin cannot change its own grants
-/// or rewrite the record.
+/// Put the agent `file` describes together in `places`, from the standard extensions with the
+/// kinds in `extensions` added. See [`assemble_from`].
 ///
 /// # Errors
 ///
-/// Returns an [`AgentError`] if the log cannot be opened, a provider cannot be built, an
-/// extension is of a kind `extensions` does not have or cannot be built, or a plugin cannot
-/// be found or compiled. A plugin that is loaded but does not start is reported in
-/// [`Agent::failed`] instead.
+/// As [`assemble_from`].
 pub fn assemble_with(
     file: &AgentFile,
     places: &Places,
     extensions: &Extensions,
+) -> Result<Agent, AgentError> {
+    assemble_from(file, places, &Standard::new().with_kinds(extensions))
+}
+
+/// Put the agent `file` describes together in `places`, from the parts in `standard`.
+///
+/// Opens its log, loads the extensions every agent gets, builds its providers and kernels,
+/// registers its secrets, and loads its extensions and then its plugins with their grants.
+/// The log, the agent file and the compiled-code cache are out of reach of every plugin's
+/// `fs-read` and `fs-write`, so a plugin cannot change its own grants or rewrite the record.
+///
+/// # Errors
+///
+/// Returns an [`AgentError`] if the log cannot be opened, a provider cannot be built, a
+/// kernel or extension is of a kind `standard` does not have or cannot be built, a plugin is
+/// listed while `standard` loads no add-ons, or a plugin cannot be found or compiled. A
+/// plugin that is loaded but does not start is reported in [`Agent::failed`] instead.
+pub fn assemble_from(
+    file: &AgentFile,
+    places: &Places,
+    standard: &Standard,
 ) -> Result<Agent, AgentError> {
     fs::create_dir_all(&places.data)
         .map_err(|error| AgentError::new(format!("{}: {error}", places.data.display())))?;
@@ -607,7 +520,8 @@ pub fn assemble_with(
         || places.data.join("log.jsonl"),
         |path| places.workspace.join(places.expand(path)),
     );
-    let events = jsonl::open(&log)
+    let events = standard
+        .open_log(&log)
         .map_err(|error| AgentError::new(format!("log {}: {error}", log.display())))?;
     let mut harness = Harness::open(Arc::new(events))
         .map_err(|error| AgentError::new(error.to_string()))?
@@ -619,9 +533,9 @@ pub fn assemble_with(
     if let Some(max_turns) = file.max_turns {
         harness = harness.with_max_turns(max_turns);
     }
-    let mut failed = natives(&harness, file, places)?;
-    failed.extend(extend(&harness, file, places, extensions)?);
-    failed.extend(plugins(&harness, file, places, &log)?);
+    let mut failed = natives(&harness, file, places, standard)?;
+    failed.extend(extend(&harness, file, places, standard)?);
+    failed.extend(plugins(&harness, file, places, standard, &log)?);
     Ok(Agent {
         harness,
         file: file.clone(),
@@ -630,15 +544,88 @@ pub fn assemble_with(
     })
 }
 
-/// The native plugins: an HTTP client, the providers, the kernels and the secrets. Returns
-/// the providers that could not be built but that the agent can do without.
+/// Build the extension `name` of `kind` from `config` and load it. `what` names the entry in
+/// an error.
+fn load(
+    harness: &Harness,
+    places: &Places,
+    kinds: &Extensions,
+    entry: (&str, &str, &str),
+    config: Value,
+) -> Result<FiberId, AgentError> {
+    let (what, name, kind) = entry;
+    let failed = |error: &dyn fmt::Display| AgentError::new(format!("{what}: {error}"));
+    let config = places.expand_json(config);
+    let asked = Asked {
+        name,
+        config: &config,
+        places,
+    };
+    let plugin = kinds
+        .build(kind, &asked)
+        .ok_or_else(|| {
+            failed(&format!(
+                "this command has no extension kind `{kind}` (it has: {})",
+                kinds.kinds().join(", ")
+            ))
+        })?
+        .map_err(|reason| failed(&reason))?;
+    Ok(harness.plugin(plugin))
+}
+
+/// The native plugins: the extensions every agent gets, the providers, the kernels, the MCP
+/// servers and the secrets, in that order. Returns those that did not start, and the
+/// providers that could not be built but that the agent can do without.
 fn natives(
     harness: &Harness,
     file: &AgentFile,
     places: &Places,
+    standard: &Standard,
 ) -> Result<Vec<Unstarted>, AgentError> {
+    let kinds = standard.kinds();
+    let mut loaded = Vec::new();
+    for kind in standard.defaults() {
+        let entry = (
+            &*format!("extension `{kind}`"),
+            kind.as_str(),
+            kind.as_str(),
+        );
+        let id = load(
+            harness,
+            places,
+            kinds,
+            entry,
+            Value::Object(serde_json::Map::new()),
+        )?;
+        loaded.push((format!("extension {kind}"), id));
+    }
+    let mut failed = providers(harness, file)?;
+    for (name, kernel) in &file.kernels {
+        let what = format!("kernel `{name}`");
+        let kind = kernel_kind(&kernel.kind);
+        if !kinds.has(&kind) {
+            return Err(AgentError::new(format!(
+                "{what} is of kind `{}`, which this command does not have (it has: {})",
+                kernel.kind,
+                kinds.kernel_kinds().join(", ")
+            )));
+        }
+        let config = serde_json::to_value(&kernel.config)
+            .map_err(|error| AgentError::new(format!("{what}: {error}")))?;
+        let id = load(harness, places, kinds, (&what, name, &kind), config)?;
+        loaded.push((format!("kernel {name}"), id));
+    }
+    for (name, server) in &file.mcp {
+        harness.plugin(mcp(name, server, places)?);
+    }
+    secrets(harness, file);
+    failed.extend(unstarted(harness, loaded));
+    Ok(failed)
+}
+
+/// The providers. Returns those that could not be built but that the agent can do without.
+fn providers(harness: &Harness, file: &AgentFile) -> Result<Vec<Unstarted>, AgentError> {
     let mut failed = Vec::new();
-    harness.plugin(corduroy_http::http_client());
     for (name, entry) in &file.providers {
         match corduroy_providers::build(name, &entry.spec) {
             Ok(built) => {
@@ -654,16 +641,11 @@ fn natives(
             }),
         }
     }
-    for (name, kernel) in &file.kernels {
-        let dir = kernel.dir.as_deref().map_or_else(
-            || places.workspace.clone(),
-            |dir| PathBuf::from(places.expand(dir)),
-        );
-        harness.plugin(shell_kernel(name.clone(), dir));
-    }
-    for (name, server) in &file.mcp {
-        harness.plugin(mcp(name, server, places)?);
-    }
+    Ok(failed)
+}
+
+/// The secrets, each read from its environment variable when a plugin's request needs it.
+fn secrets(harness: &Harness, file: &AgentFile) {
     let secrets: Vec<(String, String)> = file
         .secrets
         .iter()
@@ -680,7 +662,6 @@ fn natives(
         }
         Ok(())
     }));
-    Ok(failed)
 }
 
 /// The extensions, each built from its kind. Returns those that did not start.
@@ -688,30 +669,21 @@ fn extend(
     harness: &Harness,
     file: &AgentFile,
     places: &Places,
-    extensions: &Extensions,
+    standard: &Standard,
 ) -> Result<Vec<Unstarted>, AgentError> {
     let mut loaded = Vec::new();
     for (name, entry) in &file.extensions {
-        let failed =
-            |error: &dyn fmt::Display| AgentError::new(format!("extension `{name}`: {error}"));
-        let config = serde_json::to_value(&entry.config).map_err(|error| failed(&error))?;
-        let config = places.expand_json(config);
-        let asked = Asked {
-            name,
-            config: &config,
+        let what = format!("extension `{name}`");
+        let config = serde_json::to_value(&entry.config)
+            .map_err(|error| AgentError::new(format!("{what}: {error}")))?;
+        let id = load(
+            harness,
             places,
-        };
-        let plugin = extensions
-            .build(&entry.kind, &asked)
-            .ok_or_else(|| {
-                failed(&format!(
-                    "this command has no extension kind `{}` (it has: {})",
-                    entry.kind,
-                    extensions.kinds().join(", ")
-                ))
-            })?
-            .map_err(|reason| failed(&reason))?;
-        loaded.push((format!("extension {name}"), harness.plugin(plugin)));
+            standard.kinds(),
+            (&what, name, &entry.kind),
+            config,
+        )?;
+        loaded.push((format!("extension {name}"), id));
     }
     Ok(unstarted(harness, loaded))
 }
@@ -776,8 +748,21 @@ fn plugins(
     harness: &Harness,
     file: &AgentFile,
     places: &Places,
+    standard: &Standard,
     log: &Path,
 ) -> Result<Vec<Unstarted>, AgentError> {
+    let mut enabled = file.plugins.iter().filter(|entry| entry.enabled).peekable();
+    if enabled.peek().is_none() {
+        return Ok(Vec::new());
+    }
+    if !standard.addons() {
+        let names: Vec<&str> = enabled.map(|entry| entry.name.as_str()).collect();
+        return Err(AgentError::new(format!(
+            "this command loads no add-ons, and the agent file lists {}; set `enabled = false` \
+             on them or use a command that does",
+            names.join(", ")
+        )));
+    }
     let mut runtime = WasmRuntime::cached(places.data.join("cache"))
         .map_err(|error| AgentError::new(error.to_string()))?
         .with_root(&places.workspace)
@@ -786,10 +771,10 @@ fn plugins(
         runtime = runtime.protect(path);
     }
     let mut loaded = Vec::new();
-    for entry in file.plugins.iter().filter(|entry| entry.enabled) {
+    for entry in enabled {
         let failed =
             |error: &dyn fmt::Display| AgentError::new(format!("plugin `{}`: {error}", entry.name));
-        let component = places.find(&entry.path)?;
+        let component = places.find(&entry.path).map_err(AgentError::new)?;
         let config = match &entry.config {
             Some(config) => {
                 places.expand_json(serde_json::to_value(config).map_err(|error| failed(&error))?)
@@ -889,7 +874,7 @@ mod tests {
         assert_eq!(
             error,
             "extension `box`: this command has no extension kind `docker-kernel` (it has: \
-             shell-kernel)"
+             http-client, shell-kernel)"
         );
 
         let refusing = Extensions::none().kind("picky", |_| Err("`image` is required".into()));
@@ -899,6 +884,75 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert_eq!(error, "extension `box`: `image` is required");
+    }
+
+    #[test]
+    fn a_kernel_is_built_from_its_kind_and_refuses_what_it_does_not_know() {
+        let places = Places::new(corduroy_test_support::scratch("cli-kernel-kinds"), None);
+        let bash = format!("{BARE}[kernels.work]\nkind = \"shell\"\nprogram = \"bash\"\n");
+        let agent = assemble(&AgentFile::parse(&bash).unwrap(), &places).unwrap();
+        assert_eq!(agent.harness.kernels().names(), ["work"]);
+        // The log stays locked while an agent holds it.
+        drop(agent);
+
+        let typo = format!("{BARE}[kernels.work]\nkind = \"shell\"\ndri = \"/tmp\"\n");
+        let error = assemble(&AgentFile::parse(&typo).unwrap(), &places)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "kernel `work`: `dri` is not a setting of this kind (it has: dir, program)"
+        );
+
+        let docker = format!("{BARE}[kernels.box]\nkind = \"docker\"\n");
+        let file = AgentFile::parse(&docker).unwrap();
+        let error = assemble(&file, &places).unwrap_err().to_string();
+        assert_eq!(
+            error,
+            "kernel `box` is of kind `docker`, which this command does not have (it has: shell)"
+        );
+        // A command that brings the kind has it.
+        let with_docker =
+            Standard::new().with_kinds(&Extensions::none().kind(kernel_kind("docker"), |asked| {
+                Ok(Box::new(corduroy_harness::shell_kernel(asked.name, "/")))
+            }));
+        let agent = assemble_from(&file, &places, &with_docker).unwrap();
+        assert_eq!(agent.harness.kernels().names(), ["box"]);
+    }
+
+    #[test]
+    fn the_standard_parts_can_be_swapped() {
+        use corduroy_harness::core::EventStream;
+
+        let workspace = corduroy_test_support::scratch("cli-standard-parts");
+        let places = Places::new(workspace, None);
+        let file = AgentFile::parse(BARE).unwrap();
+
+        // The HTTP client comes with every agent, unless the command leaves it out.
+        let agent = assemble(&file, &places).unwrap();
+        assert_eq!(agent.harness.http().names(), ["http", "https"]);
+        drop(agent);
+        let bare = Standard::new().without_kind("http-client");
+        let agent = assemble_from(&file, &places, &bare).unwrap();
+        assert_eq!(agent.harness.http().names(), Vec::<String>::new());
+        drop(agent);
+
+        // Another store for the log: here, none at all.
+        let elsewhere = Places::new(corduroy_test_support::scratch("cli-standard-log"), None);
+        let in_memory = Standard::new().with_log(|_| Ok(EventStream::new()));
+        let agent = assemble_from(&file, &elsewhere, &in_memory).unwrap();
+        assert!(!agent.log.exists());
+
+        // A command without add-ons refuses an agent that lists one.
+        let listed = format!("{BARE}[[plugins]]\nname = \"a\"\npath = \"a.wasm\"\n");
+        let error = assemble_from(
+            &AgentFile::parse(&listed).unwrap(),
+            &places,
+            &Standard::new().without_addons(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("loads no add-ons"), "{error}");
     }
 
     #[test]

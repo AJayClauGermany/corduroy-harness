@@ -25,12 +25,21 @@ use corduroy_core::{
 ///
 /// Unloading the plugin stops the shell and removes the kernel.
 pub fn shell_kernel(name: impl Into<String>, dir: impl Into<PathBuf>) -> impl Plugin + 'static {
+    shell_kernel_of(name, ShellKernel::new().in_dir(dir))
+}
+
+/// A plugin that provides `shell`, as configured (its program, its directory), as the kernel
+/// `name`. Each time the plugin is applied it starts from a fresh copy of that configuration.
+///
+/// Unloading the plugin stops the shell and removes the kernel.
+pub fn shell_kernel_of(name: impl Into<String>, shell: ShellKernel) -> impl Plugin + 'static {
     let name = name.into();
-    let dir = dir.into();
+    let (program, dir) = (shell.program, shell.dir);
     plugin_fn(format!("kernel-{name}"), &[KERNELS], move |ctx| {
         let kernels = ctx.service::<Kernels>(KERNELS)?;
-        let kernel: Arc<Mutex<dyn Kernel>> =
-            Arc::new(Mutex::new(ShellKernel::new().in_dir(dir.clone())));
+        let mut fresh = ShellKernel::program(program.clone());
+        fresh.dir.clone_from(&dir);
+        let kernel: Arc<Mutex<dyn Kernel>> = Arc::new(Mutex::new(fresh));
         kernels.register(ctx, name.clone(), kernel)?;
         Ok(())
     })

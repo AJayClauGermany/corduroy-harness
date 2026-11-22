@@ -1,0 +1,25 @@
+[package]
+name = "corduroy-std"
+description = "The standard extensions of the corduroy harness: what the shipped command carries over the core and the loop, for an ordinary computer."
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+corduroy-harness = { workspace = true, features = ["tokio", "wasm", "shell", "jsonl"] }
+corduroy-http = { workspace = true }
+corduroy-mcp = { workspace = true }
+corduroy-providers = { workspace = true }
+serde_json = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+corduroy-test-support = { workspace = true }

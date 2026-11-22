@@ -254,9 +254,9 @@ name = "corduroy-cli"
 version = "0.1.0"
 dependencies = [
  "corduroy-harness",
- "corduroy-http",
  "corduroy-mcp",
  "corduroy-providers",
+ "corduroy-std",
  "corduroy-test-support",
  "serde",
  "serde_json",
@@ -336,6 +336,18 @@ name = "corduroy-shell"
 version = "0.1.0"
 dependencies = [
  "corduroy-core",
+]
+
+[[package]]
+name = "corduroy-std"
+version = "0.1.0"
+dependencies = [
+ "corduroy-harness",
+ "corduroy-http",
+ "corduroy-mcp",
+ "corduroy-providers",
+ "corduroy-test-support",
+ "serde_json",
 ]
 
 [[package]]

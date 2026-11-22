@@ -44,6 +44,8 @@ jobs:
       - run: cargo clippy -p corduroy-core --no-default-features --features critical-section --target thumbv7em-none-eabihf -- -D warnings
       - run: cargo clippy -p corduroy-harness --no-default-features --features critical-section --target thumbv7em-none-eabihf -- -D warnings
       - run: cargo clippy -p corduroy-harness --all-targets --no-default-features --features std -- -D warnings
+      # The command on its own features, which the workspace's would otherwise hide.
+      - run: cargo check -p corduroy-cli
       - run: cargo clippy --manifest-path plugins/Cargo.toml --target wasm32-unknown-unknown -- -D warnings
       # The host tests load the plugins, so they are built first.
       - run: cargo plugins

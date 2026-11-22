@@ -2,9 +2,9 @@
 
 use std::process::ExitCode;
 
-use corduroy_cli::command::main_with;
-use corduroy_cli::extension::Extensions;
+use corduroy_cli::command::main_standard;
+use corduroy_std::Standard;
 
 fn main() -> ExitCode {
-    main_with(&Extensions::builtin())
+    main_standard(&Standard::new())
 }
