@@ -64,7 +64,7 @@ pub use context::{
 pub use event::{Draft, Event, EventId, EventStream, ListenerId, Log, LogError, SessionId, Source};
 pub use gate::{Decision, GATES, Gate, Gates, PLUGIN_LOAD, POINTS, TOOL_CALL, Verdict};
 pub use http::{HTTP, HttpClient, HttpClients, HttpRequest, HttpResponse};
-pub use kernel::{Cell, KERNELS, Kernel, KernelError, Kernels, MAX_OUTPUT};
+pub use kernel::{Cell, KERNELS, Kernel, KernelError, Kernels, MAX_OUTPUT, Process, Spawn};
 pub use model::{Completion, MODELS, Model, ModelError, Models, Role, Turn};
 pub use pattern::Pattern;
 pub use prompt::{PROMPTS, PromptPart, Prompts};

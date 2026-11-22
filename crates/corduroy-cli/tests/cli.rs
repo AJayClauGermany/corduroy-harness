@@ -298,3 +298,36 @@ fn a_broken_agent_file_is_reported_with_where() {
         "{stderr}"
     );
 }
+
+/// An MCP server in the agent file: started through the shell kernel, its tools offered to
+/// the model under the server's name. The server is a Python script, so this needs `python3`.
+#[test]
+fn an_mcp_server_in_the_agent_file_gives_the_model_its_tools() {
+    let workspace = scratch("cli-mcp");
+    let plugins = plugin("pi-tools").parent().unwrap().to_owned();
+    let server =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../corduroy-mcp/tests/fixtures/server.py");
+    let (address, seen) = model(vec![
+        tool_call("fixture__add", &json!({"a": 20, "b": 22})),
+        answer("It is 42."),
+    ])
+    .unwrap();
+    let agent = format!(
+        "{}\n[mcp.fixture]\ncommand = \"python3\"\nargs = [\"{}\"]\n",
+        agent_file(address, &plugins),
+        server.display()
+    );
+    fs::write(workspace.join("corduroy.toml"), agent).unwrap();
+
+    let output = corduroy(&workspace, &["run", "add", "them"], "y\n").unwrap();
+    let stdout = text(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{stdout}\n{}",
+        text(&output.stderr)
+    );
+    assert!(stdout.contains("▸ fixture__add"), "{stdout}");
+    assert!(stdout.contains("✓ 42"), "{stdout}");
+    let seen = seen.lock().unwrap().clone();
+    assert!(seen[0].to_string().contains("fixture__echo"));
+}

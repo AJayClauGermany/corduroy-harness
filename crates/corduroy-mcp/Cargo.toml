@@ -1,0 +1,24 @@
+[package]
+name = "corduroy-mcp"
+description = "MCP servers as corduroy plugins: each server's tools in the Tools registry, its process started through a kernel."
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+corduroy-core = { workspace = true }
+rmcp = { workspace = true, features = ["client", "transport-async-rw", "transport-streamable-http-client-reqwest", "reqwest"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "rt"] }
+
+[dev-dependencies]
+corduroy-shell = { workspace = true }

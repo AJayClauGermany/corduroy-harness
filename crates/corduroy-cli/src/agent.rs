@@ -22,6 +22,16 @@
 //! grants = { fs-read = ["{workspace}", "{workspace}/*"], kernel = "shell" }
 //! ```
 //!
+//! MCP servers go under `[mcp.<name>]`, with a `command` (started through a kernel, `shell`
+//! by default) or a `url`; their tools are named `<name>__<tool>`:
+//!
+//! ```toml
+//! [mcp.github]
+//! command = "npx"
+//! args = ["-y", "@modelcontextprotocol/server-github"]
+//! env = { GITHUB_PERSONAL_ACCESS_TOKEN = "..." }
+//! ```
+//!
 //! Strings may use `{workspace}` (where the agent works), `{data}` (its `.corduroy`
 //! directory) and `{home}`. A grant is a pattern, a list of patterns, or
 //! `{ allow = [..], deny = [..] }`; `*` matches any run of characters, `/` included. A plugin
@@ -33,10 +43,12 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
-use corduroy_harness::core::{FiberState, SECRETS, Scope, Secret, Secrets, plugin_fn};
+use corduroy_harness::core::{FiberState, SECRETS, Scope, Secret, Secrets, Spawn, plugin_fn};
 use corduroy_harness::wasm::{CAPABILITIES, WasmRuntime};
 use corduroy_harness::{Harness, jsonl, provider, shell_kernel};
+use corduroy_mcp::{McpPlugin, Transport, mcp_server};
 use corduroy_providers::ProviderSpec;
 use serde::Deserialize;
 use serde_json::Value;
@@ -73,6 +85,9 @@ pub struct AgentFile {
     /// Secrets WebAssembly plugins may use through the `secret` capability, by name.
     #[serde(default)]
     pub secrets: BTreeMap<String, SecretEntry>,
+    /// MCP servers, by the name their tools are prefixed with.
+    #[serde(default)]
+    pub mcp: BTreeMap<String, McpEntry>,
     /// WebAssembly plugins, loaded in order.
     #[serde(default)]
     pub plugins: Vec<PluginEntry>,
@@ -106,6 +121,33 @@ pub struct KernelEntry {
 pub struct SecretEntry {
     /// The environment variable holding the value.
     pub env: String,
+}
+
+/// An MCP server: a `command` started through a kernel, or a `url`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpEntry {
+    /// The program to start, speaking MCP over its standard input and output.
+    #[serde(default)]
+    pub command: Option<String>,
+    /// Its arguments.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Environment variables to set for it.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    /// The kernel that starts it, `shell` by default.
+    #[serde(default)]
+    pub kernel: Option<String>,
+    /// Where a server reached over streamable HTTP is.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// The environment variable holding a bearer token for `url`.
+    #[serde(default)]
+    pub bearer_token_env: Option<String>,
+    /// Seconds to wait for it to start and for each tool call.
+    #[serde(default)]
+    pub timeout_seconds: Option<u64>,
 }
 
 /// A WebAssembly plugin and what it may do.
@@ -304,6 +346,23 @@ impl AgentFile {
                 "plugin `{plugin}` is granted `{capability}`, which is not a capability (known: {})",
                 CAPABILITIES.join(", ")
             )));
+        }
+        for (name, server) in &self.mcp {
+            let kernel = server.kernel.as_deref().unwrap_or("shell");
+            match (&server.command, &server.url) {
+                (Some(_), None) if !self.kernels.contains_key(kernel) => {
+                    return Err(AgentError::new(format!(
+                        "MCP server `{name}` is started by the kernel `{kernel}`, which has no \
+                         [kernels.{kernel}] entry"
+                    )));
+                }
+                (Some(_), None) | (None, Some(_)) => {}
+                _ => {
+                    return Err(AgentError::new(format!(
+                        "MCP server `{name}` needs a `command` or a `url`, not both"
+                    )));
+                }
+            }
         }
         for (name, kernel) in &self.kernels {
             if kernel.kind != "shell" {
@@ -523,6 +582,9 @@ fn natives(harness: &Harness, file: &AgentFile, places: &Places) -> Result<(), A
         );
         harness.plugin(shell_kernel(name.clone(), dir));
     }
+    for (name, server) in &file.mcp {
+        harness.plugin(mcp(name, server, places)?);
+    }
     let secrets: Vec<(String, String)> = file
         .secrets
         .iter()
@@ -540,6 +602,44 @@ fn natives(harness: &Harness, file: &AgentFile, places: &Places) -> Result<(), A
         Ok(())
     }));
     Ok(())
+}
+
+/// The plugin for the MCP server `name`.
+fn mcp(name: &str, server: &McpEntry, places: &Places) -> Result<McpPlugin, AgentError> {
+    let transport = match (&server.command, &server.url) {
+        (Some(command), _) => Transport::Stdio {
+            kernel: server.kernel.clone().unwrap_or_else(|| "shell".to_owned()),
+            spawn: Spawn {
+                program: places.expand(command),
+                args: server.args.iter().map(|arg| places.expand(arg)).collect(),
+                env: server
+                    .env
+                    .iter()
+                    .map(|(key, value)| (key.clone(), places.expand(value)))
+                    .collect(),
+            },
+        },
+        (None, url) => {
+            let bearer_token = server
+                .bearer_token_env
+                .as_ref()
+                .map(|variable| {
+                    std::env::var(variable).map_err(|_| {
+                        AgentError::new(format!("MCP server `{name}`: ${variable} is not set"))
+                    })
+                })
+                .transpose()?;
+            Transport::Http {
+                url: places.expand(url.as_deref().unwrap_or_default()),
+                bearer_token,
+            }
+        }
+    };
+    let plugin = mcp_server(name, transport);
+    Ok(match server.timeout_seconds {
+        Some(seconds) => plugin.with_timeout(Duration::from_secs(seconds)),
+        None => plugin,
+    })
 }
 
 /// The WebAssembly plugins, each with its grants. Returns those that did not start.
@@ -600,7 +700,10 @@ mod tests {
         let file = AgentFile::parse(&AgentFile::default_text()).unwrap();
         assert_eq!(file.provider, "main");
         assert_eq!(file.plugins.len(), 10);
-        assert_eq!(file.plugins.iter().filter(|plugin| plugin.enabled).count(), 9);
+        assert_eq!(
+            file.plugins.iter().filter(|plugin| plugin.enabled).count(),
+            9
+        );
         assert!(file.plugins[0].grants.contains_key("kernel"));
     }
 

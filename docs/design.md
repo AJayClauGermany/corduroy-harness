@@ -266,7 +266,7 @@ Everything else is a plugin, and a plugin may itself offer primitives to other p
 | Waits and signals | built for a gate's ask | A run whose tool call a gate asked about waits for `Harness::answer`; the ask and the answer are events, so the wait survives a restart. Still to do: the general form, a step that waits for any named signal (a child session finishing, a timer). |
 | Services | built | A fifth registry, `Services`: calls between plugins in JSON text, with the caller's name, across the WebAssembly boundary in both directions. See [Plugins extending plugins](#plugins-extending-plugins). |
 | Capabilities | fifteen | The mechanism is settled; the set grows (below). |
-| Kernels | built | The trait and registry. `ShellKernel` is an implementation, not a primitive, and lives in `corduroy-shell`. |
+| Kernels | built | The trait and registry, and `Kernel::spawn` for long-lived processes with pipes (MCP servers). `ShellKernel` is an implementation, not a primitive, and lives in `corduroy-shell`. |
 | Conversation projection | messages only | Understands a `compaction` event (a summary and the first message kept). Producing the summary is a plugin's job. |
 | Model access | built | The loop asks the provider registered under a name in `Providers`, on every request, so a plugin supplies the model and unloading it takes the model away. `Harness::new` registers its argument there for convenience. For plugins, the core's `Models` registry: one completion, synchronously, by model name; a `provider` plugin can serve its models there. |
 | Secrets and outbound requests | built | `Secrets` and `HttpClients` registries. The core checks and records; native plugins hold the values and send the requests, so an HTTP client is a plugin like a kernel is. |
@@ -572,8 +572,8 @@ The core supplies the choke points, not the sandbox. What it must guarantee:
   holds today and must hold for each capability added.
 - **Process execution goes through a kernel.** No capability may start a process any other
   way, or an execution sandbox could be bypassed. A plugin that needs a subprocess (an MCP
-  server over stdio) asks for one through a kernel, so the same grant and the same sandbox
-  apply.
+  server over stdio) asks for one through a kernel (`Kernel::spawn`), so the same grant and
+  the same sandbox apply.
 - **Native plugins are trusted.** A native plugin runs with the host's authority and no check
   applies to it. Anything that comes from a third party, or that the agent writes for
   itself, must be WebAssembly.
@@ -586,7 +586,7 @@ harness.
 | Goose feature | Plugin here | Kind | Waits on |
 | --- | --- | --- | --- |
 | Developer: `write`, `edit`, `shell`, `tree`, `read_image` | `pi-tools` (`tree` added) | WebAssembly | `read_image` waits on content blocks |
-| MCP extensions (stdio, streamable HTTP) | `mcp` | native (`rmcp`) | kernels for subprocesses |
+| MCP extensions (stdio, streamable HTTP) | `corduroy-mcp` | native (`rmcp`) | done: stdio servers start through a kernel |
 | Providers | `corduroy-providers` (`oi-kit-providers`) | native | done |
 | Permission modes, per-tool permissions | `approval` (exists: `auto`, `smart`, `approve`, `chat`, allow and deny lists) | WebAssembly | done |
 | Tool inspection, prompt-injection scan | `inspect` (exists: dangerous commands, credentials, repetition, injected instructions in results) | WebAssembly | done |
@@ -665,9 +665,12 @@ the step it waits on is done.
    - *Done:* the plugins that waited on nothing: `hints`, `todo`, `memory`, `recall`,
      `summarize`, `inspect`, `plugin-manager`, and `tree` in `pi-tools`, each a Rust guest
      of under 120 KB, all but `plugin-manager` in the default agent.
-   - MCP. A server over stdio is a long-lived process with pipes, which `Kernel::exec`
-     cannot hold, so kernels gain an optional way to start one: the rule that processes
-     start only through a kernel stays, and a sandboxed kernel sandboxes MCP servers too.
+   - *Done:* MCP. A server over stdio is a long-lived process with pipes, which
+     `Kernel::exec` cannot hold, so kernels gained `Kernel::spawn` (refused by default;
+     `ShellKernel` starts the process in its directory and process group): the rule that
+     processes start only through a kernel stays, and a sandboxed kernel sandboxes MCP
+     servers too. `crates/corduroy-mcp` is a native plugin per server, stdio or streamable
+     HTTP, registering its tools as `<server>__<tool>`; `[mcp.<name>]` in the agent file.
    - Compaction: the projection learns the `compaction` event, and a `compact` plugin
      writes it.
    - Sub-agents: the general form of waits and signals, the `session` capability, and a

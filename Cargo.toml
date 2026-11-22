@@ -23,6 +23,7 @@ corduroy-wasm = { path = "crates/corduroy-wasm", version = "0.1.0" }
 corduroy-jsonl = { path = "crates/corduroy-jsonl", version = "0.1.0" }
 corduroy-shell = { path = "crates/corduroy-shell", version = "0.1.0" }
 corduroy-http = { path = "crates/corduroy-http", version = "0.1.0" }
+corduroy-mcp = { path = "crates/corduroy-mcp", version = "0.1.0" }
 corduroy-providers = { path = "crates/corduroy-providers", version = "0.1.0" }
 corduroy-test-support = { path = "crates/corduroy-test-support", version = "0.1.0" }
 # Synchronous embedding: no async runtime, and no WASI, so plugins get no ambient authority.

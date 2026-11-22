@@ -117,6 +117,7 @@ demo drive the loop with a scripted provider.
 | --- | --- |
 | `crates/corduroy-core` | Dependency-free core: plugin contexts, capabilities, event stream with sessions and a `Log` trait, the registries plugins contribute to (tools, prompts, kernels, gates, services, models, secrets, HTTP clients) |
 | `crates/corduroy-cli` | The `corduroy` command: an agent file (providers, kernels, secrets, plugins and their grants) run in a terminal |
+| `crates/corduroy-mcp` | MCP servers (stdio, through a kernel, or streamable HTTP) as plugins |
 | `crates/corduroy-providers` | Model providers from `oi-kit-providers`: Anthropic, OpenAI, Ollama and the providers Goose knows |
 | `crates/corduroy-http` | The HTTP client behind the `http` capability, which never follows a redirect |
 | `crates/corduroy-shell` | A persistent POSIX shell as a kernel |

@@ -6,7 +6,7 @@
 //! or a sandboxed kernel that runs cells in a container, live outside it.
 
 use std::fmt;
-use std::io::{BufRead as _, BufReader, Write as _};
+use std::io::{BufRead as _, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -14,7 +14,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use corduroy_core::{Cell, KERNELS, Kernel, KernelError, Kernels, MAX_OUTPUT, Plugin, plugin_fn};
+use corduroy_core::{
+    Cell, KERNELS, Kernel, KernelError, Kernels, MAX_OUTPUT, Plugin, Process, Spawn, plugin_fn,
+};
 
 /// A plugin that provides a persistent shell as the kernel `name`, working in `dir`.
 ///
@@ -129,6 +131,60 @@ impl Kernel for ShellKernel {
     fn reset(&mut self) {
         self.session = None;
     }
+
+    /// Start `spawn` in the kernel's directory, as its own process group, with its standard
+    /// error discarded. It is found on the `PATH`, as the shell would find it.
+    fn spawn(&mut self, spawn: &Spawn) -> Result<Box<dyn Process>, KernelError> {
+        let mut command = Command::new(&spawn.program);
+        command
+            .args(&spawn.args)
+            .envs(spawn.env.iter().map(|(name, value)| (name, value)))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        if let Some(dir) = &self.dir {
+            command.current_dir(dir);
+        }
+        own_process_group(&mut command);
+        let child = command.spawn().map_err(|error| {
+            KernelError::Unavailable(format!("cannot start `{}`: {error}", spawn.program))
+        })?;
+        Ok(Box::new(ShellProcess { child }))
+    }
+}
+
+/// A process a [`ShellKernel`] started. Dropping it stops the process and its group.
+struct ShellProcess {
+    child: Child,
+}
+
+impl Process for ShellProcess {
+    fn stdin(&mut self) -> Option<Box<dyn Write + Send>> {
+        let stdin: Box<dyn Write + Send> = Box::new(self.child.stdin.take()?);
+        Some(stdin)
+    }
+
+    fn stdout(&mut self) -> Option<Box<dyn Read + Send>> {
+        let stdout: Box<dyn Read + Send> = Box::new(self.child.stdout.take()?);
+        Some(stdout)
+    }
+
+    fn running(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+
+    fn kill(&mut self) {
+        kill_process_group(&self.child);
+        // Both fail only if the process is already gone, which is the goal.
+        drop(self.child.kill());
+        drop(self.child.wait());
+    }
+}
+
+impl Drop for ShellProcess {
+    fn drop(&mut self) {
+        self.kill();
+    }
 }
 
 struct Session {
@@ -241,12 +297,63 @@ fn kill_process_group(_child: &Child) {}
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     const PATIENT: Duration = Duration::from_secs(10);
 
     fn run(kernel: &mut ShellKernel, code: &str) -> Cell {
         kernel.exec(code, PATIENT).unwrap()
+    }
+
+    #[test]
+    fn a_process_runs_in_the_kernels_directory_with_pipes_until_dropped() {
+        let dir = std::env::temp_dir();
+        let mut kernel = ShellKernel::new().in_dir(&dir);
+        let spawn = Spawn {
+            program: "sh".into(),
+            args: vec![
+                "-c".into(),
+                "pwd; echo \"$GREETING\"; while read -r line; do echo \"got $line\"; done".into(),
+            ],
+            env: vec![("GREETING".into(), "hello".into())],
+        };
+        let mut process = kernel.spawn(&spawn).unwrap();
+        let mut stdin = process.stdin().unwrap();
+        let mut stdout = BufReader::new(process.stdout().unwrap());
+        assert!(process.stdin().is_none(), "handed out once");
+
+        let mut line = String::new();
+        stdout.read_line(&mut line).unwrap();
+        assert_eq!(
+            Path::new(line.trim()).canonicalize().unwrap(),
+            dir.canonicalize().unwrap()
+        );
+        line.clear();
+        stdout.read_line(&mut line).unwrap();
+        assert_eq!(line, "hello\n");
+        stdin.write_all(b"ping\n").unwrap();
+        stdin.flush().unwrap();
+        line.clear();
+        stdout.read_line(&mut line).unwrap();
+        assert_eq!(line, "got ping\n");
+
+        assert!(process.running());
+        process.kill();
+        assert!(!process.running());
+    }
+
+    #[test]
+    fn a_program_that_cannot_start_is_unavailable() {
+        let spawn = Spawn {
+            program: "/no/such/program".into(),
+            ..Spawn::default()
+        };
+        let error = ShellKernel::new().spawn(&spawn).err();
+        assert!(
+            matches!(error, Some(KernelError::Unavailable(reason)) if reason.contains("/no/such/program"))
+        );
     }
 
     #[test]
