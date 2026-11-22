@@ -357,12 +357,13 @@ fn log_clock_and_random_answer_within_their_grants() {
         .grant("llm", Scope::none())
         .grant("secret", Scope::none())
         .grant("http", Scope::none())
-        .grant("log-read", Scope::none());
+        .grant("log-read", Scope::none())
+        .grant("session", Scope::none());
     assert_eq!(
         testbed.requires(),
         [
             "events", "log", "clock", "random", "tools", "state", "service", "plugins", "llm",
-            "secret", "http", "log-read"
+            "secret", "http", "log-read", "session"
         ]
     );
     host.app.plugin(testbed);
@@ -408,7 +409,8 @@ fn log_clock_and_random_are_scoped_like_any_capability() {
         .grant("llm", Scope::none())
         .grant("secret", Scope::none())
         .grant("http", Scope::none())
-        .grant("log-read", Scope::none());
+        .grant("log-read", Scope::none())
+        .grant("session", Scope::none());
     host.app.plugin(testbed);
 
     let probed = probe(&host).unwrap();
@@ -449,7 +451,8 @@ fn restartable(dir: &Path, restarts: u32) -> Result<WasmPlugin, WasmError> {
         .grant("llm", Scope::none())
         .grant("secret", Scope::none())
         .grant("http", Scope::none())
-        .grant("log-read", Scope::none()))
+        .grant("log-read", Scope::none())
+        .grant("session", Scope::none()))
 }
 
 #[test]

@@ -143,14 +143,16 @@ impl Operation<Session, Effect> for PromptOperation {
 
     async fn prompt_parts(
         &self,
-        _session: &Session,
+        session: &Session,
         _conversation: &Conversation,
     ) -> Result<Vec<(String, String)>> {
         let mut parts = Vec::new();
         if !self.system.is_empty() {
             parts.push(("system".to_owned(), self.system.clone()));
         }
-        parts.extend(self.prompts.render());
+        // Rendered for the session being asked about, so a part can be the session's own.
+        let serve = corduroy_core::call::Serve::session(SessionId::new(session.id()));
+        parts.extend(serve.run(|| self.prompts.render()).0);
         Ok(parts)
     }
 }

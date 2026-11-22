@@ -70,7 +70,7 @@ are; `text_of(blocks)` is their text, with an image as a marker such as
 
 Each `wit_world.imports.<capability>` module is one capability: `fs_read`, `fs_write`,
 `kernel`, `events`, `log`, `clock`, `random`, `tools`, `state`, `service`, `plugins`, `llm`,
-`secret`, `http`, `log_read` (named with hyphens on the command line). A Python component
+`secret`, `http`, `log_read`, `session` (named with hyphens on the command line). A Python component
 imports every interface of the world it is built against, so `--capabilities` is the
 plugin's declaration of what it needs: the build generates a world with exactly those
 imports, and the host instantiates the plugin only if it granted all of them.

@@ -69,7 +69,10 @@ impl GateOperation {
             "read-only": read_only,
             "caller": "agent",
         });
-        self.gates.decide(TOOL_CALL, &request.to_string())
+        let serve = corduroy_core::call::Serve::session(SessionId::new(session));
+        serve
+            .run(|| self.gates.decide(TOOL_CALL, &request.to_string()))
+            .0
     }
 }
 

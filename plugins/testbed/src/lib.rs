@@ -16,6 +16,7 @@
 //! | `fetch` | Makes an HTTP request: `{"method", "url", "body", "headers": [{"name", "text"} \| {"name", "secret"}]}`; returns `{"status", "body"}` |
 //! | `read` | Reads the event stream: `{"session", "topic", "after", "limit"}`; returns `[[id, session, topic]]` |
 //! | `tools` | Lists the tools its `tools` scope reaches, by name |
+//! | `session` | `{"current", "call", "stopping"}`: what `session` says about the call it serves |
 //!
 //! `state` with `"trap": true` traps after the operation, to show that a trapped call's writes
 //! are not kept.
@@ -26,7 +27,8 @@
 //! `{"gates": [..]}` names decision points to gate, which the host must refuse for
 //! `tool/call` and `plugin/load` since this plugin also imports `tools` and `plugins`; and
 //! `{"echo": {"on": "ping", "emit": "pong"}}` emits `pong` for every `ping` it sees, so that
-//! two instances can be set off against each other.
+//! two instances can be set off against each other; with `"session": true` the event it
+//! emits is `{"session"}`, the session it was told it serves while handling the event.
 
 use std::fmt::Write as _;
 use std::sync::OnceLock;
@@ -34,7 +36,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use corduroy_guest::host::log::Level;
 use corduroy_guest::host::{
-    clock, events, http, llm, log, log_read, plugins, random, secret, service, state, tools,
+    clock, events, http, llm, log, log_read, plugins, random, secret, service, session, state,
+    tools,
 };
 use corduroy_guest::{
     CallError, Content, Event, HostError, Plugin, PluginInfo, ServiceCall, ToolError, ToolSpec,
@@ -50,6 +53,9 @@ static PREFIX: OnceLock<String> = OnceLock::new();
 
 /// The topic to emit for every event this plugin is sent.
 static ECHO: OnceLock<String> = OnceLock::new();
+
+/// Whether the echo says which session it was handled for, instead of repeating the payload.
+static ECHO_SESSION: OnceLock<bool> = OnceLock::new();
 
 /// A host call's answer, or its error, as JSON.
 fn report<T: Into<Value>>(result: Result<T, HostError>) -> Value {
@@ -303,9 +309,10 @@ impl Plugin for Testbed {
             topic => vec![topic.to_owned()],
         };
         let _ = ECHO.set(text(&echo, "emit").to_owned());
+        let _ = ECHO_SESSION.set(echo.get("session").and_then(Value::as_bool) == Some(true));
         let tools = [
             "probe", "count", "trap", "relay", "state", "load", "unload", "loaded", "ask", "fetch",
-            "read", "tools", "picture",
+            "read", "tools", "picture", "session",
         ]
         .map(spec)
         .to_vec();
@@ -339,6 +346,12 @@ impl Plugin for Testbed {
             "ask" => Ok(ask(&input)),
             "fetch" => Ok(fetch(&input)),
             "read" => Ok(read(&input)),
+            "session" => Ok(json!({
+                "current": report(session::current().map(|current| json!(current))),
+                "call": report(session::call().map(|call| json!(call))),
+                "stopping": session::stopping(),
+            })
+            .to_string()),
             "tools" => Ok(json!(
                 tools::list()
                     .into_iter()
@@ -363,8 +376,14 @@ impl Plugin for Testbed {
 
     fn on_event(event: Event) {
         if let Some(topic) = ECHO.get().filter(|topic| !topic.is_empty()) {
+            let payload = if ECHO_SESSION.get() == Some(&true) {
+                json!({"session": report(session::current().map(|current| json!(current)))})
+                    .to_string()
+            } else {
+                event.payload
+            };
             // Refused or not, there is nobody to tell from inside a listener.
-            let _ = events::emit(topic, &event.payload);
+            let _ = events::emit(topic, &payload);
         }
     }
 

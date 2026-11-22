@@ -405,7 +405,7 @@ async fn a_plugin_loaded_during_a_run_is_there_for_the_next_step() {
     let dir = built.parent().unwrap().to_owned();
     let empty: Vec<serde_json::Value> = [
         "log", "clock", "random", "tools", "state", "service", "events", "llm", "secret", "http",
-        "log-read", "plugins",
+        "log-read", "plugins", "session",
     ]
     .iter()
     .map(|capability| json!({"capability": capability, "allow": [], "deny": []}))
@@ -430,7 +430,7 @@ async fn a_plugin_loaded_during_a_run_is_there_for_the_next_step() {
         .grant("fs-read", Scope::subtree(&dir.to_string_lossy()));
     for capability in [
         "log", "clock", "random", "tools", "state", "service", "events", "llm", "secret", "http",
-        "log-read",
+        "log-read", "session",
     ] {
         loader = loader.grant(capability, Scope::none());
     }

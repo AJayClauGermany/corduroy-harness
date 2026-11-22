@@ -65,7 +65,7 @@ fn loader(runtime: &WasmRuntime, work: &Path) -> Result<WasmPlugin, Box<dyn Erro
         .grant("fs-read", readable);
     for capability in [
         "events", "log", "clock", "random", "tools", "state", "service", "llm", "secret", "http",
-        "log-read",
+        "log-read", "session",
     ] {
         testbed = testbed.grant(capability, Scope::none());
     }
@@ -393,7 +393,7 @@ fn echo(name: &str, on: &str, emit: &str, cascade: usize) -> Result<WasmPlugin, 
         .grant("events", Scope::any());
     for capability in [
         "log", "clock", "random", "tools", "state", "service", "plugins", "llm", "secret", "http",
-        "log-read",
+        "log-read", "session",
     ] {
         testbed = testbed.grant(capability, Scope::none());
     }

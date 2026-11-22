@@ -32,4 +32,4 @@ sdk/python/.venv/bin/corduroy-py build sdk/python/tests/blocks.py \
 
 step "Script host"
 node sdk/js/bin/corduroy-js.js build sdk/js/script-host/host.js --out "$out/script_host_js.wasm" \
-  --capabilities fs-read,fs-write,kernel,events,log,clock,random,tools,state,service,plugins,llm,secret,http,log-read
+  --capabilities fs-read,fs-write,kernel,events,log,clock,random,tools,state,service,plugins,llm,secret,http,log-read,session

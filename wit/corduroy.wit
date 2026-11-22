@@ -376,6 +376,27 @@ interface log-read {
     read: func(session: option<string>, topic: string, after: u64, limit: u32) -> result<list<event>, host-error>;
 }
 
+/// Capability `session`: which session the plugin is being called for. Scoped by session id.
+///
+/// A harness holds many sessions (a sub-agent is a session of its own), and one plugin serves
+/// all of them. A plugin that keeps something per session (a list, a count, notes) keys it by
+/// the session this says it is serving.
+interface session {
+    use types.{host-error};
+
+    /// The session the current call into the plugin serves: the tool call, prompt part,
+    /// gate request or event it is handling. `none` when it serves the harness itself (on
+    /// `activate`, or for an event that belongs to no session). `denied` if the grant does
+    /// not reach that session.
+    current: func() -> result<option<string>, host-error>;
+    /// The id of the tool call being served, if the plugin is serving one. Checked against
+    /// the grant like `current`.
+    call: func() -> result<option<string>, host-error>;
+    /// Whether the run being served was asked to stop. A tool that takes long looks now and
+    /// then and returns early when it was; what it returns is still recorded.
+    stopping: func() -> bool;
+}
+
 /// A plugin. Every import is a capability the host must grant before the plugin is
 /// instantiated; a plugin that imports nothing can only compute.
 world plugin {
@@ -396,6 +417,7 @@ world plugin {
     import secret;
     import http;
     import log-read;
+    import session;
 
     /// Called once per instantiation with the plugin's configuration as JSON text.
     export activate: func(config: string) -> result<plugin-info, string>;

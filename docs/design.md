@@ -206,7 +206,7 @@ user gets from Goose out of the box should be reachable here with shipped plugin
 
 ## Capabilities
 
-The plugin world in `wit/corduroy.wit` imports fifteen host interfaces and nothing else. There
+The plugin world in `wit/corduroy.wit` imports sixteen host interfaces and nothing else. There
 is no WASI in the linker, so a plugin has no clock, environment, filesystem or network of its
 own beyond what these give it.
 
@@ -227,6 +227,7 @@ own beyond what these give it.
 | `secret` | an opaque handle to a named credential, never its value | secret name |
 | `http` | an HTTP request through the client registered for its scheme, with credentials written in by the host | host name |
 | `log-read` | events of any session, by topic, in pages | `<session>:<topic>`, the session with `%` and `:` percent-encoded (empty for harness events) |
+| `session` | which session the plugin is being called for (a tool call, a prompt part, a gate request, an event of the session), the tool call's id, and whether the run was asked to stop | session id |
 
 Two limits hold whatever a grant says. **Protected paths** (the host binary, the compiled-code
 cache and whatever the host adds with `WasmRuntime::protect`, such as the event log and grant
@@ -279,12 +280,12 @@ Everything else is a plugin, and a plugin may itself offer primitives to other p
 | --- | --- | --- |
 | Plugin tree (`App`, `Context`, effects, `inject`) | built | A name belongs to one plugin at a time, and never to another event source (`host`, `agent`, `user`, `environment`). Built for WebAssembly: a call that traps kills the instance, and the next call makes a new one and activates it again, keeping the plugin's registrations; after `Limits::restarts` restarts (default 3) the next trap stops the plugin until it is reloaded (`plugin/trapped`, `plugin/restarted`, `plugin/stopped`). Still to do: the same limit in the plugin tree itself, so a stopped plugin shows as suspended in `App` rather than only refusing calls. |
 | Event log | built | A fallible `Log` trait. A step's events are one atomic commit, stored before any listener or the model sees them, and stamped with the time it was stored: one reading of the clock per commit, never earlier than the commit before. The core has the trait and the in-memory stream; stores are separate crates. |
-| Sessions | built | Many sessions, each with an id and an optional parent. Every event of a run names its session; events about the plugin tree name none. Events a plugin raises while serving a tool call carry that call's session (`corduroy_core::call`). A session may be started by another for a task (a child), and nests at most `MAX_DEPTH` deep. |
+| Sessions | built | Many sessions, each with an id and an optional parent. Every event of a run names its session; events about the plugin tree name none. Whatever is done for a session (a tool call, rendering a prompt part, asking a gate, delivering an event of the session) is done in its call scope (`corduroy_core::call`), so the events a plugin raises then carry the session, and a plugin can ask which session it serves (the `session` capability) and keep something per session: `todo` keeps a list for each, so a sub-agent's plan does not overwrite its parent's. A session may be started by another for a task (a child), and nests at most `MAX_DEPTH` deep. |
 | Tool lifecycle | built | `tool/call`, `tool/start` and `tool/result` are each committed as they happen, per call; `ToolSpec::replay_safe` says whether a call that was running at a crash may be repeated, and `read_only` whether it changes anything. A result is a list of content blocks, text or images (`ToolOutput`, `content` in the WIT), which reach the model as they are; `tool/result` records the result's text as `output` and, when it is anything but one block of text, the blocks as `content`, so a finished result is handed over from the log after a crash. Still to do: progress and cancellation, which need no change to this contract (see [Open questions](#open-questions)). |
 | Gates | built | A fourth registry. A gate is asked at a named decision point before something happens and answers allow, deny or ask; the strictest answer wins and is recorded. Reachable from WebAssembly through the `gate` export. Decision points are declared: the core declares `tool/call` and `plugin/load`, an extension declares the points it asks at, and asking at an undeclared point is denied. Still to do: letting a person answer an ask at `plugin/load`. See [Events, gates and hooks](#events-gates-and-hooks). |
 | Waits and signals | built | A run whose tool call a gate asked about waits for `Harness::answer`. In general, a tool call may wait for a named signal: whatever serves it says so through `corduroy_core::call::wait_for`, the call gets a placeholder and a `tool/wait`, `WaitOperation` stops the run before the model is asked again, and a `signal` event (`Harness::signal`) brings the result. A child session's end is such a signal, which the harness raises itself. All of it is in the log, so a wait survives a restart. Still to do: a timer that raises signals. |
 | Services | built | A fifth registry, `Services`: calls between plugins in JSON text, with the caller's name, across the WebAssembly boundary in both directions. See [Plugins extending plugins](#plugins-extending-plugins). |
-| Capabilities | fifteen | The mechanism is settled; the set grows (below). |
+| Capabilities | sixteen | The mechanism is settled; the set grows (below). |
 | Kernels | built | The trait and registry, and `Kernel::spawn` for long-lived processes with pipes (MCP servers). `ShellKernel` is an implementation, not a primitive, and lives in `corduroy-shell`. |
 | Conversation projection | built | Messages, and the `compaction` event: the messages before `keep_from` stay in the log and the conversation but are hidden from the model, which sees the summary in their place. The harness cuts only before the current turn; when, and the summary, come from the plugin providing the `compaction` service, asked by a loop step (`CompactOperation`). |
 | Model access | built | The loop asks the provider registered under a name in `Providers`, on every request, so a plugin supplies the model and unloading it takes the model away. `Harness::new` registers its argument there for convenience. For plugins, the core's `Models` registry: one completion, synchronously, by model name; a `provider` plugin can serve its models there. |
@@ -815,12 +816,6 @@ the step it waits on is done.
   a run; the harness has no cancel of its own, and a tool cannot be told to stop or report
   progress while it runs. Both can be added without changing a contract: a cancel on the
   harness, and call-scope functions (`corduroy_core::call`) behind a new capability.
-- **Which session a plugin serves.** A tool's events carry the session of the call it
-  serves, but the plugin cannot ask which session that is, and a prompt part is rendered
-  with no session at all. Per-session state is therefore out of reach: `todo` keeps one
-  list, which a sub-agent overwrites for its parent. The fix adds and breaks nothing: a
-  new import interface that reports the call scope (`corduroy_core::call::current`), and
-  rendering prompt parts inside that scope.
 - **Scopes below a service.** The `service` capability is scoped by service name, so a
   grant gives all of a service's methods. `service:method` resources would let a grant
   name one.

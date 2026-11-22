@@ -76,7 +76,8 @@ fn testbed(
         .grant("llm", Scope::none())
         .grant("secret", Scope::none())
         .grant("http", Scope::none())
-        .grant("log-read", Scope::none()))
+        .grant("log-read", Scope::none())
+        .grant("session", Scope::none()))
 }
 
 /// Call the tool `tool` with `input` and parse what it returns.
@@ -545,7 +546,8 @@ fn impatient_alpha() -> Result<WasmPlugin, Box<dyn Error>> {
         .grant("llm", Scope::none())
         .grant("secret", Scope::none())
         .grant("http", Scope::none())
-        .grant("log-read", Scope::none()))
+        .grant("log-read", Scope::none())
+        .grant("session", Scope::none()))
 }
 
 #[test]

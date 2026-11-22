@@ -22,7 +22,7 @@ mod paths;
 
 use bindings::corduroy::plugin::{
     clock, events, fs_read, fs_write, http, kernel, llm, log, log_read, plugins, random, secret,
-    service, state, tools, types,
+    service, session, state, tools, types,
 };
 use host::{HostState, Lent, Loader};
 use instance::{Blueprint, Instance};
@@ -32,9 +32,9 @@ const PACKAGE: &str = "corduroy:plugin/";
 
 /// The host interfaces that are capabilities, by the name they are granted under, in the
 /// order the WIT world imports them.
-pub const CAPABILITIES: [&str; 15] = [
+pub const CAPABILITIES: [&str; 16] = [
     "fs-read", "fs-write", "kernel", "events", "log", "clock", "random", "tools", "state",
-    "service", "plugins", "llm", "secret", "http", "log-read",
+    "service", "plugins", "llm", "secret", "http", "log-read", "session",
 ];
 
 /// The capabilities whose host functions reach a registry the host provides, and its name.
@@ -174,6 +174,7 @@ impl WasmPlugin {
                 "secret" => secret::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state),
                 "http" => http::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state),
                 "log-read" => log_read::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state),
+                "session" => session::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state),
                 _ => Ok(()),
             }
             .map_err(|error| link_error(&error))?;
@@ -429,12 +430,21 @@ fn deliver(instance: &Instance, event: &Event) {
         return;
     }
     let cause = event.id;
+    let session = event.session.clone();
     let event = host::event_of(event);
     // A trap is already on the event stream as `plugin/trapped`; a listener has nobody to
     // return it to.
-    drop(instance.call_caused(Some(cause), |plugin, store| {
-        plugin.call_on_event(store, &event)
-    }));
+    let handle = || {
+        drop(instance.call_caused(Some(cause), |plugin, store| {
+            plugin.call_on_event(store, &event)
+        }));
+    };
+    // An event of a session is handled for that session: the plugin can ask which it is,
+    // and what it raises belongs to it.
+    match session {
+        Some(session) => drop(corduroy_core::call::Serve::session(session).run(handle)),
+        None => handle(),
+    }
 }
 
 struct WasmTool {

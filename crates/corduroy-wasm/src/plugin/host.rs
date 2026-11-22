@@ -28,7 +28,7 @@ use super::bindings::Credential;
 use super::bindings::corduroy::plugin::types::{CallError, HostError, ToolError, ToolSpec};
 use super::bindings::corduroy::plugin::{
     clock, events, fs_read, fs_write, http, kernel, llm, log, log_read, plugins, random, secret,
-    service, state, tools, types,
+    service, session, state, tools, types,
 };
 use super::paths;
 use crate::runtime::WasmRuntime;
@@ -326,6 +326,28 @@ impl clock::Host for HostState {
         self.check("clock", "monotonic")?;
         // Saturates after some 584 years of one instance.
         Ok(u64::try_from(self.started.elapsed().as_nanos()).unwrap_or(u64::MAX))
+    }
+}
+
+impl session::Host for HostState {
+    fn current(&mut self) -> Result<Option<String>, HostError> {
+        let Some(scope) = corduroy_core::call::current() else {
+            return Ok(None);
+        };
+        self.check("session", scope.session.as_str())?;
+        Ok(Some(scope.session.as_str().to_owned()))
+    }
+
+    fn call(&mut self) -> Result<Option<String>, HostError> {
+        let Some(scope) = corduroy_core::call::current() else {
+            return Ok(None);
+        };
+        self.check("session", scope.session.as_str())?;
+        Ok(scope.call)
+    }
+
+    fn stopping(&mut self) -> bool {
+        corduroy_core::call::stopping()
     }
 }
 

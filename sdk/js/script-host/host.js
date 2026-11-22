@@ -28,6 +28,7 @@ import * as plugins from 'corduroy:plugin/plugins@0.1.0';
 import * as random from 'corduroy:plugin/random@0.1.0';
 import * as secret from 'corduroy:plugin/secret@0.1.0';
 import * as service from 'corduroy:plugin/service@0.1.0';
+import * as session from 'corduroy:plugin/session@0.1.0';
 import * as state from 'corduroy:plugin/state@0.1.0';
 import * as tools from 'corduroy:plugin/tools@0.1.0';
 import { CallError, Content, ToolError } from 'corduroy-plugin';
@@ -46,6 +47,7 @@ const host = Object.freeze({
   random,
   secret,
   service,
+  session,
   state,
   tools,
 });

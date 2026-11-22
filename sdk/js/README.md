@@ -84,7 +84,7 @@ calls another tool through the `tools` capability gets its blocks, as
 
 Each `corduroy:plugin/<capability>@0.1.0` module is one capability: `fs-read`, `fs-write`,
 `kernel`, `events`, `log`, `clock`, `random`, `tools`, `state`, `service`, `plugins`, `llm`,
-`secret`, `http`, `log-read`. A JavaScript component imports every interface of the world it
+`secret`, `http`, `log-read`, `session`. A JavaScript component imports every interface of the world it
 is built against, so `--capabilities` is the plugin's declaration of what it needs: the
 build generates a world with exactly those imports, and the host instantiates the plugin
 only if it granted all of them. Importing a module not on the list fails the build.

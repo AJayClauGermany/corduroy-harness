@@ -481,11 +481,11 @@ path = "hints.wasm"
 config = { files = ["{workspace}/AGENTS.md", "{workspace}/.goosehints", "{workspace}/CLAUDE.md"] }
 grants = { fs-read = ["{workspace}/AGENTS.md", "{workspace}/.goosehints", "{workspace}/CLAUDE.md"] }
 
-# A todo list the agent keeps across turns and restarts.
+# A todo list for each session, kept across turns and restarts.
 [[plugins]]
 name = "todo"
 path = "todo.wasm"
-grants = { state = "*" }
+grants = { state = "*", session = "*" }
 
 # Memories by category, as Markdown files you can read and edit.
 [[plugins]]
@@ -529,7 +529,7 @@ name = "plugin-manager"
 path = "plugin_manager.wasm"
 enabled = false
 config = { dirs = ["{data}/plugins"] }
-grants = { fs-read = ["{data}/plugins", "{data}/plugins/*"], plugins = "*", state = "*" }
+grants = { fs-read = ["{data}/plugins", "{data}/plugins/*"], plugins = "*", state = "*", session = "*" }
 "#;
 
 impl Grant {
