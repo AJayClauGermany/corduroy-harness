@@ -110,10 +110,21 @@ cargo t           # fast tests via cargo-nextest
 scripts/check.sh  # everything CI runs
 ```
 
+```bash
+scripts/local-model.sh start   # serve a small model on this machine (first time: ~4 min)
+```
+
+```bash
+cargo eval                     # the agent does small real tasks with it, checked by outcome
+```
+
 Requires Rust 1.97+, the `wasm32-unknown-unknown` target (installed automatically from
 `rust-toolchain.toml`) and [`cargo-nextest`](https://nexte.st)
 (`cargo install cargo-nextest --locked`). Nothing needs a network or an LLM: the tests and the
-demo drive the loop with a scripted provider.
+demo drive the loop with a scripted provider. The evals are the exception: they run the agent
+in [`examples/local-model/`](examples/local-model/corduroy.toml) against Liquid AI's LFM3
+(1.7B parameters, 4-bit), served on `127.0.0.1` by llama.cpp through the ordinary
+`openai-compatible` provider, so they need no API key and, once set up, no network.
 
 ## Layout
 

@@ -30,3 +30,13 @@ slow-timeout = { period = "30s", terminate-after = 3 }
 [[profile.ci.overrides]]
 filter = 'binary(guest_languages)'
 slow-timeout = { period = "30s", terminate-after = 3 }
+
+# `cargo eval`: the ignored tests in tests/local_model.rs, against a model served on this
+# machine (scripts/local-model.sh). A small model on a CPU takes tens of seconds per task, and
+# the server answers one request at a time well, so the evals run one by one.
+[profile.eval]
+failure-output = "final"
+status-level = "pass"
+final-status-level = "fail"
+test-threads = 1
+slow-timeout = { period = "60s", terminate-after = 5 }

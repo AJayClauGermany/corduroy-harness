@@ -11,7 +11,7 @@ oi-kit's state machine. `docs/design.md` explains where each idea comes from and
 | --- | --- |
 | `crates/corduroy-core` | **Zero dependencies, synchronous.** Plugin contexts (`App`, `Context`, `Plugin`), capabilities (`Grants`, `Scope`), the call scope (`call`: which session and tool call a thread serves, and waiting for a signal), the `EventStream` (commits, `SessionId`, the `Log` trait), and the `Tools` / `Prompts` / `Kernels` / `Gates` / `Services` / `Models` / `Secrets` / `HttpClients` registries. The registries hold traits only: kernels, stores, models and clients are implemented elsewhere. |
 | `crates/corduroy-jsonl` | A store for the event stream: `JsonlLog`, one line per commit under a versioned header. Stores implement `corduroy_core::Log` and live outside the core. |
-| `crates/corduroy-cli` | The `corduroy` binary (`cargo corduroy`): `agent` reads the agent file (TOML: providers, kernels, secrets, WebAssembly plugins with grants) and assembles the harness, protecting the log and the agent file; `terminal` shows events as they commit and answers gate asks. End-to-end tests drive the binary against a fake OpenAI-compatible server on loopback. |
+| `crates/corduroy-cli` | The `corduroy` binary (`cargo corduroy`): `agent` reads the agent file (TOML: providers, kernels, secrets, WebAssembly plugins with grants) and assembles the harness, protecting the log and the agent file; `terminal` shows events as they commit and answers gate asks. End-to-end tests drive the binary against a fake OpenAI-compatible server on loopback; `tests/local_model.rs` holds the evals (ignored by default), which drive it against a real small model. |
 | `crates/corduroy-mcp` | `mcp_server`: one MCP server as a native plugin, its tools as `<server>__<tool>`. A stdio server is started through `Kernel::spawn`, never directly. Tests use a Python fixture server (`tests/fixtures/server.py`). |
 | `crates/corduroy-providers` | Real model providers built from `oi-kit-providers` (`ProviderSpec` → `Arc<dyn Provider>`). Kept out of the harness library. |
 | `crates/corduroy-http` | `UreqClient`, the `HttpClient` behind the `http` capability (no redirects), and the `http_client` plugin. |
@@ -21,7 +21,7 @@ oi-kit's state machine. `docs/design.md` explains where each idea comes from and
 | `wit/corduroy.wit` | The typed plugin boundary. Each imported interface is one capability. |
 | `plugins/` | **Separate workspace**, built for `wasm32-unknown-unknown`: `guest` (the `corduroy-guest` crate every Rust plugin builds on: bindings generated once, a `Plugin` trait with default exports, `export!`), `pi-tools` (read, write, edit, bash, tree), `skills`, `approval` (a gate: permission modes), the Goose-baseline plugins `hints`, `todo`, `memory`, `recall`, `summarize`, `compact` (the `compaction` service), `subagents` (`delegate`), `inspect` (a gate) and `plugin-manager`, and `testbed` (for the host's tests only: host calls, loads, echoes and traps on demand). |
 | `sdk/js`, `sdk/python` | Guest SDKs: write a plugin in JavaScript/TypeScript or Python; `corduroy-js build` / `corduroy-py build` make a component importing only the listed capabilities. `sdk/js/script-host` is the script host (automations as scripts). |
-| `examples/` | The same `notes` plugin in each guest language, built by `scripts/guests.sh`. |
+| `examples/` | The same `notes` plugin in each guest language, built by `scripts/guests.sh`; `local-model/corduroy.toml`, the default agent with its model served on this machine (the agent `cargo eval` runs). |
 | `crates/corduroy-test-support` | Test-only helpers: finds built plugins, makes scratch directories. |
 
 ## Commands
@@ -36,6 +36,8 @@ oi-kit's state machine. `docs/design.md` explains where each idea comes from and
 | `cargo lint` | Strictest clippy on the host workspace, `-D warnings`. Must be clean before finishing. |
 | `cargo fmt --all` | Format. `cargo fmtc` checks without writing. |
 | `cargo corduroy` | Run the `corduroy` command from this tree (`cargo corduroy -- check`, `-- run <prompt>`). Needs `cargo plugins` first. |
+| `scripts/local-model.sh start` | Serve a small model (LFM3 1.7B, 4-bit) on `127.0.0.1:8080` as an OpenAI-compatible endpoint: builds llama.cpp's `llama-server` and fetches the model on first use (~4 min), both pinned by SHA-256. `stop` stops it. |
+| `cargo eval` | The evals: the agent in `examples/local-model/` doing small real tasks against that model, checked by outcome. Minutes, not seconds; needs `cargo plugins` and the server. |
 | `cargo demo` | Run a scripted agent through both plugins and print the event stream |
 | `scripts/check.sh` | fmt + clippy + plugins + nextest + doctests + docs, host and plugins: exactly what CI runs |
 
@@ -165,7 +167,11 @@ as design guidance, not noise.
 - Hitting the turn limit is a normal `Status::TurnLimitReached`, not an `Err`.
 - Keep the loop ignorant of any specific model, tool or plugin. Extend it with an oi-kit
   `Operation` (`Harness::with_operation`), not with special cases.
-- Tests must not need network or an LLM. Drive the loop with `ScriptedProvider`.
+- Tests must not need network or an LLM. Drive the loop with `ScriptedProvider`. The one
+  exception is the evals (`cargo eval`), which are `#[ignore]`d so `cargo t` and CI never run
+  them, and which reach a model only on loopback through ordinary configuration. An eval checks
+  outcomes (files, exit codes, tool results, a fact in the answer), never phrasing; a local model needs no
+  change to the core or the harness, so never add one to make an eval pass.
 - Unit tests live in a `#[cfg(test)] mod tests` beside the code; behaviour through the public API
   goes in `tests/`. nextest kills tests after 15s (`.config/nextest.toml`), so a non-terminating
   loop shows up as a failure rather than a hang.
