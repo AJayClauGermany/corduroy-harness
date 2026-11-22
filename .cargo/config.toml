@@ -9,3 +9,5 @@ fmtc = "fmt --all -- --check"
 demo = "run --quiet --"
 # Build the guest plugins in plugins/ to WebAssembly. Tests and the demo load the result.
 plugins = "build --manifest-path plugins/Cargo.toml --target wasm32-unknown-unknown --release"
+# The `corduroy` command, built from this tree: `cargo corduroy -- --help`.
+corduroy = "run --quiet -p corduroy-cli --"

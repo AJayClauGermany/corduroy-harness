@@ -11,6 +11,9 @@ oi-kit's state machine. `docs/design.md` explains where each idea comes from and
 | --- | --- |
 | `crates/corduroy-core` | **Zero dependencies, synchronous.** Plugin contexts (`App`, `Context`, `Plugin`), capabilities (`Grants`, `Scope`), the `EventStream` (commits, `SessionId`, the `Log` trait), and the `Tools` / `Prompts` / `Kernels` / `Gates` / `Services` / `Models` / `Secrets` / `HttpClients` registries. The registries hold traits only: kernels, stores, models and clients are implemented elsewhere. |
 | `crates/corduroy-jsonl` | A store for the event stream: `JsonlLog`, one line per commit under a versioned header. Stores implement `corduroy_core::Log` and live outside the core. |
+| `crates/corduroy-cli` | The `corduroy` binary (`cargo corduroy`): `agent` reads the agent file (TOML: providers, kernels, secrets, WebAssembly plugins with grants) and assembles the harness, protecting the log and the agent file; `terminal` shows events as they commit and answers gate asks. End-to-end tests drive the binary against a fake OpenAI-compatible server on loopback. |
+| `crates/corduroy-providers` | Real model providers built from `oi-kit-providers` (`ProviderSpec` → `Arc<dyn Provider>`). Kept out of the harness library. |
+| `crates/corduroy-http` | `UreqClient`, the `HttpClient` behind the `http` capability (no redirects), and the `http_client` plugin. |
 | `crates/corduroy-shell` | `ShellKernel`, a persistent POSIX shell as a `Kernel`, and the `shell_kernel` plugin. |
 | `crates/corduroy-wasm` | wasmtime host. Loads components built against `wit/corduroy.wit` as `Plugin`s; links only granted interfaces. |
 | `src/` (`corduroy-harness`) | Assembles the loop from oi-kit: `Harness` (sessions, `run_in`, `continue_run`, `answer`), `Journal` (one step's effects to one commit), `GateOperation`, `PluginTools`, the `Providers` registry and `provider` plugin (`src/provider.rs`), `ScriptedProvider`. Async (tokio). |
@@ -31,6 +34,7 @@ oi-kit's state machine. `docs/design.md` explains where each idea comes from and
 | `cargo test --manifest-path plugins/Cargo.toml` | Unit tests of the plugins' pure logic, run natively |
 | `cargo lint` | Strictest clippy on the host workspace, `-D warnings`. Must be clean before finishing. |
 | `cargo fmt --all` | Format. `cargo fmtc` checks without writing. |
+| `cargo corduroy` | Run the `corduroy` command from this tree (`cargo corduroy -- check`, `-- run <prompt>`). Needs `cargo plugins` first. |
 | `cargo demo` | Run a scripted agent through both plugins and print the event stream |
 | `scripts/check.sh` | fmt + clippy + plugins + nextest + doctests + docs, host and plugins: exactly what CI runs |
 

@@ -1,0 +1,258 @@
+//! The agent at a terminal: what it does, shown as it happens, and a person answering the
+//! gates that ask.
+//!
+//! Nothing here keeps state of its own. What is shown is read off the event stream as each
+//! commit lands, and an answer to a gate goes to [`Harness::answer`], so a run that waits for
+//! a person can be answered in this process or a later one.
+
+use std::io::{BufRead, Write};
+use std::sync::{Arc, Mutex, PoisonError};
+
+use corduroy_harness::core::{Event, ListenerId, Pattern, SessionId, Source};
+use corduroy_harness::oi_kit_provider_types::conversation::message::Message;
+use corduroy_harness::{Answer, Harness, HarnessError, Outcome, Status};
+use serde_json::Value;
+
+/// Where the terminal writes: shared, because events are shown from inside the loop.
+pub type Out = Arc<Mutex<dyn Write + Send>>;
+
+/// Write `text` and a newline to `out`. A terminal that cannot be written to has nobody to
+/// tell, so the error is dropped.
+pub fn say(out: &Out, text: &str) {
+    let mut out = out.lock().unwrap_or_else(PoisonError::into_inner);
+    drop(writeln!(out, "{text}"));
+    drop(out.flush());
+}
+
+/// At most `limit` characters of the first line of `text`, marked where it was cut.
+fn short(text: &str, limit: usize) -> String {
+    let line = text.lines().next().unwrap_or_default();
+    let mut shown: String = line.chars().take(limit).collect();
+    let more_lines = text.trim_end().lines().count().saturating_sub(1);
+    if shown.chars().count() < line.chars().count() {
+        shown.push('…');
+    }
+    if more_lines > 0 {
+        shown = format!("{shown} (+{more_lines} lines)");
+    }
+    shown
+}
+
+fn field<'a>(payload: &'a Value, name: &str) -> &'a str {
+    payload
+        .get(name)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+}
+
+/// How `event` is shown, if it is shown at all.
+#[must_use]
+pub fn describe(event: &Event) -> Option<String> {
+    let payload: Value = serde_json::from_str(&event.payload).unwrap_or(Value::Null);
+    match event.topic.as_str() {
+        "message" if event.source == Source::Agent => {
+            let message: Message = serde_json::from_str(&event.payload).ok()?;
+            if let Some(error) = message.error() {
+                return Some(format!("error: {}", error.message));
+            }
+            let text = message.as_concat_text();
+            (!text.trim().is_empty()).then(|| text.trim().to_owned())
+        }
+        "tool/call" => {
+            let input = payload
+                .get("input")
+                .map(Value::to_string)
+                .unwrap_or_default();
+            Some(format!(
+                "▸ {} {}",
+                field(&payload, "tool"),
+                short(&input, 100)
+            ))
+        }
+        "tool/result" => {
+            let output = field(&payload, "output");
+            if payload.get("ok") == Some(&Value::Bool(true)) {
+                Some(format!("  ✓ {}", short(output, 100)))
+            } else {
+                Some(format!("  ✗ {}", short(output, 200)))
+            }
+        }
+        "gate/decision" if field(&payload, "verdict") == "deny" => Some(format!(
+            "  ✗ denied by {}: {}",
+            field(&payload, "gate"),
+            field(&payload, "reason")
+        )),
+        "capability/denied" => Some(format!(
+            "  ! {} was refused `{}` on {}",
+            field(&payload, "plugin"),
+            field(&payload, "capability"),
+            field(&payload, "resource")
+        )),
+        "plugin/log" => Some(format!(
+            "  [{}] {}",
+            event.source,
+            short(field(&payload, "message"), 200)
+        )),
+        "plugin/failed" | "plugin/stopped" => Some(format!(
+            "  ! plugin {} {}: {}",
+            field(&payload, "plugin"),
+            event.topic.trim_start_matches("plugin/"),
+            field(&payload, "reason")
+        )),
+        "run/restart" => Some("  ↻ picking up a run that was cut short".to_owned()),
+        _ => None,
+    }
+}
+
+/// Show what happens in `session`, and to the plugins, on `out` as it is committed.
+pub fn watch(harness: &Harness, session: &SessionId, out: &Out) -> ListenerId {
+    let session = session.clone();
+    let out = Arc::clone(out);
+    harness.events().subscribe(Pattern::any(), move |event| {
+        let ours = event.session.as_ref().is_none_or(|id| *id == session);
+        if let Some(text) = describe(event).filter(|_| ours) {
+            say(&out, &text);
+        }
+    })
+}
+
+/// Ask a person about each tool call `outcome` waits on, until the run no longer waits.
+///
+/// `y` allows a call; anything else refuses it, and any text other than `n` is the reason the
+/// model is given. When the input ends the run is left waiting, in the log, for `corduroy
+/// continue` in this process or another.
+///
+/// # Errors
+///
+/// As [`Harness::answer`].
+pub async fn settle(
+    harness: &Harness,
+    session: &SessionId,
+    mut outcome: Outcome,
+    input: &mut (dyn BufRead + Send),
+    out: &Out,
+) -> Result<Outcome, HarnessError> {
+    while let Status::Waiting { asks } = &outcome.status {
+        let Some(ask) = asks.first().cloned() else {
+            break;
+        };
+        say(
+            out,
+            &format!(
+                "? {} {}\n  {} asks: {}\n  allow? [y/N, or a reason to refuse]",
+                ask.tool,
+                short(&ask.input, 300),
+                ask.gate,
+                ask.reason
+            ),
+        );
+        let mut line = String::new();
+        if input.read_line(&mut line).unwrap_or(0) == 0 {
+            // Nobody is there to answer. The run waits in the log for whoever is next.
+            break;
+        }
+        let answer = match line.trim() {
+            "y" | "Y" | "yes" => Answer::Allow,
+            "" | "n" | "N" | "no" => Answer::Deny("the user declined".to_owned()),
+            reason => Answer::Deny(reason.to_owned()),
+        };
+        outcome = harness.answer(session, &ask.call, answer).await?;
+    }
+    Ok(outcome)
+}
+
+/// Run `prompt` in `session` and answer what the gates ask. A run a crash cut short is
+/// finished first.
+///
+/// # Errors
+///
+/// As [`Harness::run_in`].
+pub async fn prompt(
+    harness: &Harness,
+    session: &SessionId,
+    prompt: &str,
+    input: &mut (dyn BufRead + Send),
+    out: &Out,
+) -> Result<Outcome, HarnessError> {
+    let outcome = resume(harness, session, input, out).await?;
+    if matches!(outcome.status, Status::Waiting { .. }) {
+        return Ok(outcome);
+    }
+    let outcome = harness.run_in(session, prompt).await?;
+    settle(harness, session, outcome, input, out).await
+}
+
+/// Finish whatever `session` left unfinished: answer a run that waits for a person, and
+/// continue one a crash cut short.
+///
+/// # Errors
+///
+/// As [`Harness::continue_run`].
+pub async fn resume(
+    harness: &Harness,
+    session: &SessionId,
+    input: &mut (dyn BufRead + Send),
+    out: &Out,
+) -> Result<Outcome, HarnessError> {
+    let outcome = harness.continue_run(session).await?;
+    settle(harness, session, outcome, input, out).await
+}
+
+/// One line about how a run ended, if the events have not already said it.
+#[must_use]
+pub fn ending(status: &Status) -> Option<String> {
+    match status {
+        Status::Finished { .. } | Status::Yielded => None,
+        Status::TurnLimitReached => Some("stopped: the turn limit was reached".to_owned()),
+        Status::Failed { reason } => Some(format!("the run failed: {reason}")),
+        Status::Waiting { asks } => Some(format!(
+            "waiting for {} answer(s); run `corduroy continue` to give them",
+            asks.len()
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use corduroy_harness::core::{Draft, EventStream};
+
+    use super::*;
+
+    fn shown(source: Source, topic: &str, payload: &str) -> Option<String> {
+        let events = EventStream::new();
+        events
+            .emit(Draft::new(source, topic).payload(payload))
+            .unwrap();
+        describe(&events.events()[0])
+    }
+
+    #[test]
+    fn tool_calls_and_results_are_one_line_each() {
+        let call = shown(
+            Source::Agent,
+            "tool/call",
+            r#"{"id":"1","tool":"bash","input":{"command":"ls"}}"#,
+        );
+        assert_eq!(call.as_deref(), Some(r#"▸ bash {"command":"ls"}"#));
+        let ok = shown(
+            Source::Environment,
+            "tool/result",
+            r#"{"id":"1","tool":"bash","ok":true,"output":"a\nb\nc"}"#,
+        );
+        assert_eq!(ok.as_deref(), Some("  ✓ a (+2 lines)"));
+        let failed = shown(
+            Source::Environment,
+            "tool/result",
+            r#"{"id":"1","tool":"read","ok":false,"output":"denied"}"#,
+        );
+        assert_eq!(failed.as_deref(), Some("  ✗ denied"));
+    }
+
+    #[test]
+    fn quiet_events_are_not_shown() {
+        assert_eq!(shown(Source::Host, "turn/end", ""), None);
+        assert_eq!(shown(Source::Agent, "usage", "{}"), None);
+        let allowed = r#"{"verdict":"allow","gate":"approval","reason":""}"#;
+        assert_eq!(shown(Source::Host, "gate/decision", allowed), None);
+    }
+}

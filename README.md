@@ -48,6 +48,28 @@ if let Status::Waiting { asks } = harness.run("tidy the repo").await?.status {
 }
 ```
 
+## Try it
+
+```bash
+cargo plugins                                   # build the WebAssembly plugins
+```
+
+```bash
+export ANTHROPIC_API_KEY=...                    # or OPENAI_API_KEY; without either, a local Ollama
+```
+
+```bash
+cargo corduroy --workspace ~/some/project      # talk to the agent; /help for commands
+```
+
+Without an agent file it runs the default agent: the Pi tools on a shell in the workspace,
+skills, and an approval gate that asks before anything that writes. `cargo corduroy init`
+writes that agent to `corduroy.toml` so you can change it: the providers, the kernels, each
+plugin and exactly what it is granted. `corduroy run <prompt>` runs one prompt; `corduroy
+check` says what the agent has without calling a model; `corduroy log` prints the event
+log, which is kept in `.corduroy/log.jsonl`. Kill it mid-run and `corduroy continue` picks
+the run up; leave a question unanswered and the run waits, in the log, until you do.
+
 ## Where the ideas come from
 
 | From | Idea | Where it lives |
@@ -94,6 +116,9 @@ demo drive the loop with a scripted provider.
 | Path | Purpose |
 | --- | --- |
 | `crates/corduroy-core` | Dependency-free core: plugin contexts, capabilities, event stream with sessions and a `Log` trait, the registries plugins contribute to (tools, prompts, kernels, gates, services, models, secrets, HTTP clients) |
+| `crates/corduroy-cli` | The `corduroy` command: an agent file (providers, kernels, secrets, plugins and their grants) run in a terminal |
+| `crates/corduroy-providers` | Model providers from `oi-kit-providers`: Anthropic, OpenAI, Ollama and the providers Goose knows |
+| `crates/corduroy-http` | The HTTP client behind the `http` capability, which never follows a redirect |
 | `crates/corduroy-shell` | A persistent POSIX shell as a kernel |
 | `crates/corduroy-jsonl` | A JSON Lines file as the durable log behind an event stream |
 | `crates/corduroy-wasm` | wasmtime host that loads components as capability-gated plugins |

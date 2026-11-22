@@ -17,10 +17,13 @@ keywords = ["agent", "llm", "harness", "wasm", "plugins"]
 categories = ["development-tools"]
 
 [workspace.dependencies]
+corduroy-harness = { path = ".", version = "0.1.0" }
 corduroy-core = { path = "crates/corduroy-core", version = "0.1.0" }
 corduroy-wasm = { path = "crates/corduroy-wasm", version = "0.1.0" }
 corduroy-jsonl = { path = "crates/corduroy-jsonl", version = "0.1.0" }
 corduroy-shell = { path = "crates/corduroy-shell", version = "0.1.0" }
+corduroy-http = { path = "crates/corduroy-http", version = "0.1.0" }
+corduroy-providers = { path = "crates/corduroy-providers", version = "0.1.0" }
 corduroy-test-support = { path = "crates/corduroy-test-support", version = "0.1.0" }
 # Synchronous embedding: no async runtime, and no WASI, so plugins get no ambient authority.
 wasmtime = { version = "51.0.0", default-features = false, features = ["component-model", "cranelift", "runtime", "cache", "parallel-compilation"] }
@@ -33,12 +36,20 @@ sha2 = "0.10.9"
 # The base agent abstractions (provider, message, conversation, operation, state machine).
 oi-kit-agent = { version = "=0.1.0-alpha.15", default-features = false }
 oi-kit-provider-types = { version = "=0.1.0-alpha.15", default-features = false }
+# Real model providers (HTTP clients for Anthropic, OpenAI, Ollama and others), for the
+# `corduroy` command. Kept out of the harness library.
+oi-kit-providers = { version = "=0.1.0-alpha.15", default-features = false, features = ["rustls-tls"] }
 # Must match the versions oi-kit is built against: its API exposes these types.
 rmcp = { version = "3.11.0", default-features = false }
 anyhow = "1"
+# The HTTP client behind the `http` capability: blocking, so it fits a plugin's blocking call.
+ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
 async-trait = "0.1"
 futures = { version = "0.3", default-features = false, features = ["std"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The agent file of the `corduroy` command.
+toml = { version = "1.1.8", default-features = false, features = ["parse", "serde", "std"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 tokio-util = "0.7"
 

@@ -587,7 +587,7 @@ harness.
 | --- | --- | --- | --- |
 | Developer: `write`, `edit`, `shell`, `tree`, `read_image` | `pi-tools`, extended | WebAssembly | content blocks |
 | MCP extensions (stdio, streamable HTTP) | `mcp` | native (`rmcp`) | kernels for subprocesses |
-| Providers | `providers` (`oi-kit-providers`) | native | nothing (the `provider` service and `Secrets` are built) |
+| Providers | `corduroy-providers` (`oi-kit-providers`) | native | done |
 | Permission modes, per-tool permissions | `approval` (exists: `auto`, `smart`, `approve`, `chat`, allow and deny lists) | WebAssembly | done |
 | Tool inspection, prompt-injection scan | `inspect` | WebAssembly | nothing (gates are built) |
 | Auto-compaction | `compact` | WebAssembly | compaction event (`llm` is built) |
@@ -600,7 +600,7 @@ harness.
 | Summarize | `summarize` | WebAssembly | nothing (`llm` is built) |
 | Extension Manager | `plugin-manager` | WebAssembly | nothing (`plugins` is built) |
 | Code Mode | `code-mode` | WebAssembly + kernel | kernel-to-host bridge |
-| Recipes and sub-recipes | a declarative plugin tree with grants | host configuration | grant files |
+| Recipes and sub-recipes | the agent file of `corduroy` | host configuration | done for one agent; sub-recipes wait on sessions |
 
 **Left out of the baseline.** Apps, computer control, the auto-visualiser and the tutorial
 are tied to Goose's desktop application. The scheduler and ACP are front ends: they drive a
@@ -655,9 +655,13 @@ the step it waits on is done.
    [Guest languages](guest-languages.md#the-sdks-step-8).
 9. Shipped plugins. *Phase three, second part,* aiming at a version that can be tried out
    with a real model:
-   - A `corduroy` command and an agent file (the plugins of an agent and each one's grants,
-     the first form of grant files), a `providers` plugin over `oi-kit-providers`, and an
-     HTTP client plugin.
+   - *Done:* the `corduroy` command (`crates/corduroy-cli`) and its agent file, the first
+     form of grant files: one TOML file naming the model, the providers, kernels, secrets
+     and WebAssembly plugins with exactly what each is granted. The log and the agent file
+     are protected paths, so no plugin can rewrite the record or its own grants. Providers
+     come from `oi-kit-providers` (`crates/corduroy-providers`), the `http` capability
+     sends through `crates/corduroy-http`. A gate's ask is answered at the terminal, or, with
+     nobody there, waits in the log for `corduroy continue`.
    - The plugins that wait on nothing: `hints`, `todo`, `memory`, `recall`, `summarize`,
      `inspect`, `plugin-manager`, and `tree` in `pi-tools`.
    - MCP. A server over stdio is a long-lived process with pipes, which `Kernel::exec`
@@ -672,10 +676,10 @@ the step it waits on is done.
 
 ## Open questions
 
-- **Grant files.** Grants are built in code. A declarative form (Zed's `extension.toml`
-  capabilities and Tauri's capability files are the closest prior art) would let users review
-  and edit what each plugin may do. Joined with a plugin list it is also Goose's recipe and
-  Cordis's `cordis.yml`: one file naming the plugins of an agent and what each may do.
+- **Grant files.** The `corduroy` agent file is the first form: one file naming the plugins
+  of an agent and what each may do, as Goose's recipes and Cordis's `cordis.yml` do. Still
+  open: a grant file per plugin shipped with it (Zed's `extension.toml`, Tauri's capability
+  files), so a plugin states what it wants and the agent file only narrows it.
 - **Scrubbing the log.** If the model does write a sensitive value into a tool call, the
   assistant message holding it is committed before any gate is asked, so neither a deny nor a
   rewrite keeps it out of the log. If that matters it is a property of the log (a filter
