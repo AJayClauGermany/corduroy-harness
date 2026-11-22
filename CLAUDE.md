@@ -14,7 +14,7 @@ oi-kit's state machine. `docs/design.md` explains where each idea comes from and
 | `crates/corduroy-wasm` | wasmtime host. Loads components built against `wit/corduroy.wit` as `Plugin`s; links only granted interfaces. |
 | `src/` (`corduroy-harness`) | Assembles the loop from oi-kit: `Harness` (sessions, `run_in`, `continue_run`, `answer`), `Journal` (one step's effects to one commit), `GateOperation`, `PluginTools`, `ScriptedProvider`. Async (tokio). |
 | `wit/corduroy.wit` | The typed plugin boundary. Each imported interface is one capability. |
-| `plugins/` | **Separate workspace**, built for `wasm32-unknown-unknown`: `pi-tools` (read, write, edit, bash), `skills`, `approval` (a gate: permission modes) and `testbed` (for the host's tests only: host calls and traps on demand). |
+| `plugins/` | **Separate workspace**, built for `wasm32-unknown-unknown`: `pi-tools` (read, write, edit, bash), `skills`, `approval` (a gate: permission modes) and `testbed` (for the host's tests only: host calls, loads, echoes and traps on demand). |
 | `crates/corduroy-test-support` | Test-only helpers: finds built plugins, makes scratch directories. |
 
 ## Commands
@@ -101,6 +101,13 @@ as design guidance, not noise.
   for a plugin busy elsewhere; never add a wait without a bound inside a plugin's call.
 - **A gate does not make tool calls.** A WebAssembly plugin that gates `tool/call` and
   imports `tools` is refused at activation; keep the check if either side changes.
+- **Plugins load plugins only through `Requests`.** A host call cannot change the plugin tree;
+  it queues the change (`App::requests`) and the tree applies it when it next settles (the
+  harness's `SettleOperation` before every loop step). A child's grants are always
+  `Scope::within` its loader's, and every load is asked of the gates at `plugin/load`.
+- **Protected paths stay out of reach.** `WasmRuntime::protect` paths (the host binary and
+  the disk cache from the start) are refused to `fs-read` and `fs-write` before any scope
+  check; any new path-taking host function must go through `HostState::path`.
 - **Plugin state lives on the stream.** `state` writes are `state/set` / `state/remove`
   events from the plugin, kept only if the call returns; the store is rebuilt from them.
 - **The event stream is the record.** The conversation is a projection of `message` events

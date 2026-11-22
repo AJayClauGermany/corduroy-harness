@@ -8,15 +8,20 @@
 //! | `trap` | Traps, which kills the instance |
 //! | `relay` | Calls a tool (`{"tool", "input"}`) or a service (`{"service", "method", "payload"}`) and returns what it gave, or the error |
 //! | `state` | `{"op": "get" \| "set" \| "remove" \| "keys", "key", "value"}` on its `state` store |
+//! | `load` | Loads a plugin: `{"path", "name", "config", "grants": [{"capability", "allow", "deny"}]}` |
+//! | `unload` | Unloads a plugin it loaded: `{"name"}` |
+//! | `loaded` | Lists the plugins it loaded |
 //!
 //! `state` with `"trap": true` traps after the operation, to show that a trapped call's writes
 //! are not kept.
 //!
 //! Configuration: `{"provides": [..]}` names the services it answers (`echo` returns the call
 //! as JSON; `relay` makes the call its payload describes); `{"prefix": "a."}` puts a prefix
-//! before each tool's name, so that two instances can be loaded side by side; and
-//! `{"gate": true}` asks to gate tool calls, which the host must refuse since this plugin
-//! also imports `tools`.
+//! before each tool's name, so that two instances can be loaded side by side;
+//! `{"gates": [..]}` names decision points to gate, which the host must refuse for
+//! `tool/call` and `plugin/load` since this plugin also imports `tools` and `plugins`; and
+//! `{"echo": {"on": "ping", "emit": "pong"}}` emits `pong` for every `ping` it sees, so that
+//! two instances can be set off against each other.
 
 /// Guest bindings for the `corduroy:plugin/plugin` world.
 #[allow(
@@ -39,7 +44,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use bindings::corduroy::plugin::log::Level;
 use bindings::corduroy::plugin::types::{CallError, HostError, ServiceCall, ToolSpec};
-use bindings::corduroy::plugin::{clock, log, random, service, state, tools};
+use bindings::corduroy::plugin::{clock, events, log, plugins, random, service, state, tools};
 use bindings::{Event, Guest, PluginInfo, ToolError, Verdict};
 use serde_json::{Value, json};
 
@@ -48,6 +53,9 @@ static COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Put before each tool's name.
 static PREFIX: OnceLock<String> = OnceLock::new();
+
+/// The topic to emit for every event this plugin is sent.
+static ECHO: OnceLock<String> = OnceLock::new();
 
 /// A host call's answer, or its error, as JSON.
 fn report<T: Into<Value>>(result: Result<T, HostError>) -> Value {
@@ -99,6 +107,47 @@ fn relay(input: &Value) -> String {
     .to_string()
 }
 
+/// A list of strings in `input`, or an empty one.
+fn strings(input: &Value, field: &str) -> Vec<String> {
+    input
+        .get(field)
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn load(input: &Value) -> String {
+    let grants = input
+        .get("grants")
+        .and_then(Value::as_array)
+        .map(|grants| {
+            grants
+                .iter()
+                .map(|grant| plugins::Grant {
+                    capability: text(grant, "capability").to_owned(),
+                    allow: strings(grant, "allow"),
+                    deny: strings(grant, "deny"),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let request = plugins::LoadRequest {
+        name: text(input, "name").to_owned(),
+        path: text(input, "path").to_owned(),
+        config: input
+            .get("config")
+            .map_or_else(|| "{}".to_owned(), Value::to_string),
+        grants,
+    };
+    report(plugins::load(&request)).to_string()
+}
+
 fn store(input: &Value) -> String {
     let key = text(input, "key");
     let done = match text(input, "op") {
@@ -126,32 +175,26 @@ impl Guest for Testbed {
             replay_safe: false,
             read_only: false,
         };
-        let provides = config
-            .get("provides")
-            .and_then(Value::as_array)
-            .map(|names| {
-                names
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_owned)
-                    .collect()
-            })
-            .unwrap_or_default();
-        let gates = if config.get("gate") == Some(&Value::Bool(true)) {
-            vec!["tool/call".to_owned()]
-        } else {
-            Vec::new()
+        let provides = strings(&config, "provides");
+        let gates = strings(&config, "gates");
+        let echo = config.get("echo").cloned().unwrap_or(Value::Null);
+        let subscriptions = match text(&echo, "on") {
+            "" => Vec::new(),
+            topic => vec![topic.to_owned()],
         };
-        let tools = ["probe", "count", "trap", "relay", "state"]
-            .map(spec)
-            .to_vec();
+        let _ = ECHO.set(text(&echo, "emit").to_owned());
+        let tools = [
+            "probe", "count", "trap", "relay", "state", "load", "unload", "loaded",
+        ]
+        .map(spec)
+        .to_vec();
         // A restarted instance is activated with the same configuration, so the same prefix.
         let _ = PREFIX.set(prefix);
         Ok(PluginInfo {
             name: "testbed".to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
             tools,
-            subscriptions: Vec::new(),
+            subscriptions,
             prompt: false,
             gates,
             provides,
@@ -169,11 +212,21 @@ impl Guest for Testbed {
             "trap" => std::process::abort(),
             "relay" => Ok(relay(&input)),
             "state" => Ok(store(&input)),
+            "load" => Ok(load(&input)),
+            "unload" => {
+                Ok(report(plugins::unload(text(&input, "name")).map(|()| true)).to_string())
+            }
+            "loaded" => Ok(json!(plugins::loaded()).to_string()),
             _ => Err(ToolError::UnknownTool(name)),
         }
     }
 
-    fn on_event(_event: Event) {}
+    fn on_event(event: Event) {
+        if let Some(topic) = ECHO.get().filter(|topic| !topic.is_empty()) {
+            // Refused or not, there is nobody to tell from inside a listener.
+            let _ = events::emit(topic, &event.payload);
+        }
+    }
 
     fn prompt_part() -> Option<String> {
         None
@@ -196,7 +249,8 @@ impl Guest for Testbed {
         }
     }
 
-    /// Never asked: the host refuses this plugin as a gate, since it imports `tools`.
+    /// Never asked: the host refuses this plugin as a gate, since it imports `tools` and
+    /// `plugins`.
     fn gate(_point: String, _request: String) -> Verdict {
         Verdict::Allow
     }

@@ -464,6 +464,41 @@ impl EventStream {
         self.lock().log.clone()
     }
 
+    /// A copy of the event `id`, if the stream holds it.
+    #[must_use]
+    pub fn get(&self, id: EventId) -> Option<Event> {
+        let inner = self.lock();
+        inner
+            .log
+            .binary_search_by_key(&id, |event| event.id)
+            .ok()
+            .and_then(|position| inner.log.get(position).cloned())
+    }
+
+    /// How many causes lead up to the event `id`: zero for an event nothing caused. Stops
+    /// counting at `limit`, so a long chain costs no more than that.
+    #[must_use]
+    pub fn depth(&self, id: EventId, limit: usize) -> usize {
+        let inner = self.lock();
+        let mut depth = 0;
+        let mut current = id;
+        while depth < limit {
+            let cause = inner
+                .log
+                .binary_search_by_key(&current, |event| event.id)
+                .ok()
+                .and_then(|position| inner.log.get(position))
+                .and_then(|event| event.cause);
+            let Some(cause) = cause else {
+                break;
+            };
+            depth += 1;
+            current = cause;
+        }
+        drop(inner);
+        depth
+    }
+
     /// A copy of every event whose topic matches `topics`, oldest first.
     #[must_use]
     pub fn matching(&self, topics: &Pattern) -> Vec<Event> {
@@ -564,6 +599,26 @@ mod tests {
 
         let topics: Vec<String> = stream.events().into_iter().map(|e| e.topic).collect();
         assert_eq!(topics, ["ping", "pong"]);
+    }
+
+    #[test]
+    fn events_are_found_by_id_and_their_causes_counted() {
+        let stream = EventStream::new();
+        let first = stream.emit(Draft::new(Source::Host, "a")).unwrap();
+        let second = stream
+            .emit(Draft::new(Source::Host, "b").cause(first))
+            .unwrap();
+        let third = stream
+            .emit(Draft::new(Source::Host, "c").cause(second))
+            .unwrap();
+
+        assert_eq!(
+            stream.get(second).map(|event| event.topic),
+            Some("b".to_owned())
+        );
+        assert_eq!(stream.depth(first, 10), 0);
+        assert_eq!(stream.depth(third, 10), 2);
+        assert_eq!(stream.depth(third, 1), 1);
     }
 
     #[test]

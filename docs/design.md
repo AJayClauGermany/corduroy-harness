@@ -182,7 +182,7 @@ user gets from Goose out of the box should be reachable here with shipped plugin
 
 ## Capabilities
 
-The plugin world in `wit/corduroy.wit` imports ten host interfaces and nothing else. There
+The plugin world in `wit/corduroy.wit` imports eleven host interfaces and nothing else. There
 is no WASI in the linker, so a plugin has no clock, environment, filesystem or network of its
 own beyond what these give it.
 
@@ -198,6 +198,15 @@ own beyond what these give it.
 | `tools` | list and call tools other plugins registered, through the gates | tool name |
 | `state` | a durable key-value store of the plugin's own | key |
 | `service` | call a service another plugin provides | service name |
+| `plugins` | load and unload WebAssembly plugins as its children, granting no more than it holds | the loaded plugin's name |
+
+Two limits hold whatever a grant says. **Protected paths** (the host binary, the compiled-code
+cache and whatever the host adds with `WasmRuntime::protect`, such as the event log and grant
+files) are out of reach of `fs-read` and `fs-write`. A kernel runs code the core cannot see
+into, so protecting paths from a kernel is the kernel's job (a sandboxed kernel). And
+**cascades end**: a plugin is not called for an event more than `Limits::cascade` causes
+deep (16 by default); events a plugin raises while handling one name it as their cause, so
+plugins setting each other off are measured and stopped, with `plugin/cascade` recorded.
 
 Every capability is scoped, even where there is one obvious resource, so that `Scope::none()`
 keeps meaning "linked but lets nothing through", which is how a script-host automation is
@@ -244,7 +253,7 @@ Everything else is a plugin, and a plugin may itself offer primitives to other p
 | Gates | built for `tool/call` | A fourth registry. A gate is asked at a named decision point before something happens and answers allow, deny or ask; the strictest answer wins and is recorded. Reachable from WebAssembly through the `gate` export. Still to do: more decision points (`plugin/load` first). See [Events, gates and hooks](#events-gates-and-hooks). |
 | Waits and signals | built for a gate's ask | A run whose tool call a gate asked about waits for `Harness::answer`; the ask and the answer are events, so the wait survives a restart. Still to do: the general form, a step that waits for any named signal (a child session finishing, a timer). |
 | Services | built | A fifth registry, `Services`: calls between plugins in JSON text, with the caller's name, across the WebAssembly boundary in both directions. See [Plugins extending plugins](#plugins-extending-plugins). |
-| Capabilities | ten | The mechanism is settled; the set grows (below). |
+| Capabilities | eleven | The mechanism is settled; the set grows (below). |
 | Kernels | built | The trait and registry stay. `ShellKernel` is an implementation, not a primitive, and moves out to a plugin crate. |
 | Conversation projection | messages only | Understands a `compaction` event (a summary and the first message kept). Producing the summary is a plugin's job. |
 | Model access | constructor argument | A `provider` service that a plugin supplies, so the model is swappable like everything else. |
@@ -257,7 +266,6 @@ Capabilities to add, each a WIT interface with a scope:
 | `llm` | one model request | model name | compaction, summaries, the skills reviewer |
 | `session` | start a child session and await it | recipe or agent name | sub-agents |
 | `log-read` | read events of other sessions | session and topic | chat recall |
-| `plugins` | load, unload and list plugins | plugin name | an extension manager |
 | `http` | make a request | host | web fetch, remote MCP |
 | `secret` | read a named credential | secret name | providers, MCP servers |
 
@@ -447,7 +455,7 @@ The built-in registries (`tools`, `prompts`, `kernels`, `gates`) are the cases w
 itself is the consumer. A plugin that wants its own extension point (an MCP plugin accepting
 server definitions, a skills plugin accepting skill sources) provides a service.
 
-## Automations (*planned*)
+## Automations
 
 The purpose of the plugin system is that the agent can adapt the harness to its task: having
 done something by hand, it writes an automation that does it from then on without a model
@@ -460,21 +468,39 @@ the harness runs). An automation is a WebAssembly plugin with three parts:
 | An action | Host capabilities, and the `tools` capability to call other plugins' tools. Such calls pass through the gates and are logged like the model's, with the plugin as their source. |
 | Optionally, the model | The `llm` capability for one request, or `session` to start a run. |
 
-What the core must guarantee, because the author is now the agent:
+What the core must guarantee, because the author is now the agent (built):
 
-- **No amplification.** A plugin holding the `plugins` capability can grant a plugin it loads
-  only what it holds itself, narrowed or equal, never more.
-- **Loading is a decision point.** `plugin/load` is asked of the gates with the component's
-  hash and the capabilities it requests, so an approval plugin can ask the user. The answer
-  and the hash are in the log.
-- **The core's own files are out of reach.** The log, grant files, the plugin store, the
-  cache of compiled plugins (machine code the host runs) and the host binary are denied to every `fs-write` and kernel-independent path scope, whatever a
-  grant says. A plugin cannot edit its own grants.
-- **Cascades end.** An automation reacts to events and causes events. Each event already
-  records its cause; the stream refuses a chain deeper than a limit, and fuel bounds each
-  call.
+- **No amplification.** A plugin holding the `plugins` capability grants a plugin it loads
+  each requested scope *within* its own (`Scope::within`: a resource must be in both), so
+  never more than it holds. A capability it does not hold at all it can grant only with an
+  empty scope, which is how a child is linked to an import it may not use. The child's path
+  must be one the loader can read with `fs-read`, and its name one the loader's `plugins`
+  scope reaches.
+- **Loading is a decision point.** `plugin/load` is asked of the gates with the loader, the
+  child's name, the SHA-256 of its component, the capabilities it imports and the grants
+  requested; the decision is recorded as `gate/decision` and the load as `plugin/requested`,
+  both with the hash. A plugin that gates `plugin/load` may not import `plugins`, as with
+  `tool/call` and `tools`. *Not yet:* a gate's ask is a denial here, as for a plugin's tool
+  call, because the loader's call cannot wait for a person; approving a load waits on the
+  general form of waits and signals.
+- **The core's own files are out of reach.** The host binary and the compiled-code cache are
+  protected from the start; the host adds the log, grant files and the plugin store with
+  `WasmRuntime::protect`, and every plugin loaded through that runtime (children included) is
+  refused them by `fs-read` and `fs-write`, whatever its grant says. A plugin cannot edit its
+  own grants.
+- **Cascades end.** See [Capabilities](#capabilities): a plugin is not called for an event
+  more than `Limits::cascade` causes deep, and fuel bounds each call. *Changed from the
+  plan:* the stream was to refuse a deep chain; it is the plugin delivery that refuses, since
+  a refused commit closes the stream and native listeners are trusted.
 - **Agent-written code is never native.** Native plugins are trusted, so only WebAssembly
   can be loaded through the `plugins` capability.
+- **Loading from a running plugin.** A plugin's call cannot change the plugin tree, which it
+  is part of. A load is checked, gated and compiled during the call, then queued through
+  `App::requests` (`Requests`); the child already has its `FiberId`, is a child of the loader
+  (disposed with it) and starts when the tree next settles: the harness settles it before
+  every step of the loop, so a tool the child registers is offered to the model at the next
+  step. *Not yet durable:* a loaded plugin lasts as long as its loader in this process; a
+  loader that wants it back after a restart loads it again (from its `state`, say).
 
 **Guest languages.** JavaScript/TypeScript and Python come first, since those are what other
 harnesses' extensions are written in; the two existing Rust plugins are the reference, not
@@ -501,13 +527,13 @@ has the measurements. What it settled:
 - **These plugins import the whole world.** A plugin states what it needs by the world it is
   built against; the SDK generates that world from a list of capabilities. The script host
   imports everything and each automation is granted `Scope::none()` for what it may not use.
-- **Compiled code must be cached.** The components are 12 and 18 MB and take 25 to 30
-  seconds to compile at load (6 to 9 with parallel compilation), against milliseconds to
-  instantiate. A component is to be compiled once per process, and wasmtime's own cache,
-  which covers components, keeps the compiled code on disk: later loads took 0.6 to 0.7
-  seconds. Each instance holds 9 to 13 MB.
-- **The script host needs "compile once, instantiate many".** `WasmRuntime::load` compiles
-  on every call today.
+- **Compiled code is cached (built).** A runtime keeps each component it compiles by the
+  SHA-256 of its bytes, so a second load in the process takes milliseconds (the script host
+  for many automations compiles once). `WasmRuntime::cached(dir)` adds wasmtime's disk cache,
+  and `parallel-compilation` is on. Measured on four cores: the JavaScript and Python
+  components compile in 5.7 and 4.3 seconds (from 30 and 25), load again in the same process
+  in 11 to 17 ms, and in a new process from the disk cache in 0.14 seconds. Each instance
+  still holds 9 to 13 MB.
 
 ## Sandboxing
 
@@ -587,10 +613,11 @@ the step it waits on is done.
    trapped WebAssembly plugin, then services, `state` and `tools`, with re-entry refused and
    gating kept apart from calling tools (all checked from JavaScript and Python, see
    [Guest languages](guest-languages.md#between-plugins-tools-state-and-service)).
-6. Loading plugins safely: `plugins` with no amplification, the `plugin/load` decision
-   point, protected paths, the cascade limit. With it, the compiled-code cache: a component
-   compiled once per process, wasmtime's `cache` and `parallel-compilation` features switched
-   on, and the cache directory among the protected paths.
+6. *Done.* Loading plugins safely: `plugins` with no amplification, the `plugin/load`
+   decision point, protected paths, the cascade limit. With it, the compiled-code cache: a
+   component compiled once per process, wasmtime's `cache` and `parallel-compilation`
+   features switched on, and the cache directory among the protected paths. Checked from
+   JavaScript and Python, see [Guest languages](guest-languages.md#loading-plugins).
 7. The remaining capabilities, each when its first plugin needs it; `provider` as a service;
    `ShellKernel` out of the core.
 8. Guest languages. *Spike done early:* one JavaScript and one Python plugin ran against the
@@ -631,6 +658,10 @@ the step it waits on is done.
 - **Guest SDK.** Each plugin repeats the same `generate!` and error-mapping boilerplate; a
   small shared guest crate would remove it. For JavaScript and Python an SDK is required
   rather than nice to have (see [Guest languages](guest-languages.md)).
+- **Durable loads.** Plugins loaded by a plugin are not reloaded after a restart unless their
+  loader does it. A plugin store (components by hash, with the grants they were loaded with)
+  would let the host do it, and is also where grant files come in.
+- **Approving a load.** `plugin/load` cannot ask a person yet; see Automations.
 - **Shipping precompiled plugins.** wasmtime's cache removes the cost of every load but the
   first on a machine. Removing that one too means distributing compiled code, which is read
   back with the `unsafe` `Component::deserialize`. Not needed now; if it ever is, that is the

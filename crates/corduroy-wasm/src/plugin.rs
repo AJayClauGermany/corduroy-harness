@@ -5,9 +5,10 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use corduroy_core::{
-    CallError, Context, ContextError, Event, EventStream, GATES, Gate, Gates, Grants, KERNELS,
-    Kernels, POINTS, PROMPTS, Pattern, Plugin, PluginError, PromptPart, Prompts, SERVICES, Scope,
-    Service, Services, Source, TOOL_CALL, TOOLS, Tool, ToolError, ToolSpec, Tools, Verdict,
+    CallError, Context, ContextError, Draft, Event, EventStream, GATES, Gate, Gates, Grants,
+    KERNELS, Kernels, PLUGIN_LOAD, POINTS, PROMPTS, Pattern, Plugin, PluginError, PromptPart,
+    Prompts, SERVICES, Scope, Service, Services, Source, TOOL_CALL, TOOLS, Tool, ToolError,
+    ToolSpec, Tools, Verdict,
 };
 use serde_json::Value;
 use wasmtime::component::{Component, HasSelf, Linker};
@@ -20,19 +21,23 @@ mod instance;
 mod paths;
 
 use bindings::corduroy::plugin::{
-    clock, events, fs_read, fs_write, kernel, log, random, service, state, tools, types,
+    clock, events, fs_read, fs_write, kernel, log, plugins, random, service, state, tools, types,
 };
-use host::{HostState, Lent};
+use host::{HostState, Lent, Loader};
 use instance::{Blueprint, Instance};
 
 /// The package every host interface belongs to.
 const PACKAGE: &str = "corduroy:plugin/";
 
 /// The host interfaces that are capabilities, by the name they are granted under.
-const CAPABILITIES: [&str; 10] = [
+const CAPABILITIES: [&str; 11] = [
     "fs-read", "fs-write", "kernel", "events", "log", "clock", "random", "tools", "state",
-    "service",
+    "service", "plugins",
 ];
+
+/// For each decision point, the capability whose use is decided there. A plugin may not gate
+/// a point and hold its capability: it would be asked about its own calls while making them.
+const DECIDED_BY: [(&str, &str); 2] = [(TOOL_CALL, "tools"), (PLUGIN_LOAD, "plugins")];
 
 /// A plugin implemented as a WebAssembly component.
 ///
@@ -46,6 +51,8 @@ pub struct WasmPlugin {
     requires: Vec<String>,
     grants: Grants,
     config: String,
+    /// The SHA-256 of the component's bytes, in hex.
+    hash: String,
 }
 
 impl fmt::Debug for WasmPlugin {
@@ -63,6 +70,7 @@ impl WasmPlugin {
         runtime: WasmRuntime,
         name: String,
         component: Component,
+        hash: String,
     ) -> Result<Self, WasmError> {
         let mut requires = Vec::new();
         for (import, _) in component.component_type().imports(runtime.engine()) {
@@ -85,6 +93,7 @@ impl WasmPlugin {
             requires,
             grants: Grants::none(),
             config: "{}".to_owned(),
+            hash,
         })
     }
 
@@ -116,6 +125,13 @@ impl WasmPlugin {
         self
     }
 
+    /// The SHA-256 of the component's bytes, in lowercase hex: what a gate deciding whether to
+    /// load it is shown, and what the compiled code is cached under.
+    #[must_use]
+    pub fn hash(&self) -> &str {
+        &self.hash
+    }
+
     /// The capabilities this plugin imports, and so must be granted before it can start.
     #[must_use]
     pub fn requires(&self) -> &[String] {
@@ -139,11 +155,17 @@ impl WasmPlugin {
                 "tools" => tools::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state),
                 "state" => state::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state),
                 "service" => service::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state),
+                "plugins" => plugins::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state),
                 _ => Ok(()),
             }
             .map_err(|error| link_error(&error))?;
         }
         Ok(linker)
+    }
+
+    /// Whether the component imports `capability`.
+    fn imports(&self, capability: &str) -> bool {
+        self.requires.iter().any(|required| required == capability)
     }
 
     /// What `get` returns, if this plugin imports `capability`.
@@ -152,7 +174,7 @@ impl WasmPlugin {
         capability: &str,
         get: impl FnOnce() -> Result<Arc<T>, ContextError>,
     ) -> Result<Option<Arc<T>>, PluginError> {
-        if self.requires.iter().any(|required| required == capability) {
+        if self.imports(capability) {
             Ok(Some(get()?))
         } else {
             Ok(None)
@@ -178,9 +200,19 @@ impl WasmPlugin {
         let lent = Lent {
             kernels: self.lends("kernel", || ctx.service::<Kernels>(KERNELS))?,
             tools: self.lends("tools", || ctx.service::<Tools>(TOOLS))?,
-            gates: self.lends("tools", || ctx.service::<Gates>(GATES))?,
+            gates: if self.imports("tools") || self.imports("plugins") {
+                Some(ctx.service::<Gates>(GATES)?)
+            } else {
+                None
+            },
             services: self.lends("service", || ctx.service::<Services>(SERVICES))?,
             state: Arc::new(Mutex::new(stored_state(&ctx.events(), &self.name))),
+            loader: self.imports("plugins").then(|| Loader {
+                runtime: self.runtime.clone(),
+                requests: ctx.requests(),
+                fiber: ctx.fiber(),
+                children: Arc::default(),
+            }),
         };
         let blueprint = Blueprint {
             name: self.name.clone(),
@@ -189,6 +221,7 @@ impl WasmPlugin {
             linker: self.linker()?,
             grants: self.grants.clone(),
             root: self.runtime.root().to_owned(),
+            protected: self.runtime.protected().to_vec(),
             lent,
             limits: self.runtime.limits(),
             config: self.config.clone(),
@@ -294,16 +327,16 @@ impl WasmPlugin {
                 POINTS.join(", ")
             )));
         }
-        // A plugin's own tool calls pass the gates, so it would be asked about them while it
-        // runs. Gating tool calls and making them are kept apart.
-        if points.iter().any(|point| point == TOOL_CALL)
-            && self.requires.iter().any(|capability| capability == "tools")
-        {
-            return Err(PluginError::new(format!(
-                "plugin `{}` gates `{TOOL_CALL}` and imports `tools`: a plugin may gate tool \
-                 calls or make them, not both",
-                self.name
-            )));
+        // A plugin's own tool calls and loads pass the gates, so it would be asked about them
+        // while it runs. Gating a kind of call and making it are kept apart.
+        for (point, capability) in DECIDED_BY {
+            if points.iter().any(|gated| gated == point) && self.imports(capability) {
+                return Err(PluginError::new(format!(
+                    "plugin `{}` gates `{point}` and imports `{capability}`: a plugin may \
+                     decide such calls or make them, not both",
+                    self.name
+                )));
+            }
         }
         let gates = ctx.service::<Gates>(GATES)?;
         let gate: Arc<dyn Gate> = Arc::new(WasmGate {
@@ -363,6 +396,19 @@ fn deliver(instance: &Instance, event: &Event) {
     if event.source == Source::Plugin(instance.name().to_owned()) {
         return;
     }
+    if instance.too_deep(event.id) {
+        let payload = format!(
+            "{{\"plugin\":{},\"event\":{}}}",
+            corduroy_core::json::string(instance.name()),
+            event.id.get()
+        );
+        let stopped = Draft::new(Source::Host, "plugin/cascade")
+            .cause(event.id)
+            .payload(payload);
+        drop(instance.events().emit(stopped));
+        return;
+    }
+    let cause = event.id;
     let event = types::Event {
         id: event.id.get(),
         session: event
@@ -376,7 +422,9 @@ fn deliver(instance: &Instance, event: &Event) {
     };
     // A trap is already on the event stream as `plugin/trapped`; a listener has nobody to
     // return it to.
-    drop(instance.call(|plugin, store| plugin.call_on_event(store, &event)));
+    drop(instance.call_caused(Some(cause), |plugin, store| {
+        plugin.call_on_event(store, &event)
+    }));
 }
 
 struct WasmTool {

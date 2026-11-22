@@ -19,6 +19,8 @@ use crate::pattern::Pattern;
 pub struct Scope {
     allow: Vec<Pattern>,
     deny: Vec<Pattern>,
+    /// Scopes this one is narrowed to: a resource must be inside each of them as well.
+    within: Vec<Self>,
 }
 
 impl Scope {
@@ -55,11 +57,37 @@ impl Scope {
         self
     }
 
+    /// Narrow this scope to what `outer` also reaches: the result never reaches further
+    /// than either. This is how a plugin passes on part of a capability without passing on
+    /// more than it holds.
+    #[must_use]
+    pub fn within(mut self, outer: &Self) -> Self {
+        self.within.push(outer.clone());
+        self
+    }
+
+    /// Whether this scope reaches nothing at all: it allows no pattern.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.allow.is_empty()
+    }
+
+    /// The patterns this scope allows, before any narrowing.
+    pub fn allowed(&self) -> impl Iterator<Item = &str> {
+        self.allow.iter().map(Pattern::as_str)
+    }
+
+    /// The patterns this scope denies, before any narrowing.
+    pub fn denied(&self) -> impl Iterator<Item = &str> {
+        self.deny.iter().map(Pattern::as_str)
+    }
+
     /// Whether `resource` is inside this scope.
     #[must_use]
     pub fn permits(&self, resource: &str) -> bool {
         self.allow.iter().any(|pattern| pattern.matches(resource))
             && !self.deny.iter().any(|pattern| pattern.matches(resource))
+            && self.within.iter().all(|outer| outer.permits(resource))
     }
 }
 
@@ -81,6 +109,12 @@ impl Grants {
     pub fn grant(mut self, capability: impl Into<String>, scope: Scope) -> Self {
         self.scopes.insert(capability.into(), scope);
         self
+    }
+
+    /// The scope `capability` was granted in, if it was granted.
+    #[must_use]
+    pub fn scope(&self, capability: &str) -> Option<&Scope> {
+        self.scopes.get(capability)
     }
 
     /// Whether `capability` was granted, in any scope.
@@ -156,6 +190,25 @@ mod tests {
         assert!(grants.check("fs-read", "/work/src/lib.rs").is_ok());
         assert!(grants.check("fs-read", "/workshop/x").is_err());
         assert!(grants.check("fs-write", "/work/src/lib.rs").is_err());
+    }
+
+    #[test]
+    fn a_scope_within_another_reaches_only_what_both_reach() {
+        let outer = Scope::subtree("/work").deny("*.env");
+        let wide = Scope::any().within(&outer);
+        let narrow = Scope::subtree("/work/out").within(&outer);
+
+        assert!(wide.permits("/work/a.rs"));
+        assert!(!wide.permits("/etc/passwd"));
+        assert!(!wide.permits("/work/.env"));
+        assert!(narrow.permits("/work/out/b"));
+        assert!(!narrow.permits("/work/a.rs"));
+        assert!(Scope::none().is_empty() && !Scope::any().is_empty());
+        assert_eq!(outer.denied().collect::<Vec<_>>(), ["*.env"]);
+        assert_eq!(
+            Scope::subtree("/w").allowed().collect::<Vec<_>>(),
+            ["/w", "/w/*"]
+        );
     }
 
     #[test]

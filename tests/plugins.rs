@@ -29,7 +29,7 @@ struct Agent {
 fn agent(work: &Path, replies: impl IntoIterator<Item = Message>) -> Result<Agent, Box<dyn Error>> {
     let model = Arc::new(ScriptedProvider::new(replies));
     let provider: Arc<ScriptedProvider> = Arc::clone(&model);
-    let mut harness = Harness::new(provider)?.with_system_prompt("Be brief.");
+    let harness = Harness::new(provider)?.with_system_prompt("Be brief.");
     let runtime = WasmRuntime::new()?.with_root(work);
     let workspace = Scope::subtree(&work.to_string_lossy());
     let skills_dir = work.join("skills");
@@ -290,7 +290,7 @@ async fn enough_work_without_saving_a_skill_triggers_a_review_nudge() {
 #[tokio::test]
 async fn reloading_a_plugin_starts_it_from_fresh_memory() {
     let work = scratch("reload");
-    let mut agent = agent(
+    let agent = agent(
         &work,
         [
             call("1", "bash", &json!({"command": "true"})),
@@ -313,7 +313,7 @@ async fn reloading_a_plugin_starts_it_from_fresh_memory() {
 #[tokio::test]
 async fn a_kernel_lasts_as_long_as_the_plugin_that_provides_it() {
     let work = scratch("kernel-plugin");
-    let mut agent = agent(
+    let agent = agent(
         &work,
         [
             call("1", "bash", &json!({"command": "kept=yes"})),
@@ -342,7 +342,7 @@ async fn a_kernel_lasts_as_long_as_the_plugin_that_provides_it() {
 async fn the_approval_gate_lets_reads_through_and_holds_writes_for_a_person() {
     let work = scratch("approval");
     fs::write(work.join("notes.txt"), "one\n").unwrap();
-    let mut agent = agent(
+    let agent = agent(
         &work,
         [
             call("1", "read", &json!({"path": "notes.txt"})),
@@ -396,4 +396,52 @@ async fn the_approval_gate_lets_reads_through_and_holds_writes_for_a_person() {
         ]
     );
     assert_eq!(fs::read_to_string(work.join("notes.txt")).unwrap(), "two\n");
+}
+
+#[tokio::test]
+async fn a_plugin_loaded_during_a_run_is_there_for_the_next_step() {
+    let built = plugin("testbed");
+    let dir = built.parent().unwrap().to_owned();
+    let empty: Vec<serde_json::Value> = [
+        "log", "clock", "random", "tools", "state", "service", "events", "plugins",
+    ]
+    .iter()
+    .map(|capability| json!({"capability": capability, "allow": [], "deny": []}))
+    .collect();
+    let model = Arc::new(ScriptedProvider::new([
+        call(
+            "1",
+            "l.load",
+            &json!({"path": built, "name": "child", "config": {"prefix": "c."}, "grants": empty}),
+        ),
+        call("2", "c.count", &json!({})),
+        say("loaded and counted"),
+    ]));
+    let harness = Harness::new(model).unwrap();
+    let mut loader = WasmRuntime::new()
+        .unwrap()
+        .load(&built)
+        .unwrap()
+        .named("loader")
+        .config(json!({"prefix": "l."}).to_string())
+        .grant("plugins", Scope::none().allow("child"))
+        .grant("fs-read", Scope::subtree(&dir.to_string_lossy()));
+    for capability in [
+        "log", "clock", "random", "tools", "state", "service", "events",
+    ] {
+        loader = loader.grant(capability, Scope::none());
+    }
+    harness.plugin(loader);
+
+    let outcome = harness.run("load a counter and use it").await.unwrap();
+
+    assert_eq!(
+        outcome.status,
+        Status::Finished {
+            answer: "loaded and counted".into()
+        }
+    );
+    let outputs = outputs(&harness);
+    assert_eq!(outputs[0].len(), 66, "{outputs:?}");
+    assert_eq!(outputs[1], "1");
 }

@@ -71,7 +71,9 @@ fn testbed(
         .grant("random", Scope::none())
         .grant("tools", tools)
         .grant("state", state)
-        .grant("service", service))
+        .grant("service", service)
+        .grant("events", Scope::none())
+        .grant("plugins", Scope::none()))
 }
 
 /// Call the tool `tool` with `input` and parse what it returns.
@@ -164,15 +166,15 @@ fn a_plugin_that_gates_tool_calls_may_not_make_them() {
 
     let id = host
         .app
-        .plugin(testbed(&dir, "testbed", &json!({"gate": true}), scoped).unwrap());
+        .plugin(testbed(&dir, "testbed", &json!({"gates": ["tool/call"]}), scoped).unwrap());
 
     let Some(FiberState::Failed(reason)) = host.app.state(id) else {
         panic!("a gate that imports `tools` must not start");
     };
     assert_eq!(
         reason,
-        "plugin `testbed` gates `tool/call` and imports `tools`: a plugin may gate tool calls \
-         or make them, not both"
+        "plugin `testbed` gates `tool/call` and imports `tools`: a plugin may decide such \
+         calls or make them, not both"
     );
 }
 
@@ -402,7 +404,9 @@ fn impatient_alpha() -> Result<WasmPlugin, Box<dyn Error>> {
         .grant("random", Scope::none())
         .grant("tools", Scope::none().allow("hold"))
         .grant("state", Scope::none())
-        .grant("service", Scope::none()))
+        .grant("service", Scope::none())
+        .grant("events", Scope::none())
+        .grant("plugins", Scope::none()))
 }
 
 #[test]

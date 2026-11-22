@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use corduroy_core::{Decision, Gates, SessionId, TOOL_CALL, Tools, Verdict};
+use std::sync::{Mutex, PoisonError};
+
+use corduroy_core::{App, Decision, Gates, SessionId, TOOL_CALL, Tools, Verdict};
 use oi_kit_agent::machine::MachineSession as _;
 use oi_kit_agent::operation::{
     Emitter, Operation, OperationResult, applied, messages_since_kickoff, not_applicable,
@@ -142,5 +144,38 @@ impl Operation<Session, Effect> for GateOperation {
         } else {
             applied(effects)
         }
+    }
+}
+
+/// The step that applies changes to the plugin tree that plugins asked for.
+///
+/// A plugin loading or unloading another through the `plugins` capability cannot change the
+/// tree while the loop runs; this step applies such changes before every step, so that the
+/// next one sees their tools, gates and prompt parts. It never applies itself.
+pub struct SettleOperation(pub Arc<Mutex<App>>);
+
+impl std::fmt::Debug for SettleOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SettleOperation")
+    }
+}
+
+#[async_trait]
+impl Operation<Session, Effect> for SettleOperation {
+    fn name(&self) -> &'static str {
+        "settle"
+    }
+
+    async fn run(
+        &self,
+        _session: &Session,
+        _conversation: &Conversation,
+        _emit: &Emitter,
+    ) -> Result<OperationResult<Effect>> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .apply_requests();
+        not_applicable()
     }
 }

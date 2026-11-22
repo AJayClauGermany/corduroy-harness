@@ -22,8 +22,15 @@ pub const GATES: &str = "gates";
 /// where `caller` is `agent` for the model's calls and `plugin:<name>` for a plugin's.
 pub const TOOL_CALL: &str = "tool/call";
 
+/// The decision point asked before a plugin loads another plugin.
+///
+/// Its request is JSON text: `{"loader", "name", "hash", "requires", "grants"}`, where
+/// `hash` is the SHA-256 of the component's bytes in hex, `requires` the capabilities it
+/// imports and `grants` maps each capability to `{"allow", "deny"}` as requested.
+pub const PLUGIN_LOAD: &str = "plugin/load";
+
 /// Every decision point the host asks gates at.
-pub const POINTS: [&str; 1] = [TOOL_CALL];
+pub const POINTS: [&str; 2] = [TOOL_CALL, PLUGIN_LOAD];
 
 /// The registry of every gate, asked in name order.
 pub type Gates = Registry<dyn Gate>;

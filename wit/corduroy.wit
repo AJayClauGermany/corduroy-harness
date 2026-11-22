@@ -226,6 +226,45 @@ interface service {
     call: func(service: string, method: string, payload: string) -> result<string, call-error>;
 }
 
+/// Capability `plugins`: load and unload WebAssembly plugins as children of this one. Scoped by
+/// the name a loaded plugin gets.
+///
+/// A plugin grants only what it holds: each requested scope is narrowed to the loader's own
+/// grant of that capability, and a capability the loader does not hold can be granted only
+/// with an empty scope. Every load is asked of the gates at `plugin/load` first; a gate's ask
+/// comes back as `denied`, since the call cannot wait for a person.
+interface plugins {
+    use types.{host-error};
+
+    /// One capability for the plugin being loaded, with the patterns of its scope.
+    record grant {
+        capability: string,
+        allow: list<string>,
+        deny: list<string>,
+    }
+
+    record load-request {
+        /// The name the plugin is loaded under. The loader's scope must reach it.
+        name: string,
+        /// Where the component (or a core module with component type information) is. The
+        /// loader's `fs-read` scope must reach it, so a plugin loads only what it could read.
+        path: string,
+        /// Passed to the plugin's `activate`, as JSON text.
+        config: string,
+        grants: list<grant>,
+    }
+
+    /// Load a plugin as a child of this one, unloaded with it. Returns the SHA-256 of the
+    /// component in hex. The plugin starts once the host next settles its plugins (before the
+    /// next step of the loop); `plugin/activated` or `plugin/failed` on the event stream says
+    /// how that went.
+    load: func(request: load-request) -> result<string, host-error>;
+    /// Unload a plugin this plugin loaded.
+    unload: func(name: string) -> result<_, host-error>;
+    /// The plugins this plugin has loaded and not unloaded, by name.
+    loaded: func() -> list<string>;
+}
+
 /// A plugin. Every import is a capability the host must grant before the plugin is
 /// instantiated; a plugin that imports nothing can only compute.
 world plugin {
@@ -241,6 +280,7 @@ world plugin {
     import tools;
     import state;
     import service;
+    import plugins;
 
     /// Called once per instantiation with the plugin's configuration as JSON text.
     export activate: func(config: string) -> result<plugin-info, string>;

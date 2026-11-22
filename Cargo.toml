@@ -22,10 +22,13 @@ corduroy-wasm = { path = "crates/corduroy-wasm", version = "0.1.0" }
 corduroy-jsonl = { path = "crates/corduroy-jsonl", version = "0.1.0" }
 corduroy-test-support = { path = "crates/corduroy-test-support", version = "0.1.0" }
 # Synchronous embedding: no async runtime, and no WASI, so plugins get no ambient authority.
-wasmtime = { version = "51.0.0", default-features = false, features = ["component-model", "cranelift", "runtime"] }
+wasmtime = { version = "51.0.0", default-features = false, features = ["component-model", "cranelift", "runtime", "cache", "parallel-compilation"] }
 wit-component = "0.263.0"
 # The `random` capability. The version wasmtime's tree already carries.
 getrandom = "0.3.4"
+# Hashes of plugin components, for the compiled-code cache and `plugin/load`. The version
+# wasmtime's cache already carries.
+sha2 = "0.10.9"
 # The base agent abstractions (provider, message, conversation, operation, state machine).
 oi-kit-agent = { version = "=0.1.0-alpha.15", default-features = false }
 oi-kit-provider-types = { version = "=0.1.0-alpha.15", default-features = false }

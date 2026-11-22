@@ -11,7 +11,7 @@
 //! A component can only reach the outside world through its imports, and it has no imports
 //! but the host interfaces of the plugin world. Each of those interfaces is one *capability*:
 //! `fs-read`, `fs-write`, `kernel`, `events`, `log`, `clock`, `random`, `tools`, `state`,
-//! `service`. There is no WASI, so there is no ambient authority to fall back on.
+//! `service`, `plugins`. There is no WASI, so there is no ambient authority to fall back on.
 //!
 //! * **At load time** the host links only the interfaces the plugin was granted. A component
 //!   that imports an interface it was not granted is never instantiated.

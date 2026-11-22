@@ -3,7 +3,7 @@
 use std::error::Error;
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use corduroy_core::{
     App, ContextError, EventStream, FiberId, GATES, Gates, KERNELS, Kernel, Kernels, LogError,
@@ -23,7 +23,7 @@ use rmcp::model::{CallToolResult, ContentBlock};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::gates::GateOperation;
+use crate::gates::{GateOperation, SettleOperation};
 use crate::session::{
     Answer, Ask, Effect, Journal, MAIN, Progress, Session, SessionInfo, Sessions,
 };
@@ -163,7 +163,9 @@ pub struct Outcome {
 /// and lines up oi-kit operations into a loop. Tools, prompt text, kernels and reactions to
 /// events all come from plugins.
 pub struct Harness {
-    app: App,
+    /// Shared with the step that applies changes plugins asked for while the loop runs.
+    app: Arc<Mutex<App>>,
+    events: Arc<EventStream>,
     tools: Arc<Tools>,
     prompts: Arc<Prompts>,
     kernels: Arc<Kernels>,
@@ -218,14 +220,15 @@ impl Harness {
         let kernels = Arc::new(Kernels::new());
         let gates = Arc::new(Gates::new());
         let services = Arc::new(Services::new());
-        let mut app = App::with_events(events);
+        let mut app = App::with_events(Arc::clone(&events));
         app.provide(TOOLS, Arc::clone(&tools))?;
         app.provide(PROMPTS, Arc::clone(&prompts))?;
         app.provide(KERNELS, Arc::clone(&kernels))?;
         app.provide(GATES, Arc::clone(&gates))?;
         app.provide(SERVICES, Arc::clone(&services))?;
         Ok(Self {
-            app,
+            app: Arc::new(Mutex::new(app)),
+            events,
             tools,
             prompts,
             kernels,
@@ -281,19 +284,21 @@ impl Harness {
     }
 
     /// Load a plugin.
-    pub fn plugin(&mut self, plugin: impl Plugin + 'static) -> FiberId {
-        self.app.plugin(plugin)
+    pub fn plugin(&self, plugin: impl Plugin + 'static) -> FiberId {
+        self.app().plugin(plugin)
     }
 
-    /// The plugin tree, for unloading and reloading plugins.
-    pub const fn app(&mut self) -> &mut App {
-        &mut self.app
+    /// The plugin tree, for unloading and reloading plugins. Changes plugins ask for through
+    /// [`Requests`](corduroy_core::Requests) are applied before each step of the loop, and by
+    /// any change made here.
+    pub fn app(&self) -> MutexGuard<'_, App> {
+        self.app.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// The stream every event of this harness is recorded on.
     #[must_use]
     pub const fn events(&self) -> &Arc<EventStream> {
-        self.app.events()
+        &self.events
     }
 
     /// The tools plugins have registered.
@@ -353,9 +358,9 @@ impl Harness {
         self.sessions.journal(session)
     }
 
-    /// The loop, as the ordered steps a [`StateMachine`] walks: custom operations, the
-    /// prompt, the gates, plugin tools, an answer for calls nobody handled, the turn limit and
-    /// finally the model.
+    /// The loop, as the ordered steps a [`StateMachine`] walks: applying the plugin changes
+    /// plugins asked for, custom operations, the prompt, the gates, plugin tools, an answer for
+    /// calls nobody handled, the turn limit and finally the model.
     #[must_use]
     pub fn steps(&self) -> Vec<Step<'static, Session, Effect>> {
         let tools = ToolOperation::new().with_provider(Arc::new(PluginTools::new(
@@ -370,6 +375,10 @@ impl Harness {
             .iter()
             .map(|operation| Step::Operation(Arc::clone(operation)))
             .collect();
+        steps.insert(
+            0,
+            Step::Operation(Arc::new(SettleOperation(Arc::clone(&self.app)))),
+        );
         steps.push(Step::Operation(Arc::new(prompt)));
         steps.push(Step::Operation(Arc::new(GateOperation::new(
             Arc::clone(&self.gates),

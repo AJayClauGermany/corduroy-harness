@@ -11,17 +11,18 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
 use corduroy_core::{
-    CallError as CoreCallError, Draft, Gates, Grants, Kernels, Services, Source, TOOL_CALL,
-    ToolError as CoreToolError, Tools, Verdict, json,
+    CallError as CoreCallError, Draft, FiberId, Gates, Grants, Kernels, PLUGIN_LOAD, Requests,
+    Scope, Services, Source, TOOL_CALL, ToolError as CoreToolError, Tools, Verdict, json,
 };
 use serde_json::{Value, json};
 use wasmtime::StoreLimits;
 
 use super::bindings::corduroy::plugin::types::{CallError, HostError, ToolError, ToolSpec};
 use super::bindings::corduroy::plugin::{
-    clock, events, fs_read, fs_write, kernel, log, random, service, state, tools, types,
+    clock, events, fs_read, fs_write, kernel, log, plugins, random, service, state, tools, types,
 };
 use super::paths;
+use crate::runtime::WasmRuntime;
 
 /// Largest file `fs-read` will hand to a plugin, in bytes.
 const MAX_FILE: u64 = 8 << 20;
@@ -48,6 +49,24 @@ pub(super) struct Lent {
     pub(super) services: Option<Arc<Services>>,
     /// The `state` store as of the last call that returned.
     pub(super) state: Arc<Mutex<BTreeMap<String, String>>>,
+    /// For `plugins`: where loaded plugins are compiled, how they are queued for the plugin
+    /// tree, the loader's own place in it, and what it has loaded, by name.
+    pub(super) loader: Option<Loader>,
+}
+
+/// What the `plugins` capability needs from the host.
+#[derive(Clone)]
+pub(super) struct Loader {
+    pub(super) runtime: WasmRuntime,
+    pub(super) requests: Requests,
+    pub(super) fiber: FiberId,
+    pub(super) children: Arc<Mutex<BTreeMap<String, FiberId>>>,
+}
+
+impl Loader {
+    fn children(&self) -> MutexGuard<'_, BTreeMap<String, FiberId>> {
+        self.children.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 impl Lent {
@@ -63,6 +82,8 @@ pub(super) struct HostState {
     pub(super) grants: Grants,
     /// Directory relative paths are resolved against.
     pub(super) root: PathBuf,
+    /// Paths no grant reaches: the host's own files.
+    pub(super) protected: Vec<PathBuf>,
     pub(super) lent: Lent,
     /// Events raised during the current call, delivered once it returns. Delivering them at
     /// once could re-enter the instance that is still running.
@@ -82,22 +103,39 @@ pub(super) struct HostState {
 impl HostState {
     fn check(&mut self, capability: &str, resource: &str) -> Result<(), HostError> {
         self.grants.check(capability, resource).map_err(|denied| {
-            let payload = format!(
-                "{{\"plugin\":{},\"capability\":{},\"resource\":{}}}",
-                json::string(&self.plugin),
-                json::string(capability),
-                json::string(resource)
-            );
-            self.outbox
-                .push(Draft::new(Source::Host, "capability/denied").payload(payload));
+            self.refused(capability, resource);
             HostError::Denied(denied.to_string())
         })
     }
 
-    /// Resolve a path named by the plugin and check it against `capability`.
+    /// Record that `capability` was refused for `resource`.
+    fn refused(&mut self, capability: &str, resource: &str) {
+        let payload = format!(
+            "{{\"plugin\":{},\"capability\":{},\"resource\":{}}}",
+            json::string(&self.plugin),
+            json::string(capability),
+            json::string(resource)
+        );
+        self.outbox
+            .push(Draft::new(Source::Host, "capability/denied").payload(payload));
+    }
+
+    /// Resolve a path named by the plugin and check it against `capability` and the host's
+    /// protected paths.
     fn path(&mut self, capability: &str, path: &str) -> Result<PathBuf, HostError> {
         let resolved = paths::resolve(&self.root, path);
-        self.check(capability, &paths::scope_key(&resolved))?;
+        let key = paths::scope_key(&resolved);
+        if self
+            .protected
+            .iter()
+            .any(|protected| resolved.starts_with(protected))
+        {
+            self.refused(capability, &key);
+            return Err(HostError::Denied(format!(
+                "`{key}` is protected by the host and out of reach of every plugin"
+            )));
+        }
+        self.check(capability, &key)?;
         Ok(resolved)
     }
 }
@@ -418,5 +456,150 @@ impl service::Host for HostState {
                 CoreCallError::Failed(reason) => CallError::Failed(reason),
                 CoreCallError::Denied(reason) => CallError::Denied(reason),
             })
+    }
+}
+
+/// The grant a loaded plugin gets for `capability`, asked for as `requested` by a loader
+/// holding `held`: never more than the loader has.
+fn narrowed(capability: &str, requested: Scope, held: &Grants) -> Result<Scope, String> {
+    match held.scope(capability) {
+        Some(outer) => Ok(requested.within(outer)),
+        None if requested.is_empty() => Ok(Scope::none()),
+        None => Err(format!(
+            "cannot grant `{capability}`: the loader does not hold it, so it can grant it only \
+             with an empty scope"
+        )),
+    }
+}
+
+impl HostState {
+    /// Ask the gates whether `request` may be loaded, recording their decision. Returns why
+    /// not, if not.
+    fn gate_load(&mut self, request: &Value) -> Option<String> {
+        let decision = self
+            .lent
+            .gates
+            .as_ref()?
+            .decide(PLUGIN_LOAD, &request.to_string())?;
+        let mut recorded = request.clone();
+        if let Some(fields) = recorded.as_object_mut() {
+            fields.insert("point".to_owned(), json!(PLUGIN_LOAD));
+            fields.insert("verdict".to_owned(), json!(decision.verdict.kind()));
+            fields.insert("reason".to_owned(), json!(decision.verdict.reason()));
+            fields.insert("gate".to_owned(), json!(decision.gate));
+        }
+        self.outbox
+            .push(Draft::new(Source::Host, "gate/decision").payload(recorded.to_string()));
+        match decision.verdict {
+            Verdict::Allow => None,
+            Verdict::Deny(reason) => Some(format!("denied by gate `{}`: {reason}", decision.gate)),
+            Verdict::Ask(reason) => Some(format!(
+                "gate `{}` asked for a person's approval, which a plugin's call cannot wait \
+                 for: {reason}",
+                decision.gate
+            )),
+        }
+    }
+}
+
+impl HostState {
+    /// The grants a plugin loaded by this one gets for `requested`, each narrowed to this
+    /// plugin's own, and the request as JSON for the gates and the log.
+    fn passed_on(&self, requested: Vec<plugins::Grant>) -> Result<(Grants, Value), HostError> {
+        let mut grants = Grants::none();
+        let mut asked = serde_json::Map::new();
+        for grant in requested {
+            asked.insert(
+                grant.capability.clone(),
+                json!({"allow": grant.allow, "deny": grant.deny}),
+            );
+            let scope = grant.allow.into_iter().fold(Scope::none(), Scope::allow);
+            let scope = grant.deny.into_iter().fold(scope, Scope::deny);
+            let scope =
+                narrowed(&grant.capability, scope, &self.grants).map_err(HostError::Denied)?;
+            grants = grants.grant(grant.capability, scope);
+        }
+        Ok((grants, Value::Object(asked)))
+    }
+}
+
+impl plugins::Host for HostState {
+    fn load(&mut self, request: plugins::LoadRequest) -> Result<String, HostError> {
+        self.check("plugins", &request.name)?;
+        let loader = self
+            .lent
+            .loader
+            .clone()
+            .ok_or_else(|| HostError::Failed(unlent("plugin loader")))?;
+        if loader.children().contains_key(&request.name) {
+            return Err(HostError::Failed(format!(
+                "a plugin called `{}` is already loaded",
+                request.name
+            )));
+        }
+        let path = self.path("fs-read", &request.path)?;
+        let plugin = loader
+            .runtime
+            .load(&path)
+            .map_err(|error| HostError::Failed(error.to_string()))?
+            .named(request.name.clone())
+            .config(request.config);
+
+        let (grants, asked) = self.passed_on(request.grants)?;
+        let missing: Vec<&str> = plugin
+            .requires()
+            .iter()
+            .map(String::as_str)
+            .filter(|capability| !grants.has(capability))
+            .collect();
+        if !missing.is_empty() {
+            return Err(HostError::Failed(format!(
+                "`{}` imports {}, which the request does not grant",
+                request.name,
+                missing.join(", ")
+            )));
+        }
+
+        let hash = plugin.hash().to_owned();
+        let described = json!({
+            "loader": Source::Plugin(self.plugin.clone()).to_string(),
+            "name": request.name,
+            "hash": hash,
+            "requires": plugin.requires(),
+            "grants": asked,
+        });
+        if let Some(refusal) = self.gate_load(&described) {
+            return Err(HostError::Denied(refusal));
+        }
+        let id = loader
+            .requests
+            .load(Some(loader.fiber), plugin.with_grants(grants));
+        loader.children().insert(request.name, id);
+        self.outbox
+            .push(Draft::new(Source::Host, "plugin/requested").payload(described.to_string()));
+        Ok(hash)
+    }
+
+    fn unload(&mut self, name: String) -> Result<(), HostError> {
+        self.check("plugins", &name)?;
+        let loader = self
+            .lent
+            .loader
+            .clone()
+            .ok_or_else(|| HostError::Failed(unlent("plugin loader")))?;
+        let id = loader
+            .children()
+            .remove(&name)
+            .ok_or_else(|| HostError::Failed(format!("this plugin did not load `{name}`")))?;
+        loader.requests.dispose(id);
+        Ok(())
+    }
+
+    fn loaded(&mut self) -> Vec<String> {
+        self.lent
+            .loader
+            .as_ref()
+            .map(|loader| loader.children().keys().cloned().collect())
+            .unwrap_or_default()
     }
 }

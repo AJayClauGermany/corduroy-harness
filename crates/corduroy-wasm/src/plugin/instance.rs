@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 
-use corduroy_core::{Draft, EventStream, Grants, Source, json};
+use corduroy_core::{Draft, EventId, EventStream, Grants, Source, json};
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Engine, Store, StoreLimitsBuilder};
 
@@ -27,6 +27,7 @@ pub(super) struct Blueprint {
     pub(super) linker: Linker<HostState>,
     pub(super) grants: Grants,
     pub(super) root: PathBuf,
+    pub(super) protected: Vec<PathBuf>,
     pub(super) lent: Lent,
     pub(super) limits: Limits,
     /// Passed to `activate` when the plugin is restarted.
@@ -42,6 +43,7 @@ impl Blueprint {
                 plugin: self.name.clone(),
                 grants: self.grants.clone(),
                 root: self.root.clone(),
+                protected: self.protected.clone(),
                 lent: self.lent.clone(),
                 outbox: Vec::new(),
                 pending: BTreeMap::new(),
@@ -224,6 +226,18 @@ impl Instance {
         &self.blueprint.name
     }
 
+    /// Whether the event `id` is so far down a chain of causes that this plugin must not be
+    /// called for it.
+    pub(super) fn too_deep(&self, id: EventId) -> bool {
+        let limit = self.blueprint.limits.cascade;
+        self.events.depth(id, limit) >= limit
+    }
+
+    /// The stream this plugin's events go to.
+    pub(super) const fn events(&self) -> &Arc<EventStream> {
+        &self.events
+    }
+
     fn slot(&self) -> MutexGuard<'_, Slot> {
         self.slot.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -243,6 +257,17 @@ impl Instance {
         &self,
         call: impl FnOnce(&bindings::Plugin, &mut Store<HostState>) -> wasmtime::Result<T>,
     ) -> Result<T, String> {
+        self.call_caused(None, call)
+    }
+
+    /// As [`call`](Self::call), for a call made because of the event `cause`: every event the
+    /// plugin raises during it names `cause` as its cause, so that a chain of plugins reacting
+    /// to each other can be measured and cut off.
+    pub(super) fn call_caused<T>(
+        &self,
+        cause: Option<EventId>,
+        call: impl FnOnce(&bindings::Plugin, &mut Store<HostState>) -> wasmtime::Result<T>,
+    ) -> Result<T, String> {
         let mut claim = self.claim()?;
         let link = Link::push(self.id);
         let mut raised = Vec::new();
@@ -260,6 +285,9 @@ impl Instance {
         });
         drop(link);
         drop(claim);
+        if let Some(cause) = cause {
+            raised = raised.into_iter().map(|draft| draft.cause(cause)).collect();
+        }
         // The plugin's call has returned, so there is nobody to hand a refused commit to. The
         // stream is closed by then and the next commit of the run reports it.
         drop(self.events.commit(raised));

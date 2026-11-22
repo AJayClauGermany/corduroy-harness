@@ -335,10 +335,14 @@ fn log_clock_and_random_answer_within_their_grants() {
         .grant("random", Scope::any())
         .grant("tools", Scope::none())
         .grant("state", Scope::none())
-        .grant("service", Scope::none());
+        .grant("service", Scope::none())
+        .grant("events", Scope::none())
+        .grant("plugins", Scope::none());
     assert_eq!(
         testbed.requires(),
-        ["log", "clock", "random", "tools", "state", "service"]
+        [
+            "events", "log", "clock", "random", "tools", "state", "service", "plugins"
+        ]
     );
     host.app.plugin(testbed);
     let before = std::time::SystemTime::now()
@@ -377,7 +381,9 @@ fn log_clock_and_random_are_scoped_like_any_capability() {
         .grant("random", Scope::none())
         .grant("tools", Scope::none())
         .grant("state", Scope::none())
-        .grant("service", Scope::none());
+        .grant("service", Scope::none())
+        .grant("events", Scope::none())
+        .grant("plugins", Scope::none());
     host.app.plugin(testbed);
 
     let probed = probe(&host).unwrap();
@@ -412,7 +418,9 @@ fn restartable(dir: &Path, restarts: u32) -> Result<WasmPlugin, WasmError> {
         .grant("random", Scope::any())
         .grant("tools", Scope::none())
         .grant("state", Scope::none())
-        .grant("service", Scope::none()))
+        .grant("service", Scope::none())
+        .grant("events", Scope::none())
+        .grant("plugins", Scope::none()))
 }
 
 #[test]

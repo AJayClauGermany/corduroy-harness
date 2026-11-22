@@ -67,7 +67,7 @@ fn harness(
     runs: &Arc<AtomicUsize>,
 ) -> Result<Harness, HarnessError> {
     let model = Arc::new(ScriptedProvider::new(replies));
-    let mut harness = Harness::resume(model, Arc::new(events))?;
+    let harness = Harness::resume(model, Arc::new(events))?;
     harness.plugin(toolbox(runs));
     harness.plugin(policy());
     Ok(harness)
@@ -296,7 +296,7 @@ async fn without_gates_nothing_is_decided_or_recorded() {
         call("c1", "launch", &json!({})),
         say("launched"),
     ]));
-    let mut harness = Harness::new(model).unwrap();
+    let harness = Harness::new(model).unwrap();
     harness.plugin(toolbox(&runs));
 
     harness.run("launch").await.unwrap();

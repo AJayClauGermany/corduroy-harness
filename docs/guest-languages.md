@@ -77,8 +77,9 @@ processes. Instantiating an already compiled component is milliseconds.
 
 ## What follows
 
-- **A cache of compiled components** is a precondition for shipping any JavaScript or Python
-  plugin, and for the script host. It has two parts. Within a process, a component is compiled
+- **A cache of compiled components** (*done in step 6*, see
+  [Loading plugins](#loading-plugins)) is a precondition for shipping any JavaScript or
+  Python plugin, and for the script host. It has two parts. Within a process, a component is compiled
   once and instantiated many times (today each `load` compiles again, so two automations on
   one script host cost two compilations). Across processes, wasmtime's own cache does the
   job: with the `cache` feature and a `Cache` on the engine's `Config`, components are
@@ -207,6 +208,29 @@ Names in the WIT met each language's own:
   is safe; importing the function by name is not.
 - A Python error's class name (`ToolError_InvalidInput`) is not its WIT tag
   (`invalid-input`); an SDK should map one to the other for messages.
+
+## Loading plugins
+
+Checked in November 2026 with step 6. A JavaScript and a Python plugin holding `plugins`
+each loaded the Rust `approval` plugin as a child through the host, which started it once
+the tree settled. Both build against the `plugins` interface with no surprises: the records
+are object literals in JavaScript and `plugins.Grant` / `plugins.LoadRequest` in Python, and
+no name clashes with either language.
+
+`load-request` takes a path, not the component's bytes. `fs-read` returns UTF-8 text only,
+so a guest could not have read a `.wasm` file to pass on, and the components are 12 to 18 MB
+against a 64 MB instance; the host reads the file instead, if the loader's `fs-read` scope
+reaches it. A guest that needs binary files for another reason still has no way to read them.
+
+With the compiled-code cache and `parallel-compilation` on (four cores):
+
+| | JavaScript | Python |
+| --- | --- | --- |
+| First compile | 5.7 s (was 30 s) | 4.3 s (was 25 s) |
+| Same component again, same process | 11 ms | 17 ms |
+| A new process, from the disk cache | 0.14 s | 0.15 s |
+
+The disk cache took 25 MB for both.
 
 ## Not tested
 
