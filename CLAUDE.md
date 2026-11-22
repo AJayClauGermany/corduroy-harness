@@ -3,7 +3,9 @@
 A plugin-first agent harness in Rust. A small core provides a plugin tree, an event stream and
 the registries plugins contribute to; everything else (the model, tools, prompt text,
 kernels, reactions to events) is a plugin, either native Rust or a capability-gated WebAssembly component. The agent loop is
-oi-kit's state machine. `docs/design.md` explains where each idea comes from and why.
+the harness's own (`src/harness.rs`), over the core's `Message`; oi-kit is used only behind
+the provider boundary, in `corduroy-providers`. `docs/design.md` explains where each idea
+comes from and why.
 
 Three tiers: the **core** (the contract; changes rarely), **extensions** (native plugins:
 trusted, compiled in, for what the core should not own) and **plugins** (WebAssembly,
@@ -18,11 +20,11 @@ contracts must not break ("What is stable").
 | `crates/corduroy-jsonl` | A store for the event stream: `JsonlLog`, one line per commit under a versioned header. Stores implement `corduroy_core::Log` and live outside the core. |
 | `crates/corduroy-cli` | The `corduroy` binary (`cargo corduroy`), a thin `main` over the library: `agent` reads the agent file (TOML: providers, kernels, secrets, extensions, WebAssembly plugins with grants) and assembles the harness, protecting the log and the agent file; `extension` holds the extension kinds a command was built with; `command` is the command line (`main_with`); `terminal` shows events as they commit and answers gate asks. End-to-end tests drive the binary against a fake OpenAI-compatible server on loopback; `tests/local_model.rs` holds the evals (ignored by default), which drive it against a real small model. |
 | `crates/corduroy-mcp` | `mcp_server`: one MCP server as a native plugin, its tools as `<server>__<tool>`. A stdio server is started through `Kernel::spawn`, never directly. Tests use a Python fixture server (`tests/fixtures/server.py`). |
-| `crates/corduroy-providers` | Real model providers built from `oi-kit-providers` (`ProviderSpec` → `Arc<dyn Provider>`). Kept out of the harness library. |
+| `crates/corduroy-providers` | Real model providers built from `oi-kit-providers` (`ProviderSpec` → `Arc<dyn corduroy_harness::Provider>`), converting messages, tools and usage at the boundary (`adapter`). The only crate that sees oi-kit's types. |
 | `crates/corduroy-http` | `UreqClient`, the `HttpClient` behind the `http` capability (no redirects), and the `http_client` plugin. |
 | `crates/corduroy-shell` | `ShellKernel`, a persistent POSIX shell as a `Kernel` that can also `spawn` processes, and the `shell_kernel` plugin. |
 | `crates/corduroy-wasm` | wasmtime host. Loads components built against `wit/corduroy.wit` as `Plugin`s; links only granted interfaces. |
-| `src/` (`corduroy-harness`) | Assembles the loop from oi-kit: `Harness` (sessions, `run_in`, `continue_run`, `answer`, `signal`), `Journal` (one step's effects to one commit), `GateOperation`, `WaitOperation`, `CompactOperation`, the `sessions` service for child sessions (`src/children.rs`), `PluginTools`, the `Providers` registry and `provider` plugin (`src/provider.rs`), `ScriptedProvider`. Async (tokio). |
+| `src/` (`corduroy-harness`) | The loop and its parts: `Harness` (sessions, `run_in`, `continue_run`, `answer`, `signal`, `stop`, `step`, and the loop itself), `Operation` (`src/operation.rs`), `Journal` (one step's effects to one commit), `message` (the `message` event's JSON, and the oi-kit shape old logs hold), `GateOperation`, `CompactOperation`, the `sessions` service for child sessions (`src/children.rs`), `PluginTools`, the `Providers` registry and `provider` plugin (`src/provider.rs`), `ScriptedProvider`. Async (tokio). |
 | `wit/corduroy.wit` | The typed plugin boundary. Each imported interface is one capability. |
 | `plugins/` | **Separate workspace**, built for `wasm32-unknown-unknown`: `guest` (the `corduroy-guest` crate every Rust plugin builds on: bindings generated once, a `Plugin` trait with default exports, `export!`), `pi-tools` (read, write, edit, bash, tree), `skills`, `approval` (a gate: permission modes), the Goose-baseline plugins `hints`, `todo`, `memory`, `recall`, `summarize`, `compact` (the `compaction` service), `subagents` (`delegate`), `inspect` (a gate) and `plugin-manager`, and `testbed` (for the host's tests only: host calls, loads, echoes and traps on demand). |
 | `sdk/js`, `sdk/python` | Guest SDKs: write a plugin in JavaScript/TypeScript or Python; `corduroy-js build` / `corduroy-py build` make a component importing only the listed capabilities. `sdk/js/script-host` is the script host (automations as scripts). |
@@ -77,7 +79,8 @@ as design guidance, not noise.
 - If one exception is genuinely right, use `#[expect(lint, reason = "...")]` on the narrowest
   item. `allow_attributes` is on, so plain `#[allow]` is flagged; `expect` self-removes when stale.
 - The one standing exception: crates that depend on wasmtime, oi-kit or rmcp (whose version
-  oi-kit fixes) carry `#![expect(clippy::multiple_crate_versions)]`, because the duplicates
+  oi-kit fixes), directly or through another of ours, carry
+  `#![expect(clippy::multiple_crate_versions)]`, because the duplicates
   are in those dependencies' own trees. `corduroy-core` has no such exception and must stay dependency-free.
 - `unwrap`, `expect`, `panic!`, `todo!`, indexing and slicing are denied in non-test code. Return
   errors instead. They are permitted inside `#[cfg(test)]` and `#[test]` functions, but **not in
@@ -136,7 +139,7 @@ as design guidance, not noise.
   imports `tools` is refused at activation; keep the check if either side changes.
 - **Plugins load plugins only through `Requests`.** A host call cannot change the plugin tree;
   it queues the change (`App::requests`) and the tree applies it when it next settles (the
-  harness's `SettleOperation` before every loop step). A child's grants are always
+  harness settles it before every loop step). A child's grants are always
   `Scope::within` its loader's, and every load is asked of the gates at `plugin/load`.
 - **Protected paths stay out of reach.** `WasmRuntime::protect` paths (the host binary and
   the disk cache from the start) are refused to `fs-read` and `fs-write` before any scope
@@ -190,7 +193,14 @@ as design guidance, not noise.
   goes back to the model so it can recover. A model failure ends the run as `Status::Failed`,
   also recorded in the conversation. Only a broken pipeline returns `Err` from `Harness::run`.
 - Hitting the turn limit is a normal `Status::TurnLimitReached`, not an `Err`.
-- Keep the loop ignorant of any specific model, tool or plugin. Extend it with an oi-kit
+- **The conversation is the core's `Message`.** Steps, providers, the log and plugins all
+  speak it; a provider converts to and from its API's shape itself (`corduroy-providers`'
+  `adapter`). Never let oi-kit's (or any API's) types into the harness or the log.
+- **A run can be stopped.** `Harness::stop` sets the run's `Stop`, which tools see through
+  `corduroy_core::call::stopping`. Anything that can run long on a run's behalf (a kernel
+  cell, a tool loop) looks now and then and returns early; never block a run in a way a
+  stop cannot end.
+- Keep the loop ignorant of any specific model, tool or plugin. Extend it with an
   `Operation` (`Harness::with_operation` for the host, the `Operations` registry for a
   plugin), not with special cases.
 - Tests must not need network or an LLM. Drive the loop with `ScriptedProvider`. The one

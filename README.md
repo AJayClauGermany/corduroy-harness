@@ -79,8 +79,8 @@ skills, and an approval gate that asks before anything that writes. `cargo cordu
 writes that agent to `corduroy.toml` so you can change it: the providers, the kernels, each
 plugin and exactly what it is granted. `corduroy run <prompt>` runs one prompt; `corduroy
 check` says what the agent has without calling a model; `corduroy log` prints the event
-log, with the time of each event, which is kept in `.corduroy/log.jsonl`. Kill it mid-run and `corduroy continue` picks
-the run up; leave a question unanswered and the run waits, in the log, until you do.
+log, with the time of each event, which is kept in `.corduroy/log.jsonl`. Ctrl-C stops a run (the running tool is told, the rest of its calls do not run); kill
+the process instead and `corduroy continue` picks the run up, or `corduroy stop` ends it; leave a question unanswered and the run waits, in the log, until you do.
 
 ## Extending it
 
@@ -133,7 +133,7 @@ reasoning, and [what is meant to stay stable](docs/design.md#what-is-stable).
 | [Hermes Agent](https://github.com/NousResearch/hermes-agent) | Skills the agent writes and repairs for itself | `plugins/skills` |
 | [Pi](https://github.com/earendil-works/pi) | A minimal toolset: read, write, edit, bash | `plugins/pi-tools` |
 | [OpenHands](https://github.com/OpenHands/software-agent-sdk) | An append-only event stream as the source of truth, and a loop you can program | `corduroy-core::event`, `src/session.rs` |
-| [Goose](https://github.com/aaif-goose/goose) | The base abstractions, taken from its oi-kit crates | `src/harness.rs` |
+| [Goose](https://github.com/aaif-goose/goose) | A loop of steps, each reading the persisted conversation and returning effects; and its oi-kit providers, kept behind our own `Provider` | `src/harness.rs`, `crates/corduroy-providers` |
 
 [`docs/design.md`](docs/design.md) has the research behind each, what was borrowed, and what
 is deliberately left for later.
@@ -183,12 +183,12 @@ in [`examples/local-model/`](examples/local-model/corduroy.toml) against Liquid 
 | `crates/corduroy-core` | Dependency-free core: plugin contexts, capabilities, event stream with sessions and a `Log` trait, the registries plugins contribute to (tools, prompts, kernels, gates, services, models, secrets, HTTP clients) |
 | `crates/corduroy-cli` | The `corduroy` command: an agent file (providers, kernels, secrets, extensions, plugins and their grants) run in a terminal; a library, so a binary can add extension kinds |
 | `crates/corduroy-mcp` | MCP servers (stdio, through a kernel, or streamable HTTP) as plugins |
-| `crates/corduroy-providers` | Model providers from `oi-kit-providers`: Anthropic, OpenAI, Ollama and the providers Goose knows |
+| `crates/corduroy-providers` | Model providers from `oi-kit-providers` (Anthropic, OpenAI, Ollama and the providers Goose knows), converted to the harness's own messages at the boundary |
 | `crates/corduroy-http` | The HTTP client behind the `http` capability, which never follows a redirect |
 | `crates/corduroy-shell` | A persistent POSIX shell as a kernel |
 | `crates/corduroy-jsonl` | A JSON Lines file as the durable log behind an event stream |
 | `crates/corduroy-wasm` | wasmtime host that loads components as capability-gated plugins |
-| `src/` | `corduroy-harness`: the agent loop assembled from oi-kit, journaled to the event stream one commit per step; sessions, continuing an interrupted run, waiting for a person, and the model as a service |
+| `src/` | `corduroy-harness`: the agent loop, journaled to the event stream one commit per step; stopping a run; sessions, continuing an interrupted run, waiting for a person, and the model as a service |
 | `wit/corduroy.wit` | The plugin world: host capabilities in, tools / event handlers / prompt text out |
 | `sdk/js`, `sdk/python` | SDKs for plugins in JavaScript/TypeScript and Python, and the script host for automations written as scripts |
 | `examples/` | The same `notes` plugin in JavaScript and Python |
