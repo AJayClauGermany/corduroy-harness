@@ -167,6 +167,8 @@ impl SessionInfo {
         events
             .matching(&Pattern::new(SESSION_START))
             .into_iter()
+            // Only the harness starts sessions; a plugin's `session/start` is not one.
+            .filter(|event| event.source == Source::Host)
             .filter_map(|event| {
                 let payload: Value = serde_json::from_str(&event.payload).ok()?;
                 let parent = payload.get("parent").and_then(Value::as_str);
@@ -584,6 +586,34 @@ impl State {
         }
     }
 
+    fn project_signal(&mut self, event: &Event) -> Result<()> {
+        let payload: Value = serde_json::from_str(&event.payload)
+            .with_context(|| format!("event {} is not a signal", event.id))?;
+        let text = |name: &str| {
+            payload
+                .get(name)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+        };
+        self.resolve(text("name"), text("payload"));
+        Ok(())
+    }
+
+    fn project_compaction(&mut self, event: &Event) -> Result<()> {
+        let payload: Value = serde_json::from_str(&event.payload)
+            .with_context(|| format!("event {} is not a compaction", event.id))?;
+        let summary = payload
+            .get("summary")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let keep_from = payload
+            .get("keep_from")
+            .and_then(Value::as_u64)
+            .map_or(event.id, EventId::new);
+        self.compact(event.id, summary, keep_from);
+        Ok(())
+    }
+
     fn project_wait(&mut self, event: &Event) -> Result<()> {
         let payload: Value = serde_json::from_str(&event.payload)
             .with_context(|| format!("event {} is not a tool/wait", event.id))?;
@@ -658,6 +688,12 @@ impl State {
 
     /// Bring the projection up to date with one stored event of the session.
     fn project(&mut self, event: &Event) -> Result<()> {
+        // Plugins share a session's stream while they serve its tool calls, but they do not
+        // write its history: a plugin's `message`, `gate/answer`, `signal` or `compaction`
+        // is its own event, not the conversation's, whatever its topic.
+        if matches!(event.source, Source::Plugin(_)) {
+            return Ok(());
+        }
         match event.topic.as_str() {
             MESSAGE => {
                 let message: Message = serde_json::from_str(&event.payload)
@@ -682,37 +718,11 @@ impl State {
                     .and_then(Value::as_u64)
                     .unwrap_or(0);
             }
-            COMPACTION => {
-                let payload: Value = serde_json::from_str(&event.payload)
-                    .with_context(|| format!("event {} is not a compaction", event.id))?;
-                let summary = payload
-                    .get("summary")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                let keep_from = payload
-                    .get("keep_from")
-                    .and_then(Value::as_u64)
-                    .map_or(event.id, EventId::new);
-                self.compact(event.id, summary, keep_from);
-            }
+            COMPACTION => self.project_compaction(event)?,
             TURN_END => (self.unfinished, self.restarts) = (false, 0),
             RESTART => self.restarts = self.restarts.saturating_add(1),
             TOOL_WAIT => self.project_wait(event)?,
-            SIGNAL => {
-                let payload: Value = serde_json::from_str(&event.payload)
-                    .with_context(|| format!("event {} is not a signal", event.id))?;
-                let name = payload
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                let brought = payload
-                    .get("payload")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                self.resolve(name, brought);
-            }
-            // A plugin's own calls through `tools` share the session but are not the model's.
-            "tool/call" | "tool/result" if matches!(event.source, Source::Plugin(_)) => {}
+            SIGNAL => self.project_signal(event)?,
             "tool/call" | "tool/start" | "tool/result" | GATE_DECISION | GATE_ANSWER => {
                 self.project_call(event)?;
             }
@@ -906,8 +916,29 @@ impl Journal {
             keep_from: *state.message_ids.get(kickoff)?,
             input_tokens: state.input_tokens,
             messages: earlier.len(),
-            transcript: transcript(&earlier),
         })
+    }
+
+    /// The messages the model sees from before `keep_from`, as text for a summariser: who
+    /// said what, and which tools were called. Built only once a compaction is due.
+    pub(crate) fn transcript_before(&self, keep_from: EventId) -> String {
+        let state = self.state();
+        let at = state
+            .message_ids
+            .iter()
+            .position(|id| *id == keep_from)
+            .unwrap_or(0);
+        let earlier: Vec<&Message> = state
+            .conversation
+            .messages()
+            .iter()
+            .take(at)
+            .filter(|message| message.metadata.agent_visible)
+            .collect();
+        let text = transcript(&earlier);
+        drop(earlier);
+        drop(state);
+        text
     }
 
     /// The session this journal records.
@@ -1161,8 +1192,6 @@ pub(crate) struct Compactable {
     pub(crate) input_tokens: u64,
     /// How many messages would be summarised.
     pub(crate) messages: usize,
-    /// Those messages as text, one part a line, each part cut at a length.
-    pub(crate) transcript: String,
 }
 
 /// Longest part of a message a transcript keeps, in characters.

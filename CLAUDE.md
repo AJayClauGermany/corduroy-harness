@@ -69,9 +69,9 @@ as design guidance, not noise.
   get green.
 - If one exception is genuinely right, use `#[expect(lint, reason = "...")]` on the narrowest
   item. `allow_attributes` is on, so plain `#[allow]` is flagged; `expect` self-removes when stale.
-- The one standing exception: crates that depend on wasmtime or oi-kit carry
-  `#![expect(clippy::multiple_crate_versions)]`, because the duplicates are in those
-  dependencies' own trees. `corduroy-core` has no such exception and must stay dependency-free.
+- The one standing exception: crates that depend on wasmtime, oi-kit or rmcp (whose version
+  oi-kit fixes) carry `#![expect(clippy::multiple_crate_versions)]`, because the duplicates
+  are in those dependencies' own trees. `corduroy-core` has no such exception and must stay dependency-free.
 - `unwrap`, `expect`, `panic!`, `todo!`, indexing and slicing are denied in non-test code. Return
   errors instead. They are permitted inside `#[cfg(test)]` and `#[test]` functions, but **not in
   helper functions of integration tests**: make those return `Result` and unwrap in the test.

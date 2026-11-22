@@ -49,7 +49,8 @@ const INJECTION: &[&str] = &[
 
 /// Why a call's input should be seen by a person before it runs, if it should.
 pub(crate) fn concern(input: &str) -> Option<String> {
-    let lower = input.to_lowercase();
+    // ASCII only, so every byte offset in `lower` is the same in `input`.
+    let lower = input.to_ascii_lowercase();
     if let Some((_, why)) = DANGEROUS
         .iter()
         .find(|(pattern, _)| lower.contains(pattern))
@@ -107,6 +108,9 @@ mod tests {
         let pem = r#"{"content":"-----BEGIN RSA PRIVATE KEY-----"}"#;
         assert!(concern(pem).unwrap().contains("private key"));
         assert_eq!(concern(r#"{"content":"akia is a name"}"#), None);
+        // Characters whose lowercase is longer do not shift where a key is looked for.
+        let after = r#"{"content":"İİİ AKIAIOSFODNN7EXAMPLE"}"#;
+        assert!(concern(after).unwrap().contains("AWS"));
     }
 
     #[test]

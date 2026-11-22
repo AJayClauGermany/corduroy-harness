@@ -571,6 +571,12 @@ impl Harness {
     pub async fn continue_run(&self, session: &SessionId) -> Result<Outcome, HarnessError> {
         let journal = self.journal(session)?;
         if !journal.awaiting().is_empty() && journal.waiting().is_empty() {
+            // A crash after a call began waiting but before its placeholder reached the
+            // conversation leaves the call unanswered: answer it from the log, or the tools
+            // step would make it again (and start a second child session).
+            if let Some(settled) = self.settled(&journal) {
+                journal.record(&settled)?;
+            }
             return self.drive(&journal).await;
         }
         if !journal.unfinished() || !journal.waiting().is_empty() {

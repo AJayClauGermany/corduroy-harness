@@ -102,11 +102,16 @@ fn a_server_that_does_not_start_fails_the_plugin() {
     assert!(
         matches!(host.app.state(id), Some(FiberState::Failed(reason)) if reason.contains("/no/such/server"))
     );
+    // A server that starts and never answers; it writes its process id first.
+    let pid_file = std::env::temp_dir().join(format!("corduroy-mcp-silent-{}", std::process::id()));
     let silent = Transport::Stdio {
         kernel: "shell".into(),
         spawn: Spawn {
-            program: "sleep".into(),
-            args: vec!["30".into()],
+            program: "sh".into(),
+            args: vec![
+                "-c".into(),
+                format!("echo $$ > '{}'; exec sleep 30", pid_file.display()),
+            ],
             env: Vec::new(),
         },
     };
@@ -117,5 +122,22 @@ fn a_server_that_does_not_start_fails_the_plugin() {
         matches!(host.app.state(id), Some(FiberState::Failed(reason)) if reason.contains("did not start")),
         "{:?}",
         host.app.state(id)
+    );
+    // Given up, it is stopped, not left running.
+    let pid = std::fs::read_to_string(&pid_file).unwrap();
+    let alive = || {
+        std::process::Command::new("kill")
+            .args(["-0", pid.trim()])
+            .status()
+            .is_ok_and(|status| status.success())
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while alive() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        !alive(),
+        "the silent server {} is still running",
+        pid.trim()
     );
 }

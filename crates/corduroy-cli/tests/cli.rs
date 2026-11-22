@@ -376,3 +376,26 @@ fn a_delegated_task_is_shown_under_its_sub_agent() {
         seen[3]
     );
 }
+
+/// A provider the agent does not use, whose key is not set, is reported, not fatal.
+#[test]
+fn a_spare_provider_without_its_key_does_not_stop_the_agent() {
+    let workspace = scratch("cli-spare");
+    let plugins = plugin("pi-tools").parent().unwrap().to_owned();
+    let (address, _seen) = model(Vec::new()).unwrap();
+    let agent = format!(
+        "{}\n[providers.spare]\nkind = \"anthropic\"\napi_key_env = \"CORDUROY_TEST_UNSET_KEY\"\n",
+        agent_file(address, &plugins)
+    );
+    fs::write(workspace.join("corduroy.toml"), agent).unwrap();
+
+    let check = corduroy(&workspace, &["check"], "").unwrap();
+    let report = text(&check.stdout);
+    assert!(
+        report.contains("provider spare"),
+        "{report}\n{}",
+        text(&check.stderr)
+    );
+    assert!(report.contains("CORDUROY_TEST_UNSET_KEY"), "{report}");
+    assert!(report.contains("tool      read"), "{report}");
+}

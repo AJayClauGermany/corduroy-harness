@@ -3,7 +3,8 @@
 //! The core checks a WebAssembly plugin's request against its grant and writes in its
 //! secrets; [`UreqClient`] sends it. It follows no redirects (the host checked one host, and a
 //! redirect is a response the plugin decides about), treats an error status as a response,
-//! keeps at most [`MAX_BODY`] of a response, and honours `HTTPS_PROXY` and its relatives.
+//! refuses a response body larger than [`MAX_BODY`], and honours `HTTPS_PROXY` and its
+//! relatives.
 //!
 //! [`http_client`] is the plugin that registers it for `http` and `https`:
 //!
@@ -24,7 +25,7 @@ use corduroy_core::{
 use ureq::Agent;
 use ureq::http::{Method, Request};
 
-/// The most of a response body the client keeps: 16 MiB.
+/// The largest response body the client accepts: 16 MiB.
 pub const MAX_BODY: u64 = 16 * 1024 * 1024;
 
 /// Sends requests with `ureq`, one at a time, following no redirects.
@@ -84,12 +85,19 @@ impl HttpClient for UreqClient {
             })
             .collect();
         let mut body = Vec::new();
+        // One byte past the limit tells a body that fits from one that was cut.
         response
             .body_mut()
             .as_reader()
-            .take(MAX_BODY)
+            .take(MAX_BODY + 1)
             .read_to_end(&mut body)
             .map_err(|error| error.to_string())?;
+        if u64::try_from(body.len()).map_or(true, |length| length > MAX_BODY) {
+            return Err(format!(
+                "the response body is larger than {} MiB",
+                MAX_BODY / 1024 / 1024
+            ));
+        }
         Ok(HttpResponse {
             status,
             headers,

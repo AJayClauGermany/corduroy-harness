@@ -85,7 +85,8 @@ impl Operation<Session, Effect> for CompactOperation {
         if is_due.and_then(|answer| answer.get("due").and_then(Value::as_bool)) != Some(true) {
             return not_applicable();
         }
-        let request = json!({"session": session.id(), "transcript": compactable.transcript});
+        let transcript = journal.transcript_before(compactable.keep_from);
+        let request = json!({"session": session.id(), "transcript": transcript});
         let summary = ask(&self.services, "summarize", request)
             .await
             .and_then(|answer| {

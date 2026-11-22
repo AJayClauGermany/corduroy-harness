@@ -213,11 +213,13 @@ impl Client {
                         return;
                     }
                 };
-                runtime.block_on(serve(connection, received, ready));
+                runtime.block_on(serve(connection, received, ready, timeout));
             })
             .map_err(|error| error.to_string())?;
+        // The thread gives up at `timeout` itself; the slack lets its answer, rather than
+        // this wait, say so.
         let tools = started
-            .recv_timeout(timeout)
+            .recv_timeout(timeout + Duration::from_secs(1))
             .map_err(|_| format!("did not start within {}s", timeout.as_secs()))??;
         Ok((Self { requests, timeout }, tools))
     }
@@ -244,27 +246,38 @@ impl Client {
 }
 
 /// The client's thread: connect, report the tools, then answer calls until the plugin goes.
+/// Starting has `timeout` in all; a server that has not answered by then is given up, and
+/// returning drops its process, which stops it.
 async fn serve(
     connection: Connection,
     mut requests: mpsc::UnboundedReceiver<Request>,
     ready: sync_mpsc::Sender<Started>,
+    timeout: Duration,
 ) {
-    // The process lives as long as this function; dropping it stops the server.
-    let (service, _process) = match connect(connection).await {
-        Ok(connected) => connected,
+    let started = tokio::time::timeout(timeout, async {
+        // The process lives as long as this function; dropping it stops the server.
+        let (service, process) = connect(connection).await?;
+        let tools = service
+            .peer()
+            .list_all_tools()
+            .await
+            .map_err(|error| format!("listing tools: {error}"))?;
+        Ok::<_, String>((service, process, tools))
+    })
+    .await
+    .unwrap_or_else(|_| Err(format!("did not start within {}s", timeout.as_secs())));
+    let (service, _process) = match started {
+        Ok((service, process, tools)) => {
+            if ready.send(Ok(tools)).is_err() {
+                return;
+            }
+            (service, process)
+        }
         Err(error) => {
             drop(ready.send(Err(error)));
             return;
         }
     };
-    let tools = service
-        .peer()
-        .list_all_tools()
-        .await
-        .map_err(|error| format!("listing tools: {error}"));
-    if ready.send(tools).is_err() {
-        return;
-    }
     let peer: Peer<RoleClient> = service.peer().clone();
     while let Some(request) = requests.recv().await {
         match request {

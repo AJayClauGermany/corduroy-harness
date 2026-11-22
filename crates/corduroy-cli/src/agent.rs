@@ -556,9 +556,10 @@ pub struct Unstarted {
 pub fn assemble(file: &AgentFile, places: &Places) -> Result<Agent, AgentError> {
     fs::create_dir_all(&places.data)
         .map_err(|error| AgentError::new(format!("{}: {error}", places.data.display())))?;
+    // A relative path is in the workspace, like every other path the file names.
     let log = file.log.as_deref().map_or_else(
         || places.data.join("log.jsonl"),
-        |path| PathBuf::from(places.expand(path)),
+        |path| places.workspace.join(places.expand(path)),
     );
     let events = jsonl::open(&log)
         .map_err(|error| AgentError::new(format!("log {}: {error}", log.display())))?;
@@ -572,8 +573,8 @@ pub fn assemble(file: &AgentFile, places: &Places) -> Result<Agent, AgentError> 
     if let Some(max_turns) = file.max_turns {
         harness = harness.with_max_turns(max_turns);
     }
-    natives(&harness, file, places)?;
-    let failed = plugins(&harness, file, places, &log)?;
+    let mut failed = natives(&harness, file, places)?;
+    failed.extend(plugins(&harness, file, places, &log)?);
     Ok(Agent {
         harness,
         file: file.clone(),
@@ -582,13 +583,29 @@ pub fn assemble(file: &AgentFile, places: &Places) -> Result<Agent, AgentError> 
     })
 }
 
-/// The native plugins: an HTTP client, the providers, the kernels and the secrets.
-fn natives(harness: &Harness, file: &AgentFile, places: &Places) -> Result<(), AgentError> {
+/// The native plugins: an HTTP client, the providers, the kernels and the secrets. Returns
+/// the providers that could not be built but that the agent can do without.
+fn natives(
+    harness: &Harness,
+    file: &AgentFile,
+    places: &Places,
+) -> Result<Vec<Unstarted>, AgentError> {
+    let mut failed = Vec::new();
     harness.plugin(corduroy_http::http_client());
     for (name, entry) in &file.providers {
-        let built = corduroy_providers::build(name, &entry.spec)
-            .map_err(|error| AgentError::new(error.to_string()))?;
-        harness.plugin(provider(name.clone(), built).serving(entry.serve.clone()));
+        match corduroy_providers::build(name, &entry.spec) {
+            Ok(built) => {
+                harness.plugin(provider(name.clone(), built).serving(entry.serve.clone()));
+            }
+            // The provider the loop asks, or one serving models to plugins, is needed.
+            Err(error) if *name == file.provider || !entry.serve.is_empty() => {
+                return Err(AgentError::new(error.to_string()));
+            }
+            Err(error) => failed.push(Unstarted {
+                plugin: format!("provider {name}"),
+                reason: error.to_string(),
+            }),
+        }
     }
     for (name, kernel) in &file.kernels {
         let dir = kernel.dir.as_deref().map_or_else(
@@ -616,7 +633,7 @@ fn natives(harness: &Harness, file: &AgentFile, places: &Places) -> Result<(), A
         }
         Ok(())
     }));
-    Ok(())
+    Ok(failed)
 }
 
 /// The plugin for the MCP server `name`.

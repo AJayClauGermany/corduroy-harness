@@ -65,13 +65,18 @@ impl Service for SessionsService {
                 "sessions nest at most {MAX_DEPTH} deep; `{parent}` is {depth} deep"
             )));
         }
-        let siblings = self
+        // The first free `<parent>/<n>`: a person may have started one by that name.
+        let taken: Vec<SessionId> = self
             .sessions
             .list()
-            .iter()
-            .filter(|info| info.parent.as_ref() == Some(&parent))
-            .count();
-        let child = SessionId::new(format!("{parent}/{}", siblings + 1));
+            .into_iter()
+            .map(|info| info.id)
+            .collect();
+        // One more name than there are sessions is always enough to find a free one.
+        let child = (1..=taken.len() + 1)
+            .map(|n| SessionId::new(format!("{parent}/{n}")))
+            .find(|id| !taken.contains(id))
+            .ok_or_else(|| CallError::Failed("no session name is free".to_owned()))?;
         let child = self
             .sessions
             .start_with(child, Some(&parent), Some(task))
