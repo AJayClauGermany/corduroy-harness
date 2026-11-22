@@ -76,6 +76,18 @@ impl Asked<'_> {
     }
 }
 
+/// The kernel `shell` asks for, in the directory it names (`{workspace}` by default).
+fn shell_kernel_in(asked: &Asked<'_>, shell: ShellKernel) -> Built {
+    asked.only(&["dir", "program"])?;
+    let dir = asked
+        .text("dir")
+        .map_or_else(|| asked.places.workspace.clone(), PathBuf::from);
+    Ok(Box::new(shell_kernel_of(
+        asked.name.to_owned(),
+        shell.in_dir(dir),
+    )))
+}
+
 /// The plugin of an extension, or what is wrong with its entry.
 pub type Built = Result<Box<dyn Plugin>, String>;
 
@@ -106,22 +118,22 @@ impl Extensions {
     /// | Kind | Configuration | What it adds |
     /// | --- | --- | --- |
     /// | `shell-kernel` | `dir` (default `{workspace}`), `program` (default `sh`; any POSIX shell, such as `bash`, Git for Windows' included) | a persistent shell as the kernel named like the entry; what `[kernels.<name>]` with `kind = "shell"` builds |
+    /// | `powershell-kernel` | `dir` (default `{workspace}`), `program` (default `powershell` on Windows, `pwsh` elsewhere) | a persistent PowerShell as the kernel named like the entry; what `[kernels.<name>]` with `kind = "powershell"` builds |
     /// | `http-client` | none | the client the `http` capability sends through, for `http` and `https` |
     #[must_use]
     pub fn builtin() -> Self {
         Self::none()
             .kind(kernel_kind("shell"), |asked| {
-                asked.only(&["dir", "program"])?;
-                let dir = asked
-                    .text("dir")
-                    .map_or_else(|| asked.places.workspace.clone(), PathBuf::from);
                 let shell = asked
                     .text("program")
                     .map_or_else(ShellKernel::new, ShellKernel::program);
-                Ok(Box::new(shell_kernel_of(
-                    asked.name.to_owned(),
-                    shell.in_dir(dir),
-                )))
+                shell_kernel_in(asked, shell)
+            })
+            .kind(kernel_kind("powershell"), |asked| {
+                let shell = asked
+                    .text("program")
+                    .map_or_else(ShellKernel::powershell, ShellKernel::powershell_program);
+                shell_kernel_in(asked, shell)
             })
             .kind("http-client", |asked| {
                 asked.only(&[])?;

@@ -87,7 +87,7 @@ snapshot and restore, and a bridge that lets code in the kernel call back into t
 
 **Here.** `corduroy_core::kernel`. `Kernel` is the trait (`exec(code, timeout) -> Cell`) and
 `Kernels` the registry. Implementations live outside the core: `corduroy-shell` has
-`ShellKernel`, a persistent POSIX shell whose variables and working directory survive between cells. A cell that times out or
+`ShellKernel`, a persistent shell (POSIX, or PowerShell on Windows) whose variables and working directory survive between cells. A cell that times out or
 calls `exit` costs the kernel its state, and the error says so, as Prime's reset notice does.
 WebAssembly plugins reach kernels through the `kernel` capability, scoped by kernel name; the
 `bash` tool in `pi-tools` is a thin layer over it. A WebAssembly plugin is also a small kernel
@@ -467,9 +467,17 @@ features `wasm`, `shell` and `jsonl` (on by default) are how a build leaves thos
 altogether; without `wasm` the core tier has no WebAssembly host, and the agent has no
 add-ons.
 
-*Planned.* A kernel for Windows without a POSIX shell (PowerShell): today the shell kernel
-needs one, such as the `bash` Git for Windows installs (`program = "bash"`). And CI on macOS
-and Windows, which only builds and tests on Linux so far.
+**On Windows** the kernel is PowerShell, which every Windows has: `[kernels.<name>]` with
+`kind = "powershell"` (`ShellKernel::powershell`), and the default agent's kernel there, with
+the system prompt saying so. A cell travels to it as one line of base64, so PowerShell reading
+commands from its input never runs half a cell, and is dot-sourced, so what it defines stays;
+every stream it writes is its output, and its status is 1 for a terminating error or the exit
+code of a native program. Stopping a cell ends the shell's whole tree of processes
+(`taskkill /T`), as a process group does elsewhere. CI runs the kernel's tests against
+PowerShell 7 on Linux and Windows PowerShell on Windows, where it also builds the command.
+
+*Planned.* The whole test suite on Windows and macOS: CI there builds the command and tests the
+core and the PowerShell kernel; the rest of the suite still assumes a POSIX shell.
 
 ## The loop
 

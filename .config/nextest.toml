@@ -31,6 +31,15 @@ slow-timeout = { period = "30s", terminate-after = 3 }
 filter = 'binary(guest_languages)'
 slow-timeout = { period = "30s", terminate-after = 3 }
 
+# PowerShell takes a second or more to start, and the kernel's tests start it more than once.
+[[profile.default.overrides]]
+filter = 'test(/powershell/)'
+slow-timeout = { period = "30s", terminate-after = 3 }
+
+[[profile.ci.overrides]]
+filter = 'test(/powershell/)'
+slow-timeout = { period = "30s", terminate-after = 3 }
+
 # `cargo eval`: the ignored tests in tests/local_model.rs, against a model served on this
 # machine (scripts/local-model.sh). A small model on a CPU takes tens of seconds per task, and
 # the server answers one request at a time well, so the evals run one by one.

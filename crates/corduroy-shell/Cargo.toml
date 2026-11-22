@@ -16,4 +16,6 @@ workspace = true
 
 [dependencies]
 corduroy-core = { workspace = true, features = ["std"] }
+# PowerShell cells travel as one line of base64, so the shell never parses half a cell.
+base64 = { workspace = true, features = ["std"] }
 

@@ -190,7 +190,7 @@ in [`examples/local-model/`](examples/local-model/corduroy.toml) against Liquid 
 | `crates/corduroy-mcp` | MCP servers (stdio, through a kernel, or streamable HTTP) as plugins |
 | `crates/corduroy-providers` | Model providers from `oi-kit-providers` (Anthropic, OpenAI, Ollama and the providers Goose knows), converted to the harness's own messages at the boundary |
 | `crates/corduroy-http` | The HTTP client behind the `http` capability, which never follows a redirect |
-| `crates/corduroy-shell` | A persistent POSIX shell as a kernel |
+| `crates/corduroy-shell` | A persistent shell as a kernel: POSIX, or PowerShell on Windows |
 | `crates/corduroy-jsonl` | A JSON Lines file as the durable log behind an event stream |
 | `crates/corduroy-wasm` | wasmtime host that loads components as capability-gated plugins |
 | `src/` | `corduroy-harness`: the agent loop (`no_std`, any executor; the loop itself swappable through the `Loops` registry), journaled to the event stream one commit per step; stopping a run; sessions, continuing an interrupted run, waiting for a person, and the model as a service |

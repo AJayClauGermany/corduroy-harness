@@ -8,7 +8,7 @@
 //! | --- | --- | --- |
 //! | The loop's executor | tokio, through the harness's `tokio` feature | tool calls on a thread pool |
 //! | The event log | [`jsonl`] | a JSON Lines file in the workspace |
-//! | Kernels | [`shell`] | a persistent POSIX shell (`sh`, `bash`, Git for Windows' `bash`) |
+//! | Kernels | [`shell`] | a persistent shell: POSIX (`sh`, `bash`) or PowerShell (on every Windows) |
 //! | Outbound HTTP | [`http`] | the client behind the `http` capability, which never follows redirects |
 //! | Models | [`providers`] | Anthropic, OpenAI-compatible, Ollama and others |
 //! | MCP | [`mcp`] | MCP servers' tools, over standard input and output or HTTP |
@@ -28,7 +28,7 @@
 //!     &Extensions::none().kind("sandbox-kernel", |_asked| Err("not built here".into())),
 //! );
 //! assert!(!standard.addons());
-//! assert_eq!(standard.kinds().kernel_kinds(), ["sandbox", "shell"]);
+//! assert_eq!(standard.kinds().kernel_kinds(), ["powershell", "sandbox", "shell"]);
 //! ```
 
 #![expect(

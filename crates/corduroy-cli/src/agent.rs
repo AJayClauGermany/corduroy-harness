@@ -136,8 +136,9 @@ pub struct ProviderEntry {
 /// A kernel: an extension of the kind `<kind>-kernel`, such as `shell-kernel`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct KernelEntry {
-    /// `shell`: a persistent POSIX shell, starting in `dir` (`{workspace}` by default) and
-    /// run by `program` (`sh` by default), unless the command brings other kinds.
+    /// `shell` (a persistent POSIX shell, `program` `sh` by default) or `powershell`
+    /// (`powershell` on Windows, `pwsh` elsewhere), starting in `dir` (`{workspace}` by
+    /// default), unless the command brings other kinds.
     pub kind: String,
     /// The kernel's own configuration: every other key of the entry. The kind refuses a key
     /// it does not know.
@@ -305,8 +306,9 @@ impl AgentFile {
 
     /// The default agent for a workspace with no agent file: the model from the environment
     /// (`ANTHROPIC_API_KEY`, then `OPENAI_API_KEY`, else a local Ollama), the Pi toolset on a
-    /// shell in the workspace, the approval and inspect gates, and the Goose-baseline
-    /// plugins (skills, hints, todo, memory, recall, summarize, compact, subagents).
+    /// shell in the workspace (PowerShell on Windows, told to the model, `sh` elsewhere), the
+    /// approval and inspect gates, and the Goose-baseline plugins (skills, hints, todo,
+    /// memory, recall, summarize, compact, subagents).
     #[must_use]
     pub fn default_text() -> String {
         let (kind, model) = if std::env::var_os("ANTHROPIC_API_KEY").is_some() {
@@ -316,9 +318,16 @@ impl AgentFile {
         } else {
             ("ollama", "qwen3")
         };
+        let (shell, said) = if cfg!(windows) {
+            ("powershell", " Commands run in PowerShell.")
+        } else {
+            ("shell", "")
+        };
         DEFAULT
             .replace("{{kind}}", kind)
             .replace("{{model}}", model)
+            .replace("{{shell}}", shell)
+            .replace("{{shell_said}}", said)
     }
 }
 
@@ -328,7 +337,7 @@ const DEFAULT: &str = r#"# A corduroy agent. Everything it can do is listed here
 
 system = """
 You are a careful coding agent working in {workspace}. Read before you change anything, \
-keep changes small, and say what you did."""
+keep changes small, and say what you did.{{shell_said}}"""
 provider = "main"
 model = "{{model}}"
 max_turns = 50
@@ -340,7 +349,7 @@ serve = ["{{model}}"]   # models plugins may ask through the `llm` capability
 # thinking = "medium"  # off, low, medium, high or max, for a model that can think
 
 [kernels.shell]
-kind = "shell"      # a persistent shell, starting in {workspace}
+kind = "{{shell}}"      # a persistent shell in {workspace}: shell (sh) or powershell
 
 # read, write, edit and bash, within the workspace. The agent file and the log are out of
 # reach whatever this says.
@@ -874,7 +883,7 @@ mod tests {
         assert_eq!(
             error,
             "extension `box`: this command has no extension kind `docker-kernel` (it has: \
-             http-client, shell-kernel)"
+             http-client, powershell-kernel, shell-kernel)"
         );
 
         let refusing = Extensions::none().kind("picky", |_| Err("`image` is required".into()));
@@ -909,7 +918,8 @@ mod tests {
         let error = assemble(&file, &places).unwrap_err().to_string();
         assert_eq!(
             error,
-            "kernel `box` is of kind `docker`, which this command does not have (it has: shell)"
+            "kernel `box` is of kind `docker`, which this command does not have (it has: \
+             powershell, shell)"
         );
         // A command that brings the kind has it.
         let with_docker =

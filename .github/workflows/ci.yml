@@ -50,11 +50,32 @@ jobs:
       # The host tests load the plugins, so they are built first.
       - run: cargo plugins
       - run: scripts/guests.sh
-      # Fail rather than skip when a guest-language plugin is missing.
+      # Fail rather than skip when a guest-language plugin or PowerShell (which the runner
+      # has) is missing.
       - run: cargo nextest run --all-features --profile ci
         env:
           CORDUROY_REQUIRE_GUESTS: "1"
+          CORDUROY_REQUIRE_POWERSHELL: "1"
       - run: cargo test --manifest-path plugins/Cargo.toml
       # nextest does not run doctests.
       - run: cargo test --doc --all-features
       - run: cargo doc --no-deps --all-features
+
+  windows:
+    # The command, and its kernel, on Windows: the shell there is Windows PowerShell.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      - run: cargo build -p corduroy-cli
+      - run: cargo clippy -p corduroy-core -p corduroy-shell -p corduroy-std --all-targets -- -D warnings
+      # The core, and the PowerShell kernel; the POSIX shell's tests need a POSIX system.
+      - run: cargo nextest run -p corduroy-core -p corduroy-shell --profile ci -E "package(corduroy-core) or test(/powershell/)"
+        env:
+          CORDUROY_REQUIRE_POWERSHELL: "1"
