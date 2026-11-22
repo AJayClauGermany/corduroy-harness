@@ -43,7 +43,10 @@ pub struct Cell {
 }
 
 /// Why a cell could not be run to completion.
+///
+/// More reasons may be added, so match with a wildcard arm.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum KernelError {
     /// No kernel is registered under this name.
     Unknown(String),
@@ -55,6 +58,12 @@ pub enum KernelError {
     /// It will be restarted, without its state, on the next cell.
     Exited {
         /// What the cell wrote before the kernel went away.
+        output: String,
+    },
+    /// The run the cell was for was asked to stop ([`crate::call::stopping`]), so the cell
+    /// was ended. Like a timeout, that cost the kernel its state.
+    Stopped {
+        /// What the cell wrote before it was ended.
         output: String,
     },
 }
@@ -72,6 +81,11 @@ impl fmt::Display for KernelError {
             Self::Exited { output } => write!(
                 f,
                 "the kernel exited and its state was lost; output so far: {output}"
+            ),
+            Self::Stopped { output } => write!(
+                f,
+                "the run was stopped, so the cell was ended and the kernel's state was lost; \
+                 output so far: {output}"
             ),
         }
     }

@@ -308,3 +308,44 @@ async fn a_plugins_event_does_not_answer_a_gate_or_write_the_conversation() {
 fn harness_with(model: &Arc<ScriptedProvider>, events: Arc<EventStream>) -> Harness {
     harness(model, events)
 }
+
+#[tokio::test]
+async fn a_sub_agent_keeps_a_todo_list_of_its_own() {
+    let model = Arc::new(ScriptedProvider::new([
+        call(
+            "p1",
+            "todo_write",
+            &json!({"content": "- [ ] the parent's plan"}),
+        ),
+        call("p2", "delegate", &json!({"task": "do the small part"})),
+        call(
+            "c1",
+            "todo_write",
+            &json!({"content": "- [ ] the sub-agent's plan"}),
+        ),
+        say("small part done"),
+        say("all done"),
+    ]));
+    let harness = harness(&model, Arc::new(EventStream::new()));
+    let mut todo = WasmRuntime::new().unwrap().load(plugin("todo")).unwrap();
+    for capability in todo.requires().to_vec() {
+        todo = todo.grant(capability, Scope::any());
+    }
+    harness.plugin(todo);
+
+    let outcome = harness.run("plan, then delegate").await.unwrap();
+
+    assert_eq!(
+        outcome.status,
+        Status::Finished {
+            answer: "all done".into()
+        }
+    );
+    // Each request's system prompt shows the list of the session that asked, and no other.
+    let systems: Vec<String> = model.requests().into_iter().map(|r| r.system).collect();
+    let (child, parent) = (&systems[3], &systems[4]);
+    assert!(child.contains("the sub-agent's plan"), "{child}");
+    assert!(!child.contains("the parent's plan"), "{child}");
+    assert!(parent.contains("the parent's plan"), "{parent}");
+    assert!(!parent.contains("the sub-agent's plan"), "{parent}");
+}
