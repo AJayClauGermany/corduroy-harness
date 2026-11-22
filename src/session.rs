@@ -21,6 +21,7 @@
 //! | `usage` | `agent` | the provider's usage report, as JSON |
 //! | `turn/end` | `host` | empty |
 //! | `run/restart` | `host` | `{"attempt"}`: an unfinished run was picked up again |
+//! | `compaction` | `host` | `{"summary", "keep_from", "by"}`: the messages before the `message` event `keep_from` are summarised |
 //!
 //! A tool call leaves a trail of its own, one commit at a time: `tool/call` with the model's
 //! message, `tool/start` just before the tool runs, `tool/result` as soon as it returns, and
@@ -35,6 +36,12 @@
 //! events stop short of that was interrupted, and [`Harness::continue_run`] picks it up,
 //! unless it is *waiting*: a gate asked about one of its calls and nobody has answered yet.
 //! [`Harness::answer`] gives the answer and takes the run on.
+//!
+//! A `compaction` stands a summary in for the messages before `keep_from`. They stay in the
+//! conversation, and in the log, but are hidden from the model: it sees the summary, a short
+//! acknowledgement, and the messages from `keep_from` on. Which messages to summarise, and
+//! how, is the business of the plugin that provides the [`COMPACTION`] service; see
+//! [`CompactOperation`](crate::compact::CompactOperation).
 //!
 //! [`Harness::continue_run`]: crate::Harness::continue_run
 //! [`Harness::answer`]: crate::Harness::answer
@@ -68,6 +75,9 @@ pub const MESSAGE: &str = "message";
 /// Topic of the event that ends a run.
 const TURN_END: &str = "turn/end";
 
+/// Topic of the event that reports what a model request cost.
+const USAGE: &str = "usage";
+
 /// Topic of the event that records an unfinished run being picked up again.
 const RESTART: &str = "run/restart";
 
@@ -79,6 +89,16 @@ const GATE_ANSWER: &str = "gate/answer";
 
 /// Topic of the event that begins a session.
 pub const SESSION_START: &str = "session/start";
+
+/// Topic of the event that stands a summary in for the messages before a point.
+pub const COMPACTION: &str = "compaction";
+
+/// What the model is told about a summary that replaced the start of the conversation.
+const SUMMARY_INTRO: &str = "The start of this conversation was condensed to save space. This \
+                             summary takes its place:";
+
+/// The model's side of the summary, so the conversation still alternates.
+const SUMMARY_ACK: &str = "Understood. I will continue from that summary.";
 
 /// Name of the session a harness starts with, and the one [`Harness::run`] uses.
 ///
@@ -273,6 +293,7 @@ impl MachineSession for Session {
 
 /// Something an operation wants recorded.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Effect {
     /// Append a message to the conversation.
     Message(Box<Message>),
@@ -284,6 +305,15 @@ pub enum Effect {
         call: String,
         /// The strictest verdict and the gate that gave it.
         decision: Decision,
+    },
+    /// Stand `summary` in for the messages before the `message` event `keep_from`.
+    Compacted {
+        /// What the hidden messages said.
+        summary: String,
+        /// The first message the model still sees.
+        keep_from: EventId,
+        /// Who wrote the summary.
+        by: String,
     },
 }
 
@@ -378,6 +408,11 @@ pub(crate) enum Progress {
 
 struct State {
     conversation: Conversation,
+    /// The event each message of `conversation` came from, in the same order. A summary
+    /// and its acknowledgement have their `compaction` event's id.
+    message_ids: Vec<EventId>,
+    /// The input tokens of the last model request, unless a compaction came after it.
+    input_tokens: u64,
     /// The tool calls waiting for a response, by tool-call id.
     calls: BTreeMap<String, OpenCall>,
     /// Whether a run has begun and not reached its `turn/end`.
@@ -390,13 +425,18 @@ struct State {
 #[derive(Default)]
 struct Batch {
     drafts: Vec<Draft>,
-    messages: Vec<Message>,
+    /// Messages, each with the position of its `message` draft.
+    messages: Vec<(usize, Message)>,
+    /// Compactions, each with the position of its draft, the summary and `keep_from`.
+    compactions: Vec<(usize, String, EventId)>,
     /// Tool-call id to the position of its `tool/call` draft, the tool's name and its input.
     opened: BTreeMap<String, (usize, String, String)>,
     /// Ids of the tool calls answered in this batch.
     closed: Vec<String>,
     /// What the gates decided about tool calls, by tool-call id.
     gated: Vec<(String, Gated)>,
+    /// The input tokens of a model request recorded in this batch.
+    input_tokens: Option<u64>,
 }
 
 impl Batch {
@@ -441,6 +481,28 @@ impl Batch {
 }
 
 impl State {
+    /// Hide the messages before `keep_from` from the model and stand `summary`, from the
+    /// `compaction` event `id`, in for them.
+    fn compact(&mut self, id: EventId, summary: &str, keep_from: EventId) {
+        let at = self
+            .message_ids
+            .iter()
+            .position(|message| *message >= keep_from)
+            .unwrap_or(self.message_ids.len());
+        let messages = self.conversation.messages_mut();
+        for message in messages.iter_mut().take(at) {
+            let user_visible = message.metadata.user_visible;
+            *message = message.clone().with_visibility(user_visible, false);
+        }
+        let summary = Message::user()
+            .with_text(format!("{SUMMARY_INTRO}\n<summary>\n{summary}\n</summary>"))
+            .agent_only();
+        let ack = Message::assistant().with_text(SUMMARY_ACK).agent_only();
+        messages.splice(at..at, [summary, ack]);
+        self.message_ids.splice(at..at, [id, id]);
+        self.input_tokens = 0;
+    }
+
     /// Bring the projection up to date with one stored event of the session.
     fn project(&mut self, event: &Event) -> Result<()> {
         match event.topic.as_str() {
@@ -456,7 +518,28 @@ impl State {
                     self.calls.remove(call);
                 }
                 self.conversation.push(message);
+                self.message_ids.push(event.id);
                 self.unfinished = true;
+            }
+            USAGE => {
+                let usage: Value = serde_json::from_str(&event.payload).unwrap_or(Value::Null);
+                self.input_tokens = usage
+                    .pointer("/usage/input_tokens")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+            }
+            COMPACTION => {
+                let payload: Value = serde_json::from_str(&event.payload)
+                    .with_context(|| format!("event {} is not a compaction", event.id))?;
+                let summary = payload
+                    .get("summary")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let keep_from = payload
+                    .get("keep_from")
+                    .and_then(Value::as_u64)
+                    .map_or(event.id, EventId::new);
+                self.compact(event.id, summary, keep_from);
             }
             TURN_END => (self.unfinished, self.restarts) = (false, 0),
             RESTART => self.restarts = self.restarts.saturating_add(1),
@@ -560,6 +643,8 @@ impl Journal {
     pub fn new(id: SessionId, events: Arc<EventStream>) -> Result<Self> {
         let mut state = State {
             conversation: Conversation::empty(),
+            message_ids: Vec::new(),
+            input_tokens: 0,
             calls: BTreeMap::new(),
             unfinished: false,
             restarts: 0,
@@ -611,7 +696,7 @@ impl Journal {
         batch
             .drafts
             .push(Draft::new(source, MESSAGE).payload(payload));
-        batch.messages.push(message.clone());
+        batch.messages.push((recorded, message.clone()));
         for content in &message.content {
             match content {
                 MessageContent::ToolRequest(request) => batch.call(request, recorded),
@@ -623,6 +708,35 @@ impl Journal {
             }
         }
         Ok(recorded)
+    }
+
+    /// What a compaction could summarise now: the messages the model sees from before the
+    /// current turn began. `None` if there is nothing but an earlier summary, or no turn yet.
+    pub(crate) fn compactable(&self) -> Option<Compactable> {
+        let state = self.state();
+        let messages = state.conversation.messages();
+        // The turn began with the last message a person wrote that the model still sees.
+        let kickoff = messages.iter().rposition(|message| {
+            message.role == Role::User
+                && !message.is_tool_response()
+                && message.metadata.agent_visible
+                && message.metadata.user_visible
+        })?;
+        let earlier: Vec<&Message> = messages
+            .get(..kickoff)?
+            .iter()
+            .filter(|message| message.metadata.agent_visible)
+            .collect();
+        // A summary is only for the model; with nothing a person saw, there is nothing new.
+        if !earlier.iter().any(|message| message.metadata.user_visible) {
+            return None;
+        }
+        Some(Compactable {
+            keep_from: *state.message_ids.get(kickoff)?,
+            input_tokens: state.input_tokens,
+            messages: earlier.len(),
+            transcript: transcript(&earlier),
+        })
     }
 
     /// The session this journal records.
@@ -773,9 +887,18 @@ impl Journal {
             .map(|draft| draft.session(self.id.clone()));
         let ids = self.events.commit(drafts)?;
         let mut state = self.state();
-        for message in batch.messages {
+        for (position, message) in batch.messages {
+            let Some(id) = ids.get(position).copied() else {
+                continue;
+            };
             state.conversation.push(message);
+            state.message_ids.push(id);
             state.unfinished = true;
+        }
+        for (position, summary, keep_from) in batch.compactions {
+            if let Some(id) = ids.get(position).copied() {
+                state.compact(id, &summary, keep_from);
+            }
         }
         for (call, (position, tool, input)) in batch.opened {
             let Some(event) = ids.get(position).copied() else {
@@ -799,6 +922,9 @@ impl Journal {
         for call in batch.closed {
             state.calls.remove(&call);
         }
+        if let Some(tokens) = batch.input_tokens {
+            state.input_tokens = tokens;
+        }
         drop(state);
         Ok(ids)
     }
@@ -806,6 +932,46 @@ impl Journal {
     fn state(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
+}
+
+/// What a compaction could summarise. See [`Journal::compactable`].
+#[derive(Debug, Clone)]
+pub(crate) struct Compactable {
+    /// The first message to keep: where the current turn began.
+    pub(crate) keep_from: EventId,
+    /// The input tokens of the last model request since the last compaction, or zero.
+    pub(crate) input_tokens: u64,
+    /// How many messages would be summarised.
+    pub(crate) messages: usize,
+    /// Those messages as text, one part a line, each part cut at a length.
+    pub(crate) transcript: String,
+}
+
+/// Longest part of a message a transcript keeps, in characters.
+const TRANSCRIPT_PART: usize = 2000;
+
+/// `messages` as text for a summariser: who said what, and which tools were called.
+fn transcript(messages: &[&Message]) -> String {
+    let mut lines = Vec::new();
+    for message in messages {
+        let role = match message.role {
+            Role::User if message.is_tool_response() => "tool",
+            Role::User => "user",
+            Role::Assistant => "assistant",
+        };
+        for content in &message.content {
+            let part = content.to_string();
+            if part.trim().is_empty() {
+                continue;
+            }
+            let mut shown: String = part.chars().take(TRANSCRIPT_PART).collect();
+            if shown.len() < part.len() {
+                shown.push_str(" [cut]");
+            }
+            lines.push(format!("{role}: {shown}"));
+        }
+    }
+    lines.join("\n")
 }
 
 /// The text blocks of a tool result, joined.
@@ -843,7 +1009,25 @@ impl EffectHandler<Session, Effect> for Journal {
                     let payload = serde_json::to_string(usage).context("usage is not JSON")?;
                     batch
                         .drafts
-                        .push(Draft::new(Source::Agent, "usage").payload(payload));
+                        .push(Draft::new(Source::Agent, USAGE).payload(payload));
+                    let tokens = usage.usage.input_tokens.unwrap_or(0);
+                    batch.input_tokens = Some(u64::try_from(tokens).unwrap_or(0));
+                }
+                Effect::Compacted {
+                    summary,
+                    keep_from,
+                    by,
+                } => {
+                    let payload =
+                        json!({"summary": summary, "keep_from": keep_from.get(), "by": by});
+                    batch
+                        .compactions
+                        .push((batch.drafts.len(), summary.clone(), *keep_from));
+                    batch.drafts.push(
+                        Draft::new(Source::Host, COMPACTION)
+                            .payload(payload.to_string())
+                            .cause(*keep_from),
+                    );
                 }
                 Effect::Gated { call, decision } => {
                     let (draft, tool) = self.about_call(call, Source::Host, GATE_DECISION);

@@ -23,6 +23,7 @@ use rmcp::model::{CallToolResult, ContentBlock};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::compact::CompactOperation;
 use crate::gates::{GateOperation, SettleOperation};
 use crate::provider::{DEFAULT_PROVIDER, PROVIDERS, Providers, Routed};
 use crate::session::{
@@ -432,8 +433,8 @@ impl Harness {
     }
 
     /// The loop, as the ordered steps a [`StateMachine`] walks: applying the plugin changes
-    /// plugins asked for, custom operations, the prompt, the gates, plugin tools, an answer for
-    /// calls nobody handled, the turn limit and finally the model.
+    /// plugins asked for, custom operations, compaction, the prompt, the gates, plugin tools,
+    /// an answer for calls nobody handled, the turn limit and finally the model.
     #[must_use]
     pub fn steps(&self) -> Vec<Step<'static, Session, Effect>> {
         let tools = ToolOperation::new().with_provider(Arc::new(PluginTools::new(
@@ -456,6 +457,10 @@ impl Harness {
             0,
             Step::Operation(Arc::new(SettleOperation(Arc::clone(&self.app)))),
         );
+        steps.push(Step::Operation(Arc::new(CompactOperation::new(
+            Arc::clone(&self.services),
+            Arc::clone(&self.sessions),
+        ))));
         steps.push(Step::Operation(Arc::new(prompt)));
         steps.push(Step::Operation(Arc::new(GateOperation::new(
             Arc::clone(&self.gates),

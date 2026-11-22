@@ -131,7 +131,7 @@ demo drive the loop with a scripted provider.
 | `plugins/pi-tools` | read, write, edit, bash on a persistent kernel, and tree |
 | `plugins/skills` | Agent-written `SKILL.md` files with a prompt index and a review nudge |
 | `plugins/approval` | A gate: permission modes with allow and deny lists |
-| `plugins/{hints,todo,memory,recall,summarize,inspect,plugin-manager}` | The rest of the Goose baseline: context files, a todo list, memories, searching earlier sessions, summaries by a second model, a gate inspecting calls, loading plugins at run time |
+| `plugins/{hints,todo,memory,recall,summarize,compact,inspect,plugin-manager}` | The rest of the Goose baseline: context files, a todo list, memories, searching earlier sessions, summaries by a second model, auto-compaction, a gate inspecting calls, loading plugins at run time |
 | `plugins/testbed` | For the host's own tests: makes host calls, loads plugins, echoes events and traps on demand |
 | `crates/corduroy-test-support` | Test-only helpers: finds the built plugins, makes scratch directories |
 | `tests/`, `crates/*/tests/` | Integration tests through the public API |

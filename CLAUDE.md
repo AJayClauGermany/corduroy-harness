@@ -17,9 +17,9 @@ oi-kit's state machine. `docs/design.md` explains where each idea comes from and
 | `crates/corduroy-http` | `UreqClient`, the `HttpClient` behind the `http` capability (no redirects), and the `http_client` plugin. |
 | `crates/corduroy-shell` | `ShellKernel`, a persistent POSIX shell as a `Kernel` that can also `spawn` processes, and the `shell_kernel` plugin. |
 | `crates/corduroy-wasm` | wasmtime host. Loads components built against `wit/corduroy.wit` as `Plugin`s; links only granted interfaces. |
-| `src/` (`corduroy-harness`) | Assembles the loop from oi-kit: `Harness` (sessions, `run_in`, `continue_run`, `answer`), `Journal` (one step's effects to one commit), `GateOperation`, `PluginTools`, the `Providers` registry and `provider` plugin (`src/provider.rs`), `ScriptedProvider`. Async (tokio). |
+| `src/` (`corduroy-harness`) | Assembles the loop from oi-kit: `Harness` (sessions, `run_in`, `continue_run`, `answer`), `Journal` (one step's effects to one commit), `GateOperation`, `CompactOperation`, `PluginTools`, the `Providers` registry and `provider` plugin (`src/provider.rs`), `ScriptedProvider`. Async (tokio). |
 | `wit/corduroy.wit` | The typed plugin boundary. Each imported interface is one capability. |
-| `plugins/` | **Separate workspace**, built for `wasm32-unknown-unknown`: `guest` (the `corduroy-guest` crate every Rust plugin builds on: bindings generated once, a `Plugin` trait with default exports, `export!`), `pi-tools` (read, write, edit, bash, tree), `skills`, `approval` (a gate: permission modes), the Goose-baseline plugins `hints`, `todo`, `memory`, `recall`, `summarize`, `inspect` (a gate) and `plugin-manager`, and `testbed` (for the host's tests only: host calls, loads, echoes and traps on demand). |
+| `plugins/` | **Separate workspace**, built for `wasm32-unknown-unknown`: `guest` (the `corduroy-guest` crate every Rust plugin builds on: bindings generated once, a `Plugin` trait with default exports, `export!`), `pi-tools` (read, write, edit, bash, tree), `skills`, `approval` (a gate: permission modes), the Goose-baseline plugins `hints`, `todo`, `memory`, `recall`, `summarize`, `compact` (the `compaction` service), `inspect` (a gate) and `plugin-manager`, and `testbed` (for the host's tests only: host calls, loads, echoes and traps on demand). |
 | `sdk/js`, `sdk/python` | Guest SDKs: write a plugin in JavaScript/TypeScript or Python; `corduroy-js build` / `corduroy-py build` make a component importing only the listed capabilities. `sdk/js/script-host` is the script host (automations as scripts). |
 | `examples/` | The same `notes` plugin in each guest language, built by `scripts/guests.sh`. |
 | `crates/corduroy-test-support` | Test-only helpers: finds built plugins, makes scratch directories. |
@@ -134,7 +134,9 @@ as design guidance, not noise.
   events from the plugin, kept only if the call returns; the store is rebuilt from them, so
   `events.emit` refuses `state/*` topics.
 - **The event stream is the record.** The conversation is a projection of `message` events
-  (`src/session.rs`); do not keep conversation state that cannot be rebuilt from the stream.
+  (`src/session.rs`), and of `compaction` events, which hide what they summarise from the
+  model without removing it; do not keep conversation state that cannot be rebuilt from the
+  stream.
   The same goes for sessions (`session/start`) and for whether a run is unfinished.
 - **Commit, then deliver.** A step's events go to the stream as one `EventStream::commit`,
   which stores the batch in the `Log` before any listener or the next step sees it. Events of

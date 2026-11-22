@@ -8,6 +8,7 @@
 [workspace]
 members = [
     "approval",
+    "compact",
     "guest",
     "hints",
     "inspect",

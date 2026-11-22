@@ -267,7 +267,7 @@ Everything else is a plugin, and a plugin may itself offer primitives to other p
 | Services | built | A fifth registry, `Services`: calls between plugins in JSON text, with the caller's name, across the WebAssembly boundary in both directions. See [Plugins extending plugins](#plugins-extending-plugins). |
 | Capabilities | fifteen | The mechanism is settled; the set grows (below). |
 | Kernels | built | The trait and registry, and `Kernel::spawn` for long-lived processes with pipes (MCP servers). `ShellKernel` is an implementation, not a primitive, and lives in `corduroy-shell`. |
-| Conversation projection | messages only | Understands a `compaction` event (a summary and the first message kept). Producing the summary is a plugin's job. |
+| Conversation projection | built | Messages, and the `compaction` event: the messages before `keep_from` stay in the log and the conversation but are hidden from the model, which sees the summary in their place. The harness cuts only before the current turn; when, and the summary, come from the plugin providing the `compaction` service, asked by a loop step (`CompactOperation`). |
 | Model access | built | The loop asks the provider registered under a name in `Providers`, on every request, so a plugin supplies the model and unloading it takes the model away. `Harness::new` registers its argument there for convenience. For plugins, the core's `Models` registry: one completion, synchronously, by model name; a `provider` plugin can serve its models there. |
 | Secrets and outbound requests | built | `Secrets` and `HttpClients` registries. The core checks and records; native plugins hold the values and send the requests, so an HTTP client is a plugin like a kernel is. |
 | Versioning | WIT package version, log schema version | Built: a schema version in each log's header. Still to do: a version on each plugin's stored state, and a rule for what a minor version of the world may change. |
@@ -590,7 +590,7 @@ harness.
 | Providers | `corduroy-providers` (`oi-kit-providers`) | native | done |
 | Permission modes, per-tool permissions | `approval` (exists: `auto`, `smart`, `approve`, `chat`, allow and deny lists) | WebAssembly | done |
 | Tool inspection, prompt-injection scan | `inspect` (exists: dangerous commands, credentials, repetition, injected instructions in results) | WebAssembly | done |
-| Auto-compaction | `compact` | WebAssembly | compaction event (`llm` is built) |
+| Auto-compaction | `compact` (exists) | WebAssembly | done: the projection knows the `compaction` event |
 | Summon: `load`, `delegate` | `subagents` | WebAssembly | sessions, `session`, waits |
 | Skills | `skills` (exists) | WebAssembly | done; the review fork waits on sessions |
 | Context files (`.goosehints`, `AGENTS.md`) | `hints` (exists) | WebAssembly | done |
@@ -671,8 +671,12 @@ the step it waits on is done.
      processes start only through a kernel stays, and a sandboxed kernel sandboxes MCP
      servers too. `crates/corduroy-mcp` is a native plugin per server, stdio or streamable
      HTTP, registering its tools as `<server>__<tool>`; `[mcp.<name>]` in the agent file.
-   - Compaction: the projection learns the `compaction` event, and a `compact` plugin
-     writes it.
+   - *Done:* compaction. The projection understands a `compaction` event and hides what
+     it summarises from the model (oi-kit sends only agent-visible messages), keeping it in
+     the log and the conversation. `CompactOperation`, before the prompt step, asks the
+     plugin providing the `compaction` service whether a session is due and for a summary
+     of what came before the current turn; the `compact` plugin answers with a model of its
+     own through `llm`.
    - Sub-agents: the general form of waits and signals, the `session` capability, and a
      `subagents` plugin.
 

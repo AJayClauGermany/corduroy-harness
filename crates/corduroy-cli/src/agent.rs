@@ -378,7 +378,7 @@ impl AgentFile {
     /// The default agent for a workspace with no agent file: the model from the environment
     /// (`ANTHROPIC_API_KEY`, then `OPENAI_API_KEY`, else a local Ollama), the Pi toolset on a
     /// shell in the workspace, the approval and inspect gates, and the Goose-baseline
-    /// plugins (skills, hints, todo, memory, recall, summarize).
+    /// plugins (skills, hints, todo, memory, recall, summarize, compact).
     #[must_use]
     pub fn default_text() -> String {
         let (kind, model) = if std::env::var_os("ANTHROPIC_API_KEY").is_some() {
@@ -478,6 +478,14 @@ name = "summarize"
 path = "summarize.wasm"
 config = { model = "{{model}}" }
 grants = { fs-read = ["{workspace}", "{workspace}/*"], llm = "{{model}}" }
+
+# Condenses the start of a long conversation into a summary once a request passes
+# max_tokens; the messages stay in the log.
+[[plugins]]
+name = "compact"
+path = "compact.wasm"
+config = { model = "{{model}}", max_tokens = 100000 }
+grants = { llm = "{{model}}" }
 
 # Lets the model load more plugins from the plugin directory, never granting more than this
 # entry holds. Off by default.
@@ -699,10 +707,10 @@ mod tests {
     fn the_default_agent_parses() {
         let file = AgentFile::parse(&AgentFile::default_text()).unwrap();
         assert_eq!(file.provider, "main");
-        assert_eq!(file.plugins.len(), 10);
+        assert_eq!(file.plugins.len(), 11);
         assert_eq!(
             file.plugins.iter().filter(|plugin| plugin.enabled).count(),
-            9
+            10
         );
         assert!(file.plugins[0].grants.contains_key("kernel"));
     }
