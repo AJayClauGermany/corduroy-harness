@@ -94,11 +94,19 @@ impl ModelReply {
 /// What one model request cost, as far as the provider says.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
+#[expect(
+    clippy::struct_field_names,
+    reason = "each field is a count of tokens, named as the `usage` event's keys are"
+)]
 pub struct Usage {
     /// Tokens read: the system prompt, the conversation and the tools.
     pub input_tokens: Option<u64>,
     /// Tokens written.
     pub output_tokens: Option<u64>,
+    /// Of the tokens read, those served from the provider's prompt cache.
+    pub cache_read_tokens: Option<u64>,
+    /// Of the tokens read, those written to the provider's prompt cache.
+    pub cache_write_tokens: Option<u64>,
 }
 
 impl Usage {
@@ -108,7 +116,18 @@ impl Usage {
         Self {
             input_tokens: input,
             output_tokens: output,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
         }
+    }
+
+    /// The same, with `read` of the tokens read served from the prompt cache and `written`
+    /// of them written to it.
+    #[must_use]
+    pub const fn with_cache(mut self, read: Option<u64>, written: Option<u64>) -> Self {
+        self.cache_read_tokens = read;
+        self.cache_write_tokens = written;
+        self
     }
 }
 

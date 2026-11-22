@@ -436,6 +436,8 @@ max_turns = 50
 [providers.main]
 kind = "{{kind}}"   # anthropic, openai, ollama, *-compatible, or a provider oi-kit knows
 serve = ["{{model}}"]   # models plugins may ask through the `llm` capability
+# max_tokens = 16000   # the most one answer may take; by default, the model's own limit
+# thinking = "medium"  # off, low, medium, high or max, for a model that can think
 
 [kernels.shell]
 kind = "shell"      # a persistent shell, starting in {workspace}

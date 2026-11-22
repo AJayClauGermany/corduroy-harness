@@ -198,6 +198,29 @@ fn a_prompt_runs_through_a_real_provider_tools_and_a_person_answering_the_gate()
     }
 }
 
+#[test]
+fn the_providers_settings_reach_the_model() {
+    let workspace = scratch("cli-settings");
+    let plugins = plugin("pi-tools").parent().unwrap().to_owned();
+    let (address, seen) = model(vec![answer("Hello.")]).unwrap();
+    let agent = agent_file(address, &plugins).replace(
+        "streaming = false\n",
+        "streaming = false\nmax_tokens = 1234\ntemperature = 0.25\n",
+    );
+    fs::write(workspace.join("corduroy.toml"), agent).unwrap();
+
+    let output = corduroy(&workspace, &["run", "hi"], "").unwrap();
+    assert!(output.status.success(), "{}", text(&output.stderr));
+
+    let seen = seen.lock().unwrap().clone();
+    let request = &seen[0];
+    let max_tokens = request
+        .get("max_tokens")
+        .or_else(|| request.get("max_completion_tokens"));
+    assert_eq!(max_tokens, Some(&json!(1234)), "{request}");
+    assert_eq!(request["temperature"], json!(0.25), "{request}");
+}
+
 /// With nobody at the terminal the run waits in the log; a later process answers it.
 #[test]
 fn a_run_waits_across_processes_for_its_answer() {

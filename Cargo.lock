@@ -325,6 +325,7 @@ dependencies = [
  "rmcp",
  "serde",
  "serde_json",
+ "toml",
 ]
 
 [[package]]
