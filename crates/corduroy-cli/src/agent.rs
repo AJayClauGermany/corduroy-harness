@@ -32,6 +32,16 @@
 //! env = { GITHUB_PERSONAL_ACCESS_TOKEN = "..." }
 //! ```
 //!
+//! Extensions (native plugins of a kind this command was built with, see
+//! [`extension`](crate::extension)) go under `[extensions.<name>]`; `kind` names the kind and
+//! every other key is the extension's own configuration:
+//!
+//! ```toml
+//! [extensions.scratch]
+//! kind = "shell-kernel"
+//! dir = "{workspace}/scratch"
+//! ```
+//!
 //! Strings may use `{workspace}` (where the agent works), `{data}` (its `.corduroy`
 //! directory) and `{home}`. A grant is a pattern, a list of patterns, or
 //! `{ allow = [..], deny = [..] }`; `*` matches any run of characters, `/` included. A plugin
@@ -45,13 +55,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use corduroy_harness::core::{FiberState, SECRETS, Scope, Secret, Secrets, Spawn, plugin_fn};
+use corduroy_harness::core::{
+    FiberId, FiberState, SECRETS, Scope, Secret, Secrets, Spawn, plugin_fn,
+};
 use corduroy_harness::wasm::{CAPABILITIES, WasmRuntime};
 use corduroy_harness::{Harness, jsonl, provider, shell_kernel};
 use corduroy_mcp::{McpPlugin, Transport, mcp_server};
 use corduroy_providers::ProviderSpec;
 use serde::Deserialize;
 use serde_json::Value;
+
+use crate::extension::{Asked, Extensions};
 
 /// The file an agent is read from when none is named.
 pub const AGENT_FILE: &str = "corduroy.toml";
@@ -88,9 +102,23 @@ pub struct AgentFile {
     /// MCP servers, by the name their tools are prefixed with.
     #[serde(default)]
     pub mcp: BTreeMap<String, McpEntry>,
+    /// Extensions: native plugins of a kind this command was built with, by name. Loaded
+    /// after the kernels, providers and MCP servers and before the WebAssembly plugins.
+    #[serde(default)]
+    pub extensions: BTreeMap<String, ExtensionEntry>,
     /// WebAssembly plugins, loaded in order.
     #[serde(default)]
     pub plugins: Vec<PluginEntry>,
+}
+
+/// An extension: a native plugin of one of the kinds the command was built with.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExtensionEntry {
+    /// Which kind of extension to build.
+    pub kind: String,
+    /// The extension's own configuration: every other key of the entry.
+    #[serde(flatten)]
+    pub config: BTreeMap<String, toml::Value>,
 }
 
 /// A model provider.
@@ -258,7 +286,7 @@ impl Places {
             .replace("{home}", &home_dir)
     }
 
-    fn expand_json(&self, value: Value) -> Value {
+    pub(crate) fn expand_json(&self, value: Value) -> Value {
         match value {
             Value::String(text) => Value::String(self.expand(&text)),
             Value::Array(items) => Value::Array(
@@ -541,19 +569,35 @@ pub struct Unstarted {
     pub reason: String,
 }
 
-/// Put the agent `file` describes together in `places`.
+/// Put the agent `file` describes together in `places`, with the extension kinds the
+/// `corduroy` command ships with. See [`assemble_with`].
+///
+/// # Errors
+///
+/// As [`assemble_with`].
+pub fn assemble(file: &AgentFile, places: &Places) -> Result<Agent, AgentError> {
+    assemble_with(file, places, &Extensions::builtin())
+}
+
+/// Put the agent `file` describes together in `places`, building its `[extensions]` from
+/// the kinds in `extensions`.
 ///
 /// Opens its log, builds its providers and kernels, registers its secrets, and loads its
-/// plugins with their grants. The log, the agent file and the compiled-code cache are out of
+/// extensions and then its plugins with their grants. The log, the agent file and the compiled-code cache are out of
 /// reach of every plugin's `fs-read` and `fs-write`, so a plugin cannot change its own grants
 /// or rewrite the record.
 ///
 /// # Errors
 ///
-/// Returns an [`AgentError`] if the log cannot be opened, a provider cannot be built or a
-/// plugin cannot be found or compiled. A plugin that is loaded but does not start is
-/// reported in [`Agent::failed`] instead.
-pub fn assemble(file: &AgentFile, places: &Places) -> Result<Agent, AgentError> {
+/// Returns an [`AgentError`] if the log cannot be opened, a provider cannot be built, an
+/// extension is of a kind `extensions` does not have or cannot be built, or a plugin cannot
+/// be found or compiled. A plugin that is loaded but does not start is reported in
+/// [`Agent::failed`] instead.
+pub fn assemble_with(
+    file: &AgentFile,
+    places: &Places,
+    extensions: &Extensions,
+) -> Result<Agent, AgentError> {
     fs::create_dir_all(&places.data)
         .map_err(|error| AgentError::new(format!("{}: {error}", places.data.display())))?;
     // A relative path is in the workspace, like every other path the file names.
@@ -574,6 +618,7 @@ pub fn assemble(file: &AgentFile, places: &Places) -> Result<Agent, AgentError> 
         harness = harness.with_max_turns(max_turns);
     }
     let mut failed = natives(&harness, file, places)?;
+    failed.extend(extend(&harness, file, places, extensions)?);
     failed.extend(plugins(&harness, file, places, &log)?);
     Ok(Agent {
         harness,
@@ -634,6 +679,55 @@ fn natives(
         Ok(())
     }));
     Ok(failed)
+}
+
+/// The extensions, each built from its kind. Returns those that did not start.
+fn extend(
+    harness: &Harness,
+    file: &AgentFile,
+    places: &Places,
+    extensions: &Extensions,
+) -> Result<Vec<Unstarted>, AgentError> {
+    let mut loaded = Vec::new();
+    for (name, entry) in &file.extensions {
+        let failed =
+            |error: &dyn fmt::Display| AgentError::new(format!("extension `{name}`: {error}"));
+        let config = serde_json::to_value(&entry.config).map_err(|error| failed(&error))?;
+        let config = places.expand_json(config);
+        let asked = Asked {
+            name,
+            config: &config,
+            places,
+        };
+        let plugin = extensions
+            .build(&entry.kind, &asked)
+            .ok_or_else(|| {
+                failed(&format!(
+                    "this command has no extension kind `{}` (it has: {})",
+                    entry.kind,
+                    extensions.kinds().join(", ")
+                ))
+            })?
+            .map_err(|reason| failed(&reason))?;
+        loaded.push((format!("extension {name}"), harness.plugin(plugin)));
+    }
+    Ok(unstarted(harness, loaded))
+}
+
+/// Those of `loaded` that are not running, with why.
+fn unstarted(harness: &Harness, loaded: Vec<(String, FiberId)>) -> Vec<Unstarted> {
+    let app = harness.app();
+    loaded
+        .into_iter()
+        .filter_map(|(plugin, id)| {
+            let reason = match app.state(id)? {
+                FiberState::Failed(reason) => reason.clone(),
+                FiberState::Pending => "it is waiting for a service".to_owned(),
+                FiberState::Active => return None,
+            };
+            Some(Unstarted { plugin, reason })
+        })
+        .collect()
 }
 
 /// The plugin for the MCP server `name`.
@@ -709,18 +803,7 @@ fn plugins(
         }
         loaded.push((entry.name.clone(), harness.plugin(plugin)));
     }
-    let app = harness.app();
-    Ok(loaded
-        .into_iter()
-        .filter_map(|(plugin, id)| {
-            let reason = match app.state(id)? {
-                FiberState::Failed(reason) => reason.clone(),
-                FiberState::Pending => "it is waiting for a service".to_owned(),
-                FiberState::Active => return None,
-            };
-            Some(Unstarted { plugin, reason })
-        })
-        .collect())
+    Ok(unstarted(harness, loaded))
 }
 
 #[cfg(test)]
@@ -760,6 +843,59 @@ mod tests {
                 .to_string()
                 .contains("max_turn")
         );
+    }
+
+    /// An agent with no plugins, whose log is in a scratch directory.
+    const BARE: &str = "provider = \"p\"\nmodel = \"m\"\n[providers.p]\nkind = \"ollama\"\n";
+
+    #[test]
+    fn an_extension_is_built_from_its_kind_and_its_configuration() {
+        use corduroy_harness::core::{GATES, Gates};
+
+        let workspace = corduroy_test_support::scratch("cli-extension");
+        let places = Places::new(workspace.clone(), None);
+        // A kind that declares a decision point named in its configuration.
+        let extensions = Extensions::builtin().kind("point", |asked| {
+            let point = asked.text("point").ok_or("`point` is required")?.to_owned();
+            Ok(Box::new(plugin_fn(asked.name, &[GATES], move |ctx| {
+                let gates = ctx.service::<Gates>(GATES)?;
+                gates.declare(ctx, point.clone(), "a point of the test's own")?;
+                Ok(())
+            })))
+        });
+        let text = format!(
+            "{BARE}[extensions.outbound]\nkind = \"point\"\npoint = \"{{workspace}}/leave\"\n\
+             [extensions.scratch]\nkind = \"shell-kernel\"\n"
+        );
+        let file = AgentFile::parse(&text).unwrap();
+
+        let agent = assemble_with(&file, &places, &extensions).unwrap();
+
+        assert_eq!(agent.failed, Vec::new());
+        let point = format!("{}/leave", workspace.display());
+        assert!(agent.harness.gates().declared(&point));
+        assert_eq!(agent.harness.kernels().names(), ["scratch"]);
+    }
+
+    #[test]
+    fn an_extension_of_no_known_kind_or_with_a_bad_entry_is_named() {
+        let places = Places::new(corduroy_test_support::scratch("cli-extension-bad"), None);
+        let unknown = format!("{BARE}[extensions.box]\nkind = \"docker-kernel\"\n");
+        let file = AgentFile::parse(&unknown).unwrap();
+        let error = assemble(&file, &places).unwrap_err().to_string();
+        assert_eq!(
+            error,
+            "extension `box`: this command has no extension kind `docker-kernel` (it has: \
+             shell-kernel)"
+        );
+
+        let refusing = Extensions::none().kind("picky", |_| Err("`image` is required".into()));
+        let picky = format!("{BARE}[extensions.box]\nkind = \"picky\"\n");
+        let file = AgentFile::parse(&picky).unwrap();
+        let error = assemble_with(&file, &places, &refusing)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "extension `box`: `image` is required");
     }
 
     #[test]

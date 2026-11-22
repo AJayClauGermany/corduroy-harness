@@ -80,6 +80,22 @@ pub trait Plugin: Send + Sync {
     fn apply(&mut self, ctx: &mut Context<'_>) -> Result<(), PluginError>;
 }
 
+/// A boxed plugin is a plugin, so code that chooses a plugin at run time (from a
+/// configuration file, say) can hand over whichever it built.
+impl<P: Plugin + ?Sized> Plugin for Box<P> {
+    fn name(&self) -> &str {
+        (**self).name()
+    }
+
+    fn inject(&self) -> Vec<String> {
+        (**self).inject()
+    }
+
+    fn apply(&mut self, ctx: &mut Context<'_>) -> Result<(), PluginError> {
+        (**self).apply(ctx)
+    }
+}
+
 /// A [`Plugin`] built from a closure. See [`plugin_fn`].
 pub struct FnPlugin<F> {
     name: String,
@@ -1053,6 +1069,20 @@ mod tests {
                 "plugin/disposed {\"plugin\":\"ears\"}",
             ]
         );
+    }
+
+    #[test]
+    fn a_boxed_plugin_is_a_plugin() {
+        let log = journal();
+        let mut app = App::new();
+        let boxed: Box<dyn Plugin> = Box::new(tracked("boxed", &["db"], &log));
+
+        let id = app.plugin(boxed);
+        assert_eq!(app.state(id), Some(&FiberState::Pending));
+        app.plugin(provider("db"));
+
+        assert_eq!(app.fibers()[0].name, "boxed");
+        assert_eq!(entries(&log), ["+boxed"]);
     }
 
     #[test]
