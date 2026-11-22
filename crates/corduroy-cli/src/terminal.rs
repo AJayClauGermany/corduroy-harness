@@ -104,14 +104,24 @@ pub fn describe(event: &Event) -> Option<String> {
     }
 }
 
-/// Show what happens in `session`, and to the plugins, on `out` as it is committed.
+/// Show what happens in `session`, in the sub-agents it starts, and to the plugins, on
+/// `out` as it is committed. A sub-agent's lines are indented under its session's name.
 pub fn watch(harness: &Harness, session: &SessionId, out: &Out) -> ListenerId {
     let session = session.clone();
+    let below = format!("{session}/");
     let out = Arc::clone(out);
     harness.events().subscribe(Pattern::any(), move |event| {
-        let ours = event.session.as_ref().is_none_or(|id| *id == session);
-        if let Some(text) = describe(event).filter(|_| ours) {
-            say(&out, &text);
+        let Some(text) = describe(event) else {
+            return;
+        };
+        match &event.session {
+            None => say(&out, &text),
+            Some(id) if *id == session => say(&out, &text),
+            Some(id) if id.as_str().starts_with(&below) => {
+                let indented = text.replace('\n', "\n    ");
+                say(&out, &format!("  [{id}] {indented}"));
+            }
+            Some(_) => {}
         }
     })
 }
@@ -127,12 +137,11 @@ pub fn watch(harness: &Harness, session: &SessionId, out: &Out) -> ListenerId {
 /// As [`Harness::answer`].
 pub async fn settle(
     harness: &Harness,
-    session: &SessionId,
     mut outcome: Outcome,
     input: &mut (dyn BufRead + Send),
     out: &Out,
 ) -> Result<Outcome, HarnessError> {
-    while let Status::Waiting { asks } = &outcome.status {
+    while let Status::Waiting { asks, .. } = &outcome.status {
         let Some(ask) = asks.first().cloned() else {
             break;
         };
@@ -156,7 +165,7 @@ pub async fn settle(
             "" | "n" | "N" | "no" => Answer::Deny("the user declined".to_owned()),
             reason => Answer::Deny(reason.to_owned()),
         };
-        outcome = harness.answer(session, &ask.call, answer).await?;
+        outcome = harness.answer(&ask.session, &ask.call, answer).await?;
     }
     Ok(outcome)
 }
@@ -179,7 +188,7 @@ pub async fn prompt(
         return Ok(outcome);
     }
     let outcome = harness.run_in(session, prompt).await?;
-    settle(harness, session, outcome, input, out).await
+    settle(harness, outcome, input, out).await
 }
 
 /// Finish whatever `session` left unfinished: answer a run that waits for a person, and
@@ -195,7 +204,7 @@ pub async fn resume(
     out: &Out,
 ) -> Result<Outcome, HarnessError> {
     let outcome = harness.continue_run(session).await?;
-    settle(harness, session, outcome, input, out).await
+    settle(harness, outcome, input, out).await
 }
 
 /// One line about how a run ended, if the events have not already said it.
@@ -205,7 +214,11 @@ pub fn ending(status: &Status) -> Option<String> {
         Status::Finished { .. } | Status::Yielded => None,
         Status::TurnLimitReached => Some("stopped: the turn limit was reached".to_owned()),
         Status::Failed { reason } => Some(format!("the run failed: {reason}")),
-        Status::Waiting { asks } => Some(format!(
+        Status::Waiting { asks, waits } if asks.is_empty() => {
+            let signals: Vec<&str> = waits.iter().map(|wait| wait.signal.as_str()).collect();
+            Some(format!("waiting for {}", signals.join(", ")))
+        }
+        Status::Waiting { asks, .. } => Some(format!(
             "waiting for {} answer(s); run `corduroy continue` to give them",
             asks.len()
         )),

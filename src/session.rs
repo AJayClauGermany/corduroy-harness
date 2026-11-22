@@ -21,6 +21,8 @@
 //! | `usage` | `agent` | the provider's usage report, as JSON |
 //! | `turn/end` | `host` | empty |
 //! | `run/restart` | `host` | `{"attempt"}`: an unfinished run was picked up again |
+//! | `tool/wait` | `host` | `{"id", "tool", "signal"}`, caused by its `tool/call`: the call's result comes with the signal |
+//! | `signal` | `environment` | `{"name", "payload"}`: what a waiting call was waiting for |
 //! | `compaction` | `host` | `{"summary", "keep_from", "by"}`: the messages before the `message` event `keep_from` are summarised |
 //!
 //! A tool call leaves a trail of its own, one commit at a time: `tool/call` with the model's
@@ -36,6 +38,13 @@
 //! events stop short of that was interrupted, and [`Harness::continue_run`] picks it up,
 //! unless it is *waiting*: a gate asked about one of its calls and nobody has answered yet.
 //! [`Harness::answer`] gives the answer and takes the run on.
+//!
+//! A tool call may *wait*: whatever served it said, through
+//! [`corduroy_core::call::wait_for`], that its result will come with a signal. The call
+//! gets a placeholder result and a `tool/wait`, and the run stops before the model is asked
+//! again; when a `signal` of that name is stored, its payload takes the placeholder's place
+//! and the run can go on. A child session's end is such a signal (`session/<id>/end`), so a
+//! parent run waits for a child in the log, as it waits for a person's answer.
 //!
 //! A `compaction` stands a summary in for the messages before `keep_from`. They stay in the
 //! conversation, and in the log, but are hidden from the model: it sees the summary, a short
@@ -66,7 +75,7 @@ use oi_kit_provider_types::conversation::message::{
     Message, MessageContent, ToolRequest, ToolResponse,
 };
 use oi_kit_provider_types::conversation::token_usage::ProviderUsage;
-use rmcp::model::Role;
+use rmcp::model::{CallToolResult, ContentBlock, Role};
 use serde_json::{Value, json};
 
 /// Topic of the events that make up the conversation.
@@ -90,6 +99,27 @@ const GATE_ANSWER: &str = "gate/answer";
 /// Topic of the event that begins a session.
 pub const SESSION_START: &str = "session/start";
 
+/// Topic of the event that records that a tool call waits for a signal.
+const TOOL_WAIT: &str = "tool/wait";
+
+/// Topic of the event that brings what waiting calls wait for.
+pub const SIGNAL: &str = "signal";
+
+/// The signal a child session's end raises, with its outcome as the payload.
+#[must_use]
+pub fn end_of(session: &SessionId) -> String {
+    format!("session/{session}/end")
+}
+
+/// The session whose end `signal` is, if it is one.
+#[must_use]
+pub fn ended(signal: &str) -> Option<SessionId> {
+    signal
+        .strip_prefix("session/")
+        .and_then(|rest| rest.strip_suffix("/end"))
+        .map(SessionId::new)
+}
+
 /// Topic of the event that stands a summary in for the messages before a point.
 pub const COMPACTION: &str = "compaction";
 
@@ -112,15 +142,21 @@ pub struct SessionInfo {
     pub id: SessionId,
     /// The session that started it, if one did.
     pub parent: Option<SessionId>,
+    /// What it was started to do, for a session started by another for a task.
+    pub task: Option<String>,
 }
 
 impl SessionInfo {
     /// The event that begins this session.
     pub(crate) fn start(&self) -> Draft {
-        let payload = self
-            .parent
-            .as_ref()
-            .map_or_else(|| json!({}), |parent| json!({"parent": parent.as_str()}));
+        let mut payload = serde_json::Map::new();
+        if let Some(parent) = &self.parent {
+            payload.insert("parent".to_owned(), json!(parent.as_str()));
+        }
+        if let Some(task) = &self.task {
+            payload.insert("task".to_owned(), json!(task));
+        }
+        let payload = Value::Object(payload);
         Draft::new(Source::Host, SESSION_START)
             .session(self.id.clone())
             .payload(payload.to_string())
@@ -134,9 +170,11 @@ impl SessionInfo {
             .filter_map(|event| {
                 let payload: Value = serde_json::from_str(&event.payload).ok()?;
                 let parent = payload.get("parent").and_then(Value::as_str);
+                let task = payload.get("task").and_then(Value::as_str);
                 Some(Self {
                     id: event.session?,
                     parent: parent.map(SessionId::new),
+                    task: task.map(str::to_owned),
                 })
             })
             .collect()
@@ -184,6 +222,7 @@ impl Sessions {
             let info = SessionInfo {
                 id: vacant.key().clone(),
                 parent: None,
+                task: None,
             };
             events.emit(info.start())?;
             vacant.insert(unloaded(info));
@@ -206,9 +245,24 @@ impl Sessions {
         id: SessionId,
         parent: Option<&SessionId>,
     ) -> Result<SessionId, HarnessError> {
+        self.start_with(id, parent, None)
+    }
+
+    /// Start a session as [`start`](Self::start) does, recording what it is for.
+    ///
+    /// # Errors
+    ///
+    /// As [`start`](Self::start).
+    pub(crate) fn start_with(
+        &self,
+        id: SessionId,
+        parent: Option<&SessionId>,
+        task: Option<String>,
+    ) -> Result<SessionId, HarnessError> {
         let info = SessionInfo {
             id,
             parent: parent.cloned(),
+            task,
         };
         let mut known = self.known();
         if known.contains_key(&info.id) {
@@ -329,6 +383,8 @@ pub enum Answer {
 /// A tool call that waits for a person's answer because a gate asked about it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ask {
+    /// The session the call is in: the one asked about, or a child session it waits for.
+    pub session: SessionId,
     /// The tool call's id, by which it is answered.
     pub call: String,
     /// The tool the model asked for.
@@ -339,6 +395,25 @@ pub struct Ask {
     pub reason: String,
     /// The gate that asked.
     pub gate: String,
+}
+
+/// A tool call whose result will come with a signal. See [`corduroy_core::call`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Wait {
+    /// The session the call is in.
+    pub session: SessionId,
+    /// The tool call's id.
+    pub call: String,
+    /// The tool that was called.
+    pub tool: String,
+    /// The signal it waits for.
+    pub signal: String,
+}
+
+/// What a waiting call's result is until its signal comes. The model never sees it: a run
+/// with a waiting call stops before the model is asked again.
+fn placeholder(signal: &str) -> String {
+    format!("[waiting for {signal}]")
 }
 
 /// What the log holds about the gates' view of one tool call.
@@ -413,12 +488,22 @@ struct State {
     message_ids: Vec<EventId>,
     /// The input tokens of the last model request, unless a compaction came after it.
     input_tokens: u64,
+    /// Tool calls that waited for a signal, by tool-call id, with the payload once it came.
+    waits: BTreeMap<String, Waited>,
     /// The tool calls waiting for a response, by tool-call id.
     calls: BTreeMap<String, OpenCall>,
     /// Whether a run has begun and not reached its `turn/end`.
     unfinished: bool,
     /// How many times the unfinished run has been picked up again.
     restarts: u32,
+}
+
+/// A tool call that waited for a signal.
+struct Waited {
+    tool: String,
+    signal: String,
+    /// The signal's payload, once it came.
+    payload: Option<String>,
 }
 
 /// One step's worth of events, and what they change in the projection once stored.
@@ -481,6 +566,74 @@ impl Batch {
 }
 
 impl State {
+    /// Note that the open call `call` to `tool` waits for `signal`. It counts as having a
+    /// result, the placeholder, so a run picked up after a crash hands that to the model's
+    /// turn and waits rather than calling the tool again.
+    fn wait(&mut self, call: &str, tool: &str, signal: &str) {
+        self.waits.insert(
+            call.to_owned(),
+            Waited {
+                tool: tool.to_owned(),
+                signal: signal.to_owned(),
+                payload: None,
+            },
+        );
+        if let Some(open) = self.calls.get_mut(call) {
+            open.started = true;
+            open.result = Some((true, placeholder(signal)));
+        }
+    }
+
+    fn project_wait(&mut self, event: &Event) -> Result<()> {
+        let payload: Value = serde_json::from_str(&event.payload)
+            .with_context(|| format!("event {} is not a tool/wait", event.id))?;
+        let text = |name: &str| {
+            payload
+                .get(name)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+        };
+        self.wait(text("id"), text("tool"), text("signal"));
+        Ok(())
+    }
+
+    /// Give every call waiting for `name` the signal's `payload`, in place of its placeholder.
+    fn resolve(&mut self, name: &str, payload: &str) {
+        let mut resolved = false;
+        for waited in self.waits.values_mut() {
+            if waited.signal == name && waited.payload.is_none() {
+                waited.payload = Some(payload.to_owned());
+                resolved = true;
+            }
+        }
+        if !resolved {
+            return;
+        }
+        let messages = std::mem::take(self.conversation.messages_mut());
+        let messages = messages
+            .into_iter()
+            .map(|message| self.resolved(message))
+            .collect();
+        *self.conversation.messages_mut() = messages;
+    }
+
+    /// `message` with the result of each call whose signal came in place of its placeholder.
+    fn resolved(&self, mut message: Message) -> Message {
+        for content in &mut message.content {
+            if let MessageContent::ToolResponse(response) = content
+                && let Some(payload) = self
+                    .waits
+                    .get(&response.id)
+                    .and_then(|waited| waited.payload.as_ref())
+            {
+                response.tool_result = Ok(CallToolResult::success(vec![ContentBlock::text(
+                    payload.clone(),
+                )]));
+            }
+        }
+        message
+    }
+
     /// Hide the messages before `keep_from` from the model and stand `summary`, from the
     /// `compaction` event `id`, in for them.
     fn compact(&mut self, id: EventId, summary: &str, keep_from: EventId) {
@@ -517,6 +670,7 @@ impl State {
                 for call in answered {
                     self.calls.remove(call);
                 }
+                let message = self.resolved(message);
                 self.conversation.push(message);
                 self.message_ids.push(event.id);
                 self.unfinished = true;
@@ -543,6 +697,22 @@ impl State {
             }
             TURN_END => (self.unfinished, self.restarts) = (false, 0),
             RESTART => self.restarts = self.restarts.saturating_add(1),
+            TOOL_WAIT => self.project_wait(event)?,
+            SIGNAL => {
+                let payload: Value = serde_json::from_str(&event.payload)
+                    .with_context(|| format!("event {} is not a signal", event.id))?;
+                let name = payload
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let brought = payload
+                    .get("payload")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                self.resolve(name, brought);
+            }
+            // A plugin's own calls through `tools` share the session but are not the model's.
+            "tool/call" | "tool/result" if matches!(event.source, Source::Plugin(_)) => {}
             "tool/call" | "tool/start" | "tool/result" | GATE_DECISION | GATE_ANSWER => {
                 self.project_call(event)?;
             }
@@ -645,6 +815,7 @@ impl Journal {
             conversation: Conversation::empty(),
             message_ids: Vec::new(),
             input_tokens: 0,
+            waits: BTreeMap::new(),
             calls: BTreeMap::new(),
             unfinished: false,
             restarts: 0,
@@ -788,6 +959,7 @@ impl Journal {
                     gate,
                     answer: None,
                 }) => Some(Ask {
+                    session: self.id.clone(),
                     call: call.clone(),
                     tool: open.tool.clone(),
                     input: open.input.clone(),
@@ -847,6 +1019,51 @@ impl Journal {
         Ok(())
     }
 
+    /// Record that the call `call` waits for `signal`. Returns the placeholder that stands
+    /// for its result until the signal comes.
+    pub(crate) fn wait_call(&self, call: &str, signal: &str) -> Result<String> {
+        let (draft, tool) = self.about_call(call, Source::Host, TOOL_WAIT);
+        let payload = json!({"id": call, "tool": tool, "signal": signal});
+        self.events.emit(draft.payload(payload.to_string()))?;
+        self.state().wait(call, &tool, signal);
+        Ok(placeholder(signal))
+    }
+
+    /// Store the signal `name`, bringing `payload` to whichever calls of this session wait
+    /// for it. Returns whether any did; if none did, nothing is stored.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the signal cannot be stored.
+    pub fn signal(&self, name: &str, payload: &str) -> Result<bool> {
+        let awaited = self.awaiting().iter().any(|wait| wait.signal == name);
+        if !awaited {
+            return Ok(false);
+        }
+        let draft = Draft::new(Source::Environment, SIGNAL)
+            .session(self.id.clone())
+            .payload(json!({"name": name, "payload": payload}).to_string());
+        self.events.emit(draft)?;
+        self.state().resolve(name, payload);
+        Ok(true)
+    }
+
+    /// The tool calls of this session still waiting for their signal, in order of id.
+    #[must_use]
+    pub fn awaiting(&self) -> Vec<Wait> {
+        self.state()
+            .waits
+            .iter()
+            .filter(|(_, waited)| waited.payload.is_none())
+            .map(|(call, waited)| Wait {
+                session: self.id.clone(),
+                call: call.clone(),
+                tool: waited.tool.clone(),
+                signal: waited.signal.clone(),
+            })
+            .collect()
+    }
+
     /// An event of this session on `topic` caused by the open tool call `call`, and the name
     /// of the call's tool.
     fn about_call(&self, call: &str, source: Source, topic: &str) -> (Draft, String) {
@@ -891,6 +1108,7 @@ impl Journal {
             let Some(id) = ids.get(position).copied() else {
                 continue;
             };
+            let message = state.resolved(message);
             state.conversation.push(message);
             state.message_ids.push(id);
             state.unfinished = true;
@@ -975,7 +1193,7 @@ fn transcript(messages: &[&Message]) -> String {
 }
 
 /// The text blocks of a tool result, joined.
-fn text_of(result: &rmcp::model::CallToolResult) -> String {
+fn text_of(result: &CallToolResult) -> String {
     result
         .content
         .iter()

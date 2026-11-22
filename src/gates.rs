@@ -147,6 +147,49 @@ impl Operation<Session, Effect> for GateOperation {
     }
 }
 
+/// The step that stops a run while one of its tool calls waits for a signal.
+///
+/// A call that waits has a placeholder for a result until its signal is stored (see
+/// [`corduroy_core::call`]). Placed after the tools and before the model, this step yields
+/// while any call of the session still waits, so the model is never asked with a
+/// placeholder in the conversation. The harness then runs what the call waits for, if it is
+/// a child session, or leaves the run waiting in the log for [`Harness::signal`].
+///
+/// [`Harness::signal`]: crate::Harness::signal
+#[derive(Debug)]
+pub struct WaitOperation {
+    sessions: Arc<Sessions>,
+}
+
+impl WaitOperation {
+    /// Hold the sessions in `sessions` while their calls wait.
+    #[must_use]
+    pub const fn new(sessions: Arc<Sessions>) -> Self {
+        Self { sessions }
+    }
+}
+
+#[async_trait]
+impl Operation<Session, Effect> for WaitOperation {
+    fn name(&self) -> &'static str {
+        "waits"
+    }
+
+    async fn run(
+        &self,
+        session: &Session,
+        _conversation: &Conversation,
+        _emit: &Emitter,
+    ) -> Result<OperationResult<Effect>> {
+        let journal = self.sessions.journal(&SessionId::new(session.id()))?;
+        if journal.awaiting().is_empty() {
+            not_applicable()
+        } else {
+            yielded_with(Vec::new())
+        }
+    }
+}
+
 /// The step that applies changes to the plugin tree that plugins asked for.
 ///
 /// A plugin loading or unloading another through the `plugins` capability cannot change the

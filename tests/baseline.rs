@@ -324,7 +324,7 @@ async fn inspect_asks_about_danger_stops_loops_and_warns_of_injected_instruction
     );
 
     let second = harness.run("clean up").await.unwrap();
-    let Status::Waiting { asks } = second.status else {
+    let Status::Waiting { asks, .. } = second.status else {
         panic!("expected an ask, got {:?}", second.status);
     };
     assert_eq!(asks[0].gate, "inspect");

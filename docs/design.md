@@ -260,10 +260,10 @@ Everything else is a plugin, and a plugin may itself offer primitives to other p
 | --- | --- | --- |
 | Plugin tree (`App`, `Context`, effects, `inject`) | built | Built for WebAssembly: a call that traps kills the instance, and the next call makes a new one and activates it again, keeping the plugin's registrations; after `Limits::restarts` restarts (default 3) the next trap stops the plugin until it is reloaded (`plugin/trapped`, `plugin/restarted`, `plugin/stopped`). Still to do: the same limit in the plugin tree itself, so a stopped plugin shows as suspended in `App` rather than only refusing calls. |
 | Event log | built | A fallible `Log` trait. A step's events are one atomic commit, stored before any listener or the model sees them. The core has the trait and the in-memory stream; stores are separate crates. |
-| Sessions | built | Many sessions, each with an id and an optional parent. Every event of a run names its session; events about the plugin tree name none. Still to do: events a plugin emits while serving a tool call do not carry that call's session. |
+| Sessions | built | Many sessions, each with an id and an optional parent. Every event of a run names its session; events about the plugin tree name none. Events a plugin raises while serving a tool call carry that call's session (`corduroy_core::call`). A session may be started by another for a task (a child), and nests at most `MAX_DEPTH` deep. |
 | Tool lifecycle | partly built | Built: `tool/call`, `tool/start` and `tool/result` are each committed as they happen, per call; `ToolSpec::replay_safe` says whether a call that was running at a crash may be repeated, and `read_only` whether it changes anything. Still to do: results as content blocks rather than one string, progress and cancellation. |
 | Gates | built for `tool/call` and `plugin/load` | A fourth registry. A gate is asked at a named decision point before something happens and answers allow, deny or ask; the strictest answer wins and is recorded. Reachable from WebAssembly through the `gate` export. Still to do: more decision points (the user's input, the model request), and letting a person answer an ask at `plugin/load`. See [Events, gates and hooks](#events-gates-and-hooks). |
-| Waits and signals | built for a gate's ask | A run whose tool call a gate asked about waits for `Harness::answer`; the ask and the answer are events, so the wait survives a restart. Still to do: the general form, a step that waits for any named signal (a child session finishing, a timer). |
+| Waits and signals | built | A run whose tool call a gate asked about waits for `Harness::answer`. In general, a tool call may wait for a named signal: whatever serves it says so through `corduroy_core::call::wait_for`, the call gets a placeholder and a `tool/wait`, `WaitOperation` stops the run before the model is asked again, and a `signal` event (`Harness::signal`) brings the result. A child session's end is such a signal, which the harness raises itself. All of it is in the log, so a wait survives a restart. Still to do: a timer that raises signals. |
 | Services | built | A fifth registry, `Services`: calls between plugins in JSON text, with the caller's name, across the WebAssembly boundary in both directions. See [Plugins extending plugins](#plugins-extending-plugins). |
 | Capabilities | fifteen | The mechanism is settled; the set grows (below). |
 | Kernels | built | The trait and registry, and `Kernel::spawn` for long-lived processes with pipes (MCP servers). `ShellKernel` is an implementation, not a primitive, and lives in `corduroy-shell`. |
@@ -272,15 +272,15 @@ Everything else is a plugin, and a plugin may itself offer primitives to other p
 | Secrets and outbound requests | built | `Secrets` and `HttpClients` registries. The core checks and records; native plugins hold the values and send the requests, so an HTTP client is a plugin like a kernel is. |
 | Versioning | WIT package version, log schema version | Built: a schema version in each log's header. Still to do: a version on each plugin's stored state, and a rule for what a minor version of the world may change. |
 
-One capability is still to add:
-
-| Capability | Grants | Scoped by | Needed by |
-| --- | --- | --- | --- |
-| `session` | start a child session and await it | recipe or agent name | sub-agents |
-
-It waits on the general form of waits and signals (step 4): a parent run awaiting a child
-session should wait in the log, as a run waiting for a person does, rather than block a
-plugin's call for as long as the child runs.
+**Child sessions, a service rather than a capability (built).** The plan was a `session`
+capability to start a child session and await it. It became a service the harness
+provides, `sessions` (`start` with a task), reached through the existing `service`
+capability scoped to `sessions`, so the world did not grow an interface. A parent run waits
+for its child in the log, as it waits for a person, rather than blocking a plugin's call
+for as long as the child runs: `start` makes the call wait for the child's end, the harness
+runs the child to its end and signals the parent, and `continue_run` picks the chain up
+after a crash wherever it stopped. A gate asking in a child surfaces on the parent's
+outcome, with the child's session on the ask.
 
 Two rules came with the capabilities that reach outside:
 
@@ -591,7 +591,7 @@ harness.
 | Permission modes, per-tool permissions | `approval` (exists: `auto`, `smart`, `approve`, `chat`, allow and deny lists) | WebAssembly | done |
 | Tool inspection, prompt-injection scan | `inspect` (exists: dangerous commands, credentials, repetition, injected instructions in results) | WebAssembly | done |
 | Auto-compaction | `compact` (exists) | WebAssembly | done: the projection knows the `compaction` event |
-| Summon: `load`, `delegate` | `subagents` | WebAssembly | sessions, `session`, waits |
+| Summon: `load`, `delegate` | `subagents` (exists: `delegate`) | WebAssembly | done for `delegate`; `load` (a recipe into the context) is not built |
 | Skills | `skills` (exists) | WebAssembly | done; the review fork waits on sessions |
 | Context files (`.goosehints`, `AGENTS.md`) | `hints` (exists) | WebAssembly | done |
 | Todo | `todo` (exists) | WebAssembly | done |
@@ -677,8 +677,9 @@ the step it waits on is done.
      plugin providing the `compaction` service whether a session is due and for a summary
      of what came before the current turn; the `compact` plugin answers with a model of its
      own through `llm`.
-   - Sub-agents: the general form of waits and signals, the `session` capability, and a
-     `subagents` plugin.
+   - *Done:* sub-agents. The general form of waits and signals (a tool call that waits
+     for a named signal, in the log), child sessions started through the harness's
+     `sessions` service, and the `subagents` plugin's `delegate`.
 
    Left for later: code mode (the kernel-to-host bridge) and `read_image` (content blocks).
 

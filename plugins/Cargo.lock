@@ -262,6 +262,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "subagents"
+version = "0.1.0"
+dependencies = [
+ "corduroy-guest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "summarize"
 version = "0.1.0"
 dependencies = [

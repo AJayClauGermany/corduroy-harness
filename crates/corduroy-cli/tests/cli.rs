@@ -331,3 +331,48 @@ fn an_mcp_server_in_the_agent_file_gives_the_model_its_tools() {
     let seen = seen.lock().unwrap().clone();
     assert!(seen[0].to_string().contains("fixture__echo"));
 }
+
+/// A sub-agent from the agent file: the model delegates, the child's work is shown indented
+/// under its session, and its answer comes back to the parent.
+#[test]
+fn a_delegated_task_is_shown_under_its_sub_agent() {
+    let workspace = scratch("cli-subagent");
+    let plugins = plugin("pi-tools").parent().unwrap().to_owned();
+    let (address, seen) = model(vec![
+        tool_call("delegate", &json!({"task": "List the workspace."})),
+        tool_call("tree", &json!({})),
+        answer("It is empty but for corduroy.toml."),
+        answer("The sub-agent found only corduroy.toml."),
+    ])
+    .unwrap();
+    let agent = format!(
+        "{}\n[[plugins]]\nname = \"subagents\"\npath = \"{}\"\ngrants = {{ service = \"sessions\" }}\n",
+        agent_file(address, &plugins),
+        plugins.join("subagents.wasm").display()
+    );
+    fs::write(workspace.join("corduroy.toml"), agent).unwrap();
+
+    // `y` lets the delegate call through the approval gate; the sub-agent's tree only reads.
+    let output = corduroy(&workspace, &["run", "what", "is", "here?"], "y\n").unwrap();
+    let stdout = text(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{stdout}\n{}",
+        text(&output.stderr)
+    );
+    assert!(stdout.contains("▸ delegate"), "{stdout}");
+    assert!(stdout.contains("  [main/1] ▸ tree"), "{stdout}");
+    assert!(
+        stdout.contains("The sub-agent found only corduroy.toml."),
+        "{stdout}"
+    );
+    // The parent's next request carried the child's answer as the delegate call's result.
+    let seen = seen.lock().unwrap().clone();
+    assert!(
+        seen[3]
+            .to_string()
+            .contains("It is empty but for corduroy.toml."),
+        "{}",
+        seen[3]
+    );
+}

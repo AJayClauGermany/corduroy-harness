@@ -43,10 +43,14 @@ the strictest answer wins, and an "ask" makes the run wait, across restarts, for
 
 ```rust
 harness.plugin(runtime.load("plugins/…/approval.wasm")?.config(r#"{"mode":"smart"}"#));
-if let Status::Waiting { asks } = harness.run("tidy the repo").await?.status {
-    harness.answer(&MAIN.into(), &asks[0].call, Answer::Allow).await?;   // run the write
+if let Status::Waiting { asks, .. } = harness.run("tidy the repo").await?.status {
+    harness.answer(&asks[0].session, &asks[0].call, Answer::Allow).await?;   // run the write
 }
 ```
+
+**Sub-agents** wait in the log too: `delegate` starts a child session with the same tools,
+the parent's run stops until the child ends, and the child's answer becomes the call's
+result. Any tool call can wait this way, for a signal brought by `Harness::signal`.
 
 ## Try it
 
@@ -131,7 +135,7 @@ demo drive the loop with a scripted provider.
 | `plugins/pi-tools` | read, write, edit, bash on a persistent kernel, and tree |
 | `plugins/skills` | Agent-written `SKILL.md` files with a prompt index and a review nudge |
 | `plugins/approval` | A gate: permission modes with allow and deny lists |
-| `plugins/{hints,todo,memory,recall,summarize,compact,inspect,plugin-manager}` | The rest of the Goose baseline: context files, a todo list, memories, searching earlier sessions, summaries by a second model, auto-compaction, a gate inspecting calls, loading plugins at run time |
+| `plugins/{hints,todo,memory,recall,summarize,compact,subagents,inspect,plugin-manager}` | The rest of the Goose baseline: context files, a todo list, memories, searching earlier sessions, summaries by a second model, auto-compaction, sub-agents, a gate inspecting calls, loading plugins at run time |
 | `plugins/testbed` | For the host's own tests: makes host calls, loads plugins, echoes events and traps on demand |
 | `crates/corduroy-test-support` | Test-only helpers: finds the built plugins, makes scratch directories |
 | `tests/`, `crates/*/tests/` | Integration tests through the public API |

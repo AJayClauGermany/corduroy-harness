@@ -378,7 +378,7 @@ impl AgentFile {
     /// The default agent for a workspace with no agent file: the model from the environment
     /// (`ANTHROPIC_API_KEY`, then `OPENAI_API_KEY`, else a local Ollama), the Pi toolset on a
     /// shell in the workspace, the approval and inspect gates, and the Goose-baseline
-    /// plugins (skills, hints, todo, memory, recall, summarize, compact).
+    /// plugins (skills, hints, todo, memory, recall, summarize, compact, subagents).
     #[must_use]
     pub fn default_text() -> String {
         let (kind, model) = if std::env::var_os("ANTHROPIC_API_KEY").is_some() {
@@ -438,7 +438,7 @@ events = "skills/*"
 [[plugins]]
 name = "approval"
 path = "approval.wasm"
-config = { mode = "smart", allow = ["todo_write", "memory_save", "skill_manage"] }
+config = { mode = "smart", allow = ["todo_write", "memory_save", "skill_manage", "delegate"] }
 
 # Asks you about destructive commands and credentials in a call, stops a model repeating
 # itself, and warns it when a tool's output tries to give it instructions.
@@ -478,6 +478,13 @@ name = "summarize"
 path = "summarize.wasm"
 config = { model = "{{model}}" }
 grants = { fs-read = ["{workspace}", "{workspace}/*"], llm = "{{model}}" }
+
+# Hands a task to a sub-agent with the same tools and its own conversation, and waits for
+# its answer. The sub-agent's own tool calls pass the same gates.
+[[plugins]]
+name = "subagents"
+path = "subagents.wasm"
+grants = { service = "sessions" }
 
 # Condenses the start of a long conversation into a summary once a request passes
 # max_tokens; the messages stay in the log.
@@ -707,10 +714,10 @@ mod tests {
     fn the_default_agent_parses() {
         let file = AgentFile::parse(&AgentFile::default_text()).unwrap();
         assert_eq!(file.provider, "main");
-        assert_eq!(file.plugins.len(), 11);
+        assert_eq!(file.plugins.len(), 12);
         assert_eq!(
             file.plugins.iter().filter(|plugin| plugin.enabled).count(),
-            10
+            11
         );
         assert!(file.plugins[0].grants.contains_key("kernel"));
     }

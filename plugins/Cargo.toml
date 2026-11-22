@@ -17,6 +17,7 @@ members = [
     "plugin-manager",
     "recall",
     "skills",
+    "subagents",
     "summarize",
     "testbed",
     "todo",

@@ -81,10 +81,27 @@ impl ToolProvider<Session> for PluginTools {
         let tools = Arc::clone(&self.tools);
         let name = call.name.to_string();
         let input = Value::Object(call.arguments.unwrap_or_default()).to_string();
-        // Tools are synchronous and may run for a while (a shell command, say).
-        let outcome = tokio::task::spawn_blocking(move || tools.call(&name, &input))
-            .await
-            .unwrap_or_else(|error| Err(ToolError::Failed(format!("the tool panicked: {error}"))));
+        let scope = (journal.id().clone(), request_id.to_owned());
+        // Tools are synchronous and may run for a while (a shell command, say). The call is
+        // served in its scope, so what it calls knows its session and can make it wait.
+        let (outcome, waits) = tokio::task::spawn_blocking(move || {
+            corduroy_core::call::within(scope.0, scope.1, || tools.call(&name, &input))
+        })
+        .await
+        .unwrap_or_else(|error| {
+            let panicked = Err(ToolError::Failed(format!("the tool panicked: {error}")));
+            (panicked, Vec::new())
+        });
+        // A call that waits gets its result from a signal; until then a placeholder stands
+        // in, which the model never sees, since the run stops before asking it again.
+        if let Some(signal) = waits.first() {
+            let placeholder = journal
+                .wait_call(request_id, signal)
+                .map_err(|error| unrecorded(&error))?;
+            return Ok(CallToolResult::success(vec![ContentBlock::text(
+                placeholder,
+            )]));
+        }
         // A failed tool is data for the model, not an error for the run.
         let (ok, output) = match outcome {
             Ok(output) => (true, output),

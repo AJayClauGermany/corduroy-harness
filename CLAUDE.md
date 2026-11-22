@@ -9,7 +9,7 @@ oi-kit's state machine. `docs/design.md` explains where each idea comes from and
 
 | Path | What it is |
 | --- | --- |
-| `crates/corduroy-core` | **Zero dependencies, synchronous.** Plugin contexts (`App`, `Context`, `Plugin`), capabilities (`Grants`, `Scope`), the `EventStream` (commits, `SessionId`, the `Log` trait), and the `Tools` / `Prompts` / `Kernels` / `Gates` / `Services` / `Models` / `Secrets` / `HttpClients` registries. The registries hold traits only: kernels, stores, models and clients are implemented elsewhere. |
+| `crates/corduroy-core` | **Zero dependencies, synchronous.** Plugin contexts (`App`, `Context`, `Plugin`), capabilities (`Grants`, `Scope`), the call scope (`call`: which session and tool call a thread serves, and waiting for a signal), the `EventStream` (commits, `SessionId`, the `Log` trait), and the `Tools` / `Prompts` / `Kernels` / `Gates` / `Services` / `Models` / `Secrets` / `HttpClients` registries. The registries hold traits only: kernels, stores, models and clients are implemented elsewhere. |
 | `crates/corduroy-jsonl` | A store for the event stream: `JsonlLog`, one line per commit under a versioned header. Stores implement `corduroy_core::Log` and live outside the core. |
 | `crates/corduroy-cli` | The `corduroy` binary (`cargo corduroy`): `agent` reads the agent file (TOML: providers, kernels, secrets, WebAssembly plugins with grants) and assembles the harness, protecting the log and the agent file; `terminal` shows events as they commit and answers gate asks. End-to-end tests drive the binary against a fake OpenAI-compatible server on loopback. |
 | `crates/corduroy-mcp` | `mcp_server`: one MCP server as a native plugin, its tools as `<server>__<tool>`. A stdio server is started through `Kernel::spawn`, never directly. Tests use a Python fixture server (`tests/fixtures/server.py`). |
@@ -17,9 +17,9 @@ oi-kit's state machine. `docs/design.md` explains where each idea comes from and
 | `crates/corduroy-http` | `UreqClient`, the `HttpClient` behind the `http` capability (no redirects), and the `http_client` plugin. |
 | `crates/corduroy-shell` | `ShellKernel`, a persistent POSIX shell as a `Kernel` that can also `spawn` processes, and the `shell_kernel` plugin. |
 | `crates/corduroy-wasm` | wasmtime host. Loads components built against `wit/corduroy.wit` as `Plugin`s; links only granted interfaces. |
-| `src/` (`corduroy-harness`) | Assembles the loop from oi-kit: `Harness` (sessions, `run_in`, `continue_run`, `answer`), `Journal` (one step's effects to one commit), `GateOperation`, `CompactOperation`, `PluginTools`, the `Providers` registry and `provider` plugin (`src/provider.rs`), `ScriptedProvider`. Async (tokio). |
+| `src/` (`corduroy-harness`) | Assembles the loop from oi-kit: `Harness` (sessions, `run_in`, `continue_run`, `answer`, `signal`), `Journal` (one step's effects to one commit), `GateOperation`, `WaitOperation`, `CompactOperation`, the `sessions` service for child sessions (`src/children.rs`), `PluginTools`, the `Providers` registry and `provider` plugin (`src/provider.rs`), `ScriptedProvider`. Async (tokio). |
 | `wit/corduroy.wit` | The typed plugin boundary. Each imported interface is one capability. |
-| `plugins/` | **Separate workspace**, built for `wasm32-unknown-unknown`: `guest` (the `corduroy-guest` crate every Rust plugin builds on: bindings generated once, a `Plugin` trait with default exports, `export!`), `pi-tools` (read, write, edit, bash, tree), `skills`, `approval` (a gate: permission modes), the Goose-baseline plugins `hints`, `todo`, `memory`, `recall`, `summarize`, `compact` (the `compaction` service), `inspect` (a gate) and `plugin-manager`, and `testbed` (for the host's tests only: host calls, loads, echoes and traps on demand). |
+| `plugins/` | **Separate workspace**, built for `wasm32-unknown-unknown`: `guest` (the `corduroy-guest` crate every Rust plugin builds on: bindings generated once, a `Plugin` trait with default exports, `export!`), `pi-tools` (read, write, edit, bash, tree), `skills`, `approval` (a gate: permission modes), the Goose-baseline plugins `hints`, `todo`, `memory`, `recall`, `summarize`, `compact` (the `compaction` service), `subagents` (`delegate`), `inspect` (a gate) and `plugin-manager`, and `testbed` (for the host's tests only: host calls, loads, echoes and traps on demand). |
 | `sdk/js`, `sdk/python` | Guest SDKs: write a plugin in JavaScript/TypeScript or Python; `corduroy-js build` / `corduroy-py build` make a component importing only the listed capabilities. `sdk/js/script-host` is the script host (automations as scripts). |
 | `examples/` | The same `notes` plugin in each guest language, built by `scripts/guests.sh`. |
 | `crates/corduroy-test-support` | Test-only helpers: finds built plugins, makes scratch directories. |
@@ -152,8 +152,11 @@ as design guidance, not noise.
   before something happens asks the `Gates` registry at a decision point in
   `corduroy_core::POINTS`; the strictest verdict wins and is recorded before the thing
   happens. A gate that cannot answer denies. Do not give events return values.
-- **Waiting is in the log.** A run waiting for a person (a gate asked) has no `turn/end`;
-  `Harness::answer` resumes it and `continue_run` must not count it as a restart.
+- **Waiting is in the log.** A run waiting for a person (a gate asked) or for a signal (a
+  tool call that waits, such as one that started a child session) has no `turn/end`;
+  `Harness::answer` and `Harness::signal` resume it and `continue_run` must not count it as a
+  restart. A tool waits only through `corduroy_core::call::wait_for`, inside the call scope
+  `PluginTools` sets; never block a tool call on another run.
 - **Every world export is mandatory for every guest.** Adding one means a stub in each
   plugin under `plugins/`, and a check that JavaScript and Python can implement it.
 - **Tool failures are data, not control flow.** A `ToolError` becomes an error tool result and

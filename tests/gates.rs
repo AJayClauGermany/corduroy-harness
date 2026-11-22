@@ -159,7 +159,7 @@ async fn an_ask_waits_for_a_person_and_runs_once_allowed() {
 
     let outcome = harness.run("poke it").await.unwrap();
 
-    let Status::Waiting { asks } = &outcome.status else {
+    let Status::Waiting { asks, .. } = &outcome.status else {
         panic!("expected to wait, got {:?}", outcome.status);
     };
     assert_eq!(asks.len(), 1);
@@ -235,7 +235,7 @@ async fn a_message_waits_until_every_ask_in_it_is_answered() {
     let first = harness.answer(&main, "c1", Answer::Allow).await.unwrap();
 
     // `peek` was allowed but waits with the rest of its message.
-    let Status::Waiting { asks } = first.status else {
+    let Status::Waiting { asks, .. } = first.status else {
         panic!("expected to wait");
     };
     assert_eq!(asks.len(), 1);
