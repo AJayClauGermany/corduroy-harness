@@ -132,7 +132,11 @@ impl ShellKernel {
         let mut command = Command::new(&self.program);
         if self.dialect == Dialect::PowerShell {
             // Commands from standard input, one line at a time, with nothing asked of a person.
-            command.args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "-"]);
+            // A terminal of no capabilities, or .NET on Unix writes the codes that set one up
+            // into the output.
+            command
+                .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "-"])
+                .env("TERM", "dumb");
         }
         command
             .stdin(Stdio::piped())
@@ -321,7 +325,7 @@ impl Session {
                 Err(RecvTimeoutError::Disconnected) => return Err(KernelError::Exited { output }),
             };
             let line = match dialect {
-                Dialect::PowerShell => line.replace("\r\n", "\n"),
+                Dialect::PowerShell => powershell_line(&line),
                 Dialect::Posix => line,
             };
             let Some(status) = line.strip_prefix(marker) else {
@@ -338,6 +342,15 @@ impl Session {
             });
         }
     }
+}
+
+/// A line of PowerShell's output as the cell wrote it: `\n` for Windows' CRLF, and without
+/// the codes that put a terminal's keypad in and out of application mode, which .NET writes
+/// when it takes its output for a terminal.
+fn powershell_line(line: &str) -> String {
+    line.replace("\r\n", "\n")
+        .replace("\u{1b}[?1h", "")
+        .replace("\u{1b}[?1l", "")
 }
 
 /// Append `line` to `output` unless that would exceed [`MAX_OUTPUT`]. Returns whether the
@@ -593,6 +606,12 @@ mod tests {
         assert_eq!(line.matches('\n').count(), 1, "{line}");
         assert!(line.ends_with('\n'));
         assert!(line.contains(&BASE64.encode(code)));
+    }
+
+    #[test]
+    fn powershell_output_is_read_as_the_cell_wrote_it() {
+        assert_eq!(powershell_line("\u{1b}[?1h\u{1b}[?1lready\r\n"), "ready\n");
+        assert_eq!(powershell_line("plain\n"), "plain\n");
     }
 
     /// PowerShell, started, if it is on this machine. Its tests pass without it, unless
