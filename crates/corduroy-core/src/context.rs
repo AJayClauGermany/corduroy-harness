@@ -50,7 +50,10 @@ impl fmt::Display for FiberId {
 }
 
 /// Where a plugin instance is in its lifecycle. A disposed plugin has no state at all.
+///
+/// More states may be added, so match with a wildcard arm.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FiberState {
     /// Waiting for an injected service, or for its parent to become active.
     Pending,
@@ -212,6 +215,7 @@ impl Error for ContextError {}
 
 /// A snapshot of one plugin instance, from [`App::fibers`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FiberInfo {
     /// The instance's id.
     pub id: FiberId,

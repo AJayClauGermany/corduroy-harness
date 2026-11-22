@@ -724,6 +724,7 @@ fn unstarted(harness: &Harness, loaded: Vec<(String, FiberId)>) -> Vec<Unstarted
                 FiberState::Failed(reason) => reason.clone(),
                 FiberState::Pending => "it is waiting for a service".to_owned(),
                 FiberState::Active => return None,
+                other => format!("it is {other:?}"),
             };
             Some(Unstarted { plugin, reason })
         })

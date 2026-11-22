@@ -36,10 +36,10 @@ pub const DEFAULT_PROVIDER: &str = "default";
 /// A plugin that registers a model provider under a name, and optionally offers some of its
 /// models to plugins. See [`provider`].
 pub struct ProviderPlugin {
-    /// The name the provider is registered under.
-    name: String,
     /// The plugin's own name, which cannot be mistaken for another plugin's.
-    plugin: String,
+    name: String,
+    /// The name the provider is registered under.
+    registered_as: String,
     provider: Arc<dyn Provider>,
     models: Vec<String>,
 }
@@ -53,14 +53,15 @@ impl std::fmt::Debug for ProviderPlugin {
     }
 }
 
-/// A plugin that registers `provider` in the [`Providers`] registry as `name`. Unloading it
-/// removes the provider, and a loop that asks for it then fails its next request. The
-/// plugin itself is called `provider-<name>`.
+/// A plugin that registers `provider` in the [`Providers`] registry as `name`.
+///
+/// Unloading it removes the provider, and a loop that asks for it then fails its next
+/// request. The plugin itself is called `provider-<name>`.
 pub fn provider(name: impl Into<String>, provider: Arc<dyn Provider>) -> ProviderPlugin {
-    let name = name.into();
+    let registered_as = name.into();
     ProviderPlugin {
-        plugin: format!("provider-{name}"),
-        name,
+        name: format!("provider-{registered_as}"),
+        registered_as,
         provider,
         models: Vec::new(),
     }
@@ -78,7 +79,7 @@ impl ProviderPlugin {
 
 impl Plugin for ProviderPlugin {
     fn name(&self) -> &str {
-        &self.plugin
+        &self.name
     }
 
     fn inject(&self) -> Vec<String> {
@@ -91,7 +92,7 @@ impl Plugin for ProviderPlugin {
 
     fn apply(&mut self, ctx: &mut Context<'_>) -> Result<(), PluginError> {
         let providers = ctx.service::<Providers>(PROVIDERS)?;
-        providers.register(ctx, self.name.clone(), Arc::clone(&self.provider))?;
+        providers.register(ctx, self.registered_as.clone(), Arc::clone(&self.provider))?;
         if self.models.is_empty() {
             return Ok(());
         }

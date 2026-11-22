@@ -18,6 +18,7 @@ use crate::event::SessionId;
 
 /// The call a thread is serving.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Scope {
     /// The session the call belongs to.
     pub session: SessionId,
