@@ -28,7 +28,8 @@ use crate::compact::CompactOperation;
 use crate::gates::{GateOperation, SettleOperation, WaitOperation};
 use crate::provider::{DEFAULT_PROVIDER, PROVIDERS, Providers, Routed};
 use crate::session::{
-    Answer, Ask, Effect, Journal, MAIN, Progress, Session, SessionInfo, Sessions, Wait, ended,
+    Answer, Ask, Effect, Journal, MAIN, Progress, Session, SessionInfo, Sessions, Wait, blocks_of,
+    ended,
 };
 use crate::tools::{PluginTools, PromptOperation};
 
@@ -589,7 +590,7 @@ impl Harness {
     ///   taken from the log and the tool is not run again.
     /// - It never started: it runs now, like any other call.
     /// - It was started and nothing more is known: it is made again if its tool is
-    ///   [`replay_safe`](corduroy_core::ToolSpec::replay_safe). Otherwise it is answered
+    ///   [`replay_safe`](field@corduroy_core::ToolSpec::replay_safe). Otherwise it is answered
     ///   with an error saying it was interrupted, and the model decides what to do, as with
     ///   any other tool failure.
     ///
@@ -656,11 +657,12 @@ impl Harness {
                      safe to run twice. Check what it did before calling it again.",
                     call.name
                 ))]),
+                // The result as the tool returned it, images included, from the log.
                 Progress::Finished { ok: true, output } => {
-                    CallToolResult::success(vec![ContentBlock::text(output)])
+                    CallToolResult::success(blocks_of(&output))
                 }
                 Progress::Finished { ok: false, output } => {
-                    CallToolResult::error(vec![ContentBlock::text(output)])
+                    CallToolResult::error(blocks_of(&output))
                 }
             };
             results = results.with_tool_response(request.id.clone(), Ok(result));

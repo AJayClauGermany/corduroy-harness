@@ -42,7 +42,7 @@ node bin/corduroy-js.js build counter.js --out counter.wasm --capabilities state
 | --- | --- |
 | `name`, `version` | the plugin's name and version |
 | `activate(config)` | called with the parsed configuration when the plugin starts, and again after a trap |
-| `tools: { name: { description, input, readOnly, replaySafe, run(input) } }` | tools for the model; `run` returns text, or anything else as JSON |
+| `tools: { name: { description, input, readOnly, replaySafe, run(input) } }` | tools for the model; `run` returns text, anything else as JSON, or content blocks (below) |
 | `subscriptions`, `onEvent(event)` | events whose topic matches one of the globs |
 | `prompt()` | text for the system prompt, or `undefined` |
 | `gates: { 'tool/call': (request) => 'allow' \| { ask } \| { deny } }` | a gate; one that throws denies |
@@ -51,6 +51,34 @@ node bin/corduroy-js.js build counter.js --out counter.wasm --capabilities state
 Throw `ToolError(kind, message)` (`invalid-input`, `failed`, `denied`, `unknown-tool`) or
 `CallError(kind, message)` to choose the error; any other exception becomes `failed`, and a
 host call's `denied` keeps its kind.
+
+## Content blocks
+
+A tool's result is a list of content blocks, text or images. Whatever `run` returns is one
+block of text, unless it is a block made with `Content`, or a non-empty array of them:
+
+```js
+import { Content, definePlugin } from 'corduroy-plugin';
+
+export default definePlugin({
+  name: 'charts',
+  tools: {
+    chart: {
+      description: 'Draw the sales chart.',
+      run() {
+        return [Content.text('sales by month'), Content.image('image/png', drawPng())];
+      },
+    },
+  },
+});
+```
+
+`Content.image(mimeType, data)` takes the image's bytes (a `Uint8Array`, an `ArrayBuffer` or
+an array of numbers), not base64. An array of anything else is still JSON. A plugin that
+calls another tool through the `tools` capability gets its blocks, as
+`{ tag: 'text', val }` and `{ tag: 'image', val: { mimeType, data } }`;
+`Content.textOf(blocks)` is their text, with an image as a marker such as
+`[image: image/png, 1234 bytes]`.
 
 ## Capabilities
 

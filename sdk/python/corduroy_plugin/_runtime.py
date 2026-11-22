@@ -24,7 +24,7 @@ import time as _time  # noqa: E402
 from componentize_py_types import Err  # noqa: E402
 from wit_world.imports import types  # noqa: E402
 
-from corduroy_plugin import CallError, Plugin, ToolError  # noqa: E402
+from corduroy_plugin import CallError, Image, Plugin, Text, ToolError  # noqa: E402
 
 try:
     from wit_world.imports import log as _log
@@ -255,6 +255,28 @@ def _text(value) -> str:
     return value if isinstance(value, str) else json.dumps(value)
 
 
+# What a tool may return as a block: the SDK's own, or the host's, as `tools.call` gives them.
+_BLOCKS = (Text, Image, types.Content_Text, types.Content_Image)
+
+
+def _block(block):
+    if isinstance(block, Text):
+        return types.Content_Text(block.text)
+    if isinstance(block, Image):
+        return types.Content_Image(types.Image(mime_type=block.mime_type, data=bytes(block.data)))
+    return block
+
+
+def _content(value) -> list:
+    """What a tool returned, as the content blocks the host passes on: blocks as they are,
+    and anything else as one block of text. A list is a list of blocks only if it has
+    something in it and all of it is blocks; any other list is JSON, as it always was."""
+    blocks = list(value) if isinstance(value, (list, tuple)) else [value]
+    if blocks and all(isinstance(block, _BLOCKS) for block in blocks):
+        return [_block(block) for block in blocks]
+    return [types.Content_Text(_text(value))]
+
+
 def _verdict(answer):
     kind, reason = answer if isinstance(answer, tuple) else (answer, "")
     if kind == "allow":
@@ -306,7 +328,7 @@ def world_for(module):
                 provides=list(plugin.services),
             )
 
-        def call_tool(self, name: str, input: str) -> str:
+        def call_tool(self, name: str, input: str) -> list:
             tool = plugin.tools.get(name)
             if tool is None:
                 raise Err(types.ToolError_UnknownTool(name))
@@ -315,7 +337,7 @@ def world_for(module):
                     parsed = _parse(input)
                 except ValueError as error:
                     raise ToolError("invalid-input", str(error)) from None
-                return _text(tool.run(parsed))
+                return _content(tool.run(parsed))
             except BaseException as error:  # noqa: BLE001
                 raise _as_tool_error(error) from None
             finally:

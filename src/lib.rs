@@ -46,13 +46,8 @@
 //!
 //! // A native plugin that contributes the tool. Unloading it would take the tool away.
 //! harness.plugin(plugin_fn("shouter", &[TOOLS], |ctx| {
-//!     let spec = ToolSpec {
-//!         name: "shout".into(),
-//!         description: "Upper-case the input.".into(),
-//!         input_schema: r#"{"type":"object"}"#.into(),
-//!         replay_safe: true,
-//!         read_only: false,
-//!     };
+//!     let spec = ToolSpec::new("shout", "Upper-case the input.", r#"{"type":"object"}"#)
+//!         .replay_safe(true);
 //!     let tools = ctx.service::<Tools>(TOOLS)?;
 //!     tools.register(ctx, "shout", Arc::new(tool_fn(spec, |input| Ok(input.to_uppercase()))))?;
 //!     Ok(())

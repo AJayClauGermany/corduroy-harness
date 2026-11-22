@@ -5,7 +5,7 @@
 // `import { read } from 'corduroy:plugin/fs-read@0.1.0'`, and the plugin must be built with
 // each one it imports (`--capabilities fs-read,...`).
 
-export { CallError, ToolError } from './runtime.js';
+export { CallError, Content, ToolError } from './runtime.js';
 
 /** Returns `plugin` unchanged; it exists so editors can check the shape of a plugin. */
 export function definePlugin(plugin) {

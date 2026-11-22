@@ -67,7 +67,7 @@ fn testbed(grants: Vec<(&str, Scope)>) -> Result<WasmPlugin, Box<dyn Error>> {
 
 fn call(host: &Host, tool: &str, input: &Value) -> Result<Value, Box<dyn Error>> {
     Ok(serde_json::from_str(
-        &host.tools.call(tool, &input.to_string())?,
+        &host.tools.call(tool, &input.to_string())?.to_text(),
     )?)
 }
 

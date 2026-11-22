@@ -76,7 +76,7 @@ fn loader(runtime: &WasmRuntime, work: &Path) -> Result<WasmPlugin, Box<dyn Erro
 fn load(host: &Host, path: &Path, name: &str, grants: &Value) -> Result<Value, Box<dyn Error>> {
     let input = json!({"path": path, "name": name, "grants": grants});
     Ok(serde_json::from_str(
-        &host.tools.call("l.load", &input.to_string())?,
+        &host.tools.call("l.load", &input.to_string())?.to_text(),
     )?)
 }
 
@@ -161,7 +161,7 @@ fn protected_paths_are_out_of_reach_whatever_the_grant() {
         .tools
         .call("write", r#"{"path":"vault/new.txt","content":"x"}"#);
 
-    assert_eq!(notes.unwrap(), "fine");
+    assert_eq!(notes.unwrap().to_text(), "fine");
     assert!(
         matches!(&key, Err(ToolError::Denied(reason)) if reason.contains("protected by the host")),
         "{key:?}"
@@ -188,11 +188,11 @@ fn a_plugin_loads_children_with_no_more_than_it_holds() {
         .tools
         .call("read", &json!({"path": work.join("a.txt")}).to_string());
     let outside = host.tools.call("read", r#"{"path":"/etc/hostname"}"#);
-    assert_eq!(inside.unwrap(), "in reach");
+    assert_eq!(inside.unwrap().to_text(), "in reach");
     // It asked for every path, and got only those its loader can read.
     assert!(matches!(outside, Err(ToolError::Denied(_))), "{outside:?}");
     assert_eq!(
-        host.tools.call("l.loaded", "{}").unwrap(),
+        host.tools.call("l.loaded", "{}").unwrap().to_text(),
         r#"["child-tools"]"#
     );
 

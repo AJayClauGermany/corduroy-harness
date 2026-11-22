@@ -6,7 +6,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use corduroy_core::{App, FiberState, KERNELS, Kernels, Spawn, TOOLS, ToolError, Tools};
+use corduroy_core::{
+    App, Content, FiberState, KERNELS, Kernels, Spawn, TOOLS, ToolError, ToolOutput, Tools,
+};
 use corduroy_mcp::{Transport, mcp_server};
 use corduroy_shell::shell_kernel;
 
@@ -54,6 +56,7 @@ fn a_servers_tools_are_offered_under_its_name_and_called() {
         flags,
         [
             ("fixture__add", false, true),
+            ("fixture__chart", true, true),
             ("fixture__echo", true, true),
             ("fixture__fail", false, false),
             ("fixture__where", false, false),
@@ -62,14 +65,12 @@ fn a_servers_tools_are_offered_under_its_name_and_called() {
     assert!(specs[0].input_schema.contains("\"a\""));
 
     assert_eq!(
-        host.tools
-            .call("fixture__echo", r#"{"text":"hi"}"#)
-            .unwrap(),
-        "hi"
+        host.tools.call("fixture__echo", r#"{"text":"hi"}"#),
+        Ok(ToolOutput::text("hi"))
     );
     assert_eq!(
-        host.tools.call("fixture__add", r#"{"a":2,"b":3}"#).unwrap(),
-        "5"
+        host.tools.call("fixture__add", r#"{"a":2,"b":3}"#),
+        Ok(ToolOutput::text("5"))
     );
     assert_eq!(
         host.tools.call("fixture__fail", "{}"),
@@ -81,7 +82,17 @@ fn a_servers_tools_are_offered_under_its_name_and_called() {
     ));
     // Started by the kernel: in its directory, with the environment asked for.
     let place = host.tools.call("fixture__where", "{}").unwrap();
-    assert_eq!(place, format!("{} hello", dir.display()));
+    assert_eq!(place.to_text(), format!("{} hello", dir.display()));
+    // An image stays an image, its bytes decoded, where the server put it; text around it
+    // stays text, and text that follows text is one block.
+    assert_eq!(
+        host.tools.call("fixture__chart", "{}").unwrap().content(),
+        [
+            Content::text("sales by month"),
+            Content::image("image/png", *b"\x89PNG\r\n\x1a\n"),
+            Content::text("up in May\ndown in June"),
+        ]
+    );
 
     host.app.dispose(id).unwrap();
     assert_eq!(host.tools.specs(), []);

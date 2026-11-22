@@ -113,19 +113,19 @@ fn granted_tools_work_within_their_scope() {
             "write",
             r#"{"path":"notes/a.txt","content":"one\ntwo\nthree\n"}"#
         ),
-        Ok("Wrote 14 bytes to notes/a.txt".to_owned())
+        Ok("Wrote 14 bytes to notes/a.txt".into())
     );
     assert_eq!(
         host.tools.call(
             "edit",
             r#"{"path":"notes/a.txt","edits":[{"oldText":"two","newText":"2"}]}"#
         ),
-        Ok("Applied 1 edit(s) to notes/a.txt".to_owned())
+        Ok("Applied 1 edit(s) to notes/a.txt".into())
     );
     assert_eq!(
         host.tools
             .call("read", r#"{"path":"notes/a.txt","offset":2,"limit":1}"#),
-        Ok("2\n\n[Showing lines 2-2 of 3. Use offset=3 to continue.]".to_owned())
+        Ok("2\n\n[Showing lines 2-2 of 3. Use offset=3 to continue.]".into())
     );
     assert_eq!(
         fs::read_to_string(dir.join("notes/a.txt")).unwrap(),
@@ -154,11 +154,11 @@ fn bash_runs_in_a_kernel_that_keeps_its_state() {
             "bash",
             r#"{"command":"echo $answer in $(basename $(pwd))"}"#
         ),
-        Ok("42 in sub\n".to_owned())
+        Ok("42 in sub\n".into())
     );
     assert_eq!(
         host.tools.call("bash", r#"{"command":"echo oops; false"}"#),
-        Ok("oops\n[exit status 1]".to_owned())
+        Ok("oops\n[exit status 1]".into())
     );
 }
 
@@ -335,7 +335,9 @@ fn bytes_that_are_not_a_plugin_are_rejected() {
 
 /// The output of the testbed's `probe`, as JSON.
 fn probe(host: &Host) -> Result<serde_json::Value, Box<dyn Error>> {
-    Ok(serde_json::from_str(&host.tools.call("probe", "{}")?)?)
+    Ok(serde_json::from_str(
+        &host.tools.call("probe", "{}")?.to_text(),
+    )?)
 }
 
 #[test]
@@ -455,8 +457,8 @@ fn a_trapped_plugin_starts_again_from_fresh_memory_on_its_next_call() {
     let dir = scratch("restart");
     let mut host = host(&dir).unwrap();
     host.app.plugin(restartable(&dir, 3).unwrap());
-    assert_eq!(host.tools.call("count", "{}").unwrap(), "1");
-    assert_eq!(host.tools.call("count", "{}").unwrap(), "2");
+    assert_eq!(host.tools.call("count", "{}").unwrap().to_text(), "1");
+    assert_eq!(host.tools.call("count", "{}").unwrap().to_text(), "2");
 
     let trapped = host.tools.call("trap", "{}");
 
@@ -466,7 +468,7 @@ fn a_trapped_plugin_starts_again_from_fresh_memory_on_its_next_call() {
     );
     assert_eq!(topics(&host.app, "plugin/restarted").len(), 0);
     // The next call finds a new instance, with its registrations intact and its memory new.
-    assert_eq!(host.tools.call("count", "{}").unwrap(), "1");
+    assert_eq!(host.tools.call("count", "{}").unwrap().to_text(), "1");
     assert_eq!(
         topics(&host.app, "plugin/restarted"),
         [r#"{"plugin":"testbed","attempt":1}"#]
@@ -501,5 +503,5 @@ fn a_plugin_that_keeps_trapping_is_stopped_until_reloaded() {
 
     // Reloading applies the plugin afresh, with a new count of traps.
     host.app.reload(id).unwrap();
-    assert_eq!(host.tools.call("count", "{}").unwrap(), "1");
+    assert_eq!(host.tools.call("count", "{}").unwrap().to_text(), "1");
 }

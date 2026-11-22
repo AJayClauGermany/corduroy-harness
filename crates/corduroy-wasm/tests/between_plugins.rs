@@ -8,9 +8,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use corduroy_core::{
-    App, CallError, EventStream, FiberState, GATES, Gate, Gates, HTTP, HttpClients, KERNELS,
-    Kernels, MODELS, Models, PROMPTS, Pattern, Prompts, SECRETS, SERVICES, Scope, Secrets, Service,
-    Services, TOOLS, Tool, ToolSpec, Tools, Verdict, tool_fn,
+    App, CallError, Content, EventStream, FiberState, GATES, Gate, Gates, HTTP, HttpClients,
+    KERNELS, Kernels, MODELS, Models, PROMPTS, Pattern, Prompts, SECRETS, SERVICES, Scope, Secrets,
+    Service, Services, TOOLS, Tool, ToolSpec, Tools, Verdict, tool_fn,
 };
 use corduroy_test_support::{plugin, scratch};
 use corduroy_wasm::{Limits, WasmPlugin, WasmRuntime};
@@ -30,13 +30,9 @@ fn host(events: EventStream) -> Result<Host, Box<dyn Error>> {
     let gates = Arc::new(Gates::new());
     let services = Arc::new(Services::new());
     for (name, read_only) in [("peek", true), ("poke", false)] {
-        let spec = ToolSpec {
-            name: name.into(),
-            description: String::new(),
-            input_schema: r#"{"type":"object"}"#.into(),
-            replay_safe: true,
-            read_only,
-        };
+        let spec = ToolSpec::new(name, "", r#"{"type":"object"}"#)
+            .replay_safe(true)
+            .read_only(read_only);
         tools.insert(name, Arc::new(tool_fn(spec, move |_| Ok(name.to_owned()))))?;
     }
     let mut app = App::with_events(Arc::new(events));
@@ -86,7 +82,7 @@ fn testbed(
 /// Call the tool `tool` with `input` and parse what it returns.
 fn call(host: &Host, tool: &str, input: &Value) -> Result<Value, Box<dyn Error>> {
     Ok(serde_json::from_str(
-        &host.tools.call(tool, &input.to_string())?,
+        &host.tools.call(tool, &input.to_string())?.to_text(),
     )?)
 }
 
@@ -148,6 +144,104 @@ fn a_plugin_calls_tools_within_its_scope_and_through_the_gates() {
     let results = payloads(&host.app, "tool/result");
     assert_eq!(results[0]["output"], "peek");
     assert_eq!(results[1]["ok"], false);
+}
+
+/// The eight bytes every PNG file starts with. Not text, and not valid UTF-8.
+const PNG: [u8; 8] = [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
+
+#[test]
+fn a_plugins_tool_returns_an_image_as_a_content_block() {
+    let dir = scratch("plugin-picture");
+    let mut host = host(EventStream::new()).unwrap();
+    let scoped = [Scope::none(), Scope::none(), Scope::none()];
+    host.app
+        .plugin(testbed(&dir, "testbed", &json!({}), scoped).unwrap());
+
+    let picture = host.tools.call("picture", "{}").unwrap();
+    // Bytes of every value, to show that an image crosses the boundary as it is.
+    let every_byte: Vec<u8> = (0..=u8::MAX).collect();
+    let chosen = host
+        .tools
+        .call("picture", &json!({"bytes": every_byte}).to_string())
+        .unwrap();
+    let text = host.tools.call("count", "{}").unwrap();
+
+    assert_eq!(
+        picture.content(),
+        [
+            Content::text("a picture of 8 bytes"),
+            Content::image("image/png", PNG),
+        ]
+    );
+    assert_eq!(
+        picture.to_text(),
+        "a picture of 8 bytes\n[image: image/png, 8 bytes]"
+    );
+    assert_eq!(
+        chosen.content(),
+        [
+            Content::text("a picture of 256 bytes"),
+            Content::image("image/png", every_byte),
+        ]
+    );
+    // A tool that returns text returns one block of it.
+    assert_eq!(text.content(), [Content::text("1")]);
+    // Bad input to a tool that returns blocks is still that tool's error.
+    assert!(matches!(
+        host.tools.call("picture", "not json"),
+        Err(corduroy_core::ToolError::InvalidInput(_))
+    ));
+}
+
+#[test]
+fn a_plugin_that_calls_a_tool_receives_its_content_blocks() {
+    let dir = scratch("plugin-content");
+    let mut host = host(EventStream::new()).unwrap();
+    let spec = ToolSpec::new("snap", "", r#"{"type":"object"}"#).read_only(true);
+    let snap = tool_fn(spec, |_| {
+        Ok(vec![
+            Content::text("the view"),
+            Content::image("image/png", PNG),
+        ])
+    });
+    host.tools.insert("snap", Arc::new(snap)).unwrap();
+    let scoped = [
+        Scope::none().allow("snap").allow("peek"),
+        Scope::none(),
+        Scope::none(),
+    ];
+    host.app
+        .plugin(testbed(&dir, "testbed", &json!({}), scoped).unwrap());
+
+    let snapped = call(&host, "relay", &json!({"tool": "snap"})).unwrap();
+    let peeked = call(&host, "relay", &json!({"tool": "peek"})).unwrap();
+
+    // The testbed says what `tools.call` gave it, block by block: the image's bytes arrived.
+    assert_eq!(
+        snapped,
+        json!({
+            "ok": "the view\n[image: image/png, 8 bytes]",
+            "blocks": [["text", "the view"], ["image", "image/png", PNG]],
+        })
+    );
+    assert_eq!(peeked, json!({"ok": "peek"}));
+    // The host recorded each result: the image block by block, the text as it always was.
+    assert_eq!(
+        payloads(&host.app, "tool/result"),
+        [
+            json!({
+                "id": "plugin:testbed:1",
+                "tool": "snap",
+                "ok": true,
+                "output": "the view\n[image: image/png, 8 bytes]",
+                "content": [
+                    {"type": "text", "text": "the view"},
+                    {"type": "image", "mime_type": "image/png", "data": "iVBORw0KGgo="},
+                ],
+            }),
+            json!({"id": "plugin:testbed:2", "tool": "peek", "ok": true, "output": "peek"}),
+        ]
+    );
 }
 
 #[test]
@@ -246,7 +340,7 @@ fn a_plugin_is_never_called_back_while_it_runs() {
     assert_eq!(tool["error"], format!("ToolError::Failed({refused:?})"));
     assert_eq!(service["error"], format!("CallError::Failed({refused:?})"));
     // Refusing is not a trap: the instance is the same one, its count where it was.
-    assert_eq!(host.tools.call("count", "{}").unwrap(), "1");
+    assert_eq!(host.tools.call("count", "{}").unwrap().to_text(), "1");
     assert_eq!(payloads(&host.app, "plugin/trapped"), Vec::<Value>::new());
 }
 
@@ -407,13 +501,9 @@ fn hold() -> Hold {
     let (entered, on_entered) = mpsc::channel();
     let (release, on_release) = mpsc::channel::<()>();
     let (entered, on_release) = (Mutex::new(entered), Mutex::new(on_release));
-    let spec = ToolSpec {
-        name: "hold".into(),
-        description: String::new(),
-        input_schema: r#"{"type":"object"}"#.into(),
-        replay_safe: true,
-        read_only: true,
-    };
+    let spec = ToolSpec::new("hold", "", r#"{"type":"object"}"#)
+        .replay_safe(true)
+        .read_only(true);
     let tool = tool_fn(spec, move |_| {
         if let Ok(entered) = entered.lock() {
             entered.send(()).unwrap_or_default();
@@ -490,7 +580,7 @@ fn a_call_from_inside_a_plugin_waits_only_so_long_for_one_busy_elsewhere() {
         "{refused}"
     );
     assert!(waited >= Duration::from_millis(200), "{waited:?}");
-    assert_eq!(busy.join().unwrap().unwrap(), r#"{"ok":"held"}"#);
+    assert_eq!(busy.join().unwrap().unwrap().to_text(), r#"{"ok":"held"}"#);
     // Once alpha is free, the same call goes through.
     assert!(via(&host, "alpha", "echo", &json!("hi"))["ok"].is_string());
 }

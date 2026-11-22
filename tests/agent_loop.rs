@@ -24,13 +24,13 @@ use tokio_util::sync::CancellationToken;
 
 /// A native plugin contributing `add`, which sums the numbers in `{"terms": [...]}`.
 fn calculator(ctx: &mut Context<'_>) -> Result<(), PluginError> {
-    let spec = ToolSpec {
-        name: "add".into(),
-        description: "Sum a list of integers.".into(),
-        input_schema: r#"{"type":"object","properties":{"terms":{"type":"array"}}}"#.into(),
-        replay_safe: true,
-        read_only: true,
-    };
+    let spec = ToolSpec::new(
+        "add",
+        "Sum a list of integers.",
+        r#"{"type":"object","properties":{"terms":{"type":"array"}}}"#,
+    )
+    .replay_safe(true)
+    .read_only(true);
     let add = tool_fn(spec, |input| {
         let input: serde_json::Value = serde_json::from_str(input)
             .map_err(|error| ToolError::InvalidInput(error.to_string()))?;

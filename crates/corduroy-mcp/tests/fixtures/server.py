@@ -1,5 +1,6 @@
 """A small MCP server over standard input and output, for the tests: newline-delimited
-JSON-RPC, the handshake, tools/list and tools/call. Tools: echo (read-only), add, fail, where.
+JSON-RPC, the handshake, tools/list and tools/call. Tools: echo (read-only), add, fail, where,
+chart (text, an image, then two more texts).
 """
 
 import json
@@ -21,7 +22,16 @@ TOOLS = [
     },
     {"name": "fail", "description": "Always fails", "inputSchema": {"type": "object"}},
     {"name": "where", "description": "The working directory and GREETING", "inputSchema": {"type": "object"}},
+    {
+        "name": "chart",
+        "description": "A caption, a picture and two notes",
+        "inputSchema": {"type": "object"},
+        "annotations": {"readOnlyHint": True},
+    },
 ]
+
+# The eight bytes every PNG file starts with, in base64 as MCP carries images.
+PNG = "iVBORw0KGgo="
 
 
 def text(value, error=False):
@@ -52,6 +62,16 @@ def answer(message):
             return text("boom", error=True)
         if name == "where":
             return text(f"{os.getcwd()} {os.environ.get('GREETING', '')}")
+        if name == "chart":
+            return {
+                "content": [
+                    {"type": "text", "text": "sales by month"},
+                    {"type": "image", "data": PNG, "mimeType": "image/png"},
+                    {"type": "text", "text": "up in May"},
+                    {"type": "text", "text": "down in June"},
+                ],
+                "isError": False,
+            }
     raise KeyError(method)
 
 
