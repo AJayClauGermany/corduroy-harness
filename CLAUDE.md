@@ -15,7 +15,7 @@ oi-kit's state machine. `docs/design.md` explains where each idea comes from and
 | `crates/corduroy-wasm` | wasmtime host. Loads components built against `wit/corduroy.wit` as `Plugin`s; links only granted interfaces. |
 | `src/` (`corduroy-harness`) | Assembles the loop from oi-kit: `Harness` (sessions, `run_in`, `continue_run`, `answer`), `Journal` (one step's effects to one commit), `GateOperation`, `PluginTools`, the `Providers` registry and `provider` plugin (`src/provider.rs`), `ScriptedProvider`. Async (tokio). |
 | `wit/corduroy.wit` | The typed plugin boundary. Each imported interface is one capability. |
-| `plugins/` | **Separate workspace**, built for `wasm32-unknown-unknown`: `pi-tools` (read, write, edit, bash), `skills`, `approval` (a gate: permission modes) and `testbed` (for the host's tests only: host calls, loads, echoes and traps on demand). |
+| `plugins/` | **Separate workspace**, built for `wasm32-unknown-unknown`: `guest` (the `corduroy-guest` crate every Rust plugin builds on: bindings generated once, a `Plugin` trait with default exports, `export!`), `pi-tools` (read, write, edit, bash), `skills`, `approval` (a gate: permission modes) and `testbed` (for the host's tests only: host calls, loads, echoes and traps on demand). |
 | `crates/corduroy-test-support` | Test-only helpers: finds built plugins, makes scratch directories. |
 
 ## Commands
@@ -74,8 +74,10 @@ as design guidance, not noise.
   Keep crate-internal items either in a public module as `pub(crate)`, or in a private child
   module as `pub(super)` (see `crates/corduroy-wasm/src/plugin/`).
 - `plugins/` has its own, lighter lint table: the bindings `wit-bindgen` generates need
-  `unsafe` and are confined to a `mod bindings` with a documented `#[allow]`. Plugin code must
-  not panic: a panic is a trap that takes the instance down.
+  `unsafe` and are confined to `corduroy-guest`'s `mod bindings` with a documented `#[allow]`.
+  A Rust plugin implements `corduroy_guest::Plugin` and calls `corduroy_guest::export!`; it
+  does not generate bindings of its own. Plugin code must not panic: a panic is a trap that
+  takes the instance down.
 
 ## Architecture rules
 

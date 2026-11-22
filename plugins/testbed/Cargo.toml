@@ -15,5 +15,5 @@ crate-type = ["cdylib"]
 workspace = true
 
 [dependencies]
-wit-bindgen = { workspace = true }
+corduroy-guest = { workspace = true }
 serde_json = { workspace = true }

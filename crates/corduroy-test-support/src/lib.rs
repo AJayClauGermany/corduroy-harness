@@ -50,7 +50,7 @@ fn modified(path: &Path) -> Option<SystemTime> {
 /// # Panics
 ///
 /// Panics with instructions if the plugin has not been built, or was built before its
-/// sources or the WIT world last changed.
+/// crate, the guest crate or the WIT world last changed.
 #[must_use]
 pub fn plugin(name: &str) -> PathBuf {
     let root = root();
@@ -63,8 +63,13 @@ pub fn plugin(name: &str) -> PathBuf {
         built.is_some(),
         "plugin `{name}` is not built: run `cargo plugins` first"
     );
-    let sources =
-        newest(&root.join("plugins").join(name).join("src")).max(newest(&root.join("wit")));
+    // The plugin's own crate, the guest crate every plugin builds on, and the world.
+    let plugins = root.join("plugins");
+    let sources = [plugins.join(name), plugins.join("guest"), root.join("wit")]
+        .iter()
+        .map(|path| newest(path))
+        .max()
+        .unwrap_or(SystemTime::UNIX_EPOCH);
     assert!(
         built >= Some(sources),
         "plugin `{name}` is older than its sources: run `cargo plugins` again"

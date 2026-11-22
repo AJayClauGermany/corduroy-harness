@@ -651,8 +651,8 @@ the step it waits on is done.
    6 have landed: an SDK per language (bindings, `print` and clocks routed to host calls,
    exceptions as tool errors, a world generated from a capability list, the build flags),
    the script host as a shipped component, and one example plugin per language built in CI.
-   *Phase three, first part,* in this order: a shared Rust guest crate (the Rust plugins
-   each repeat the same bindings and stubs); the JavaScript SDK; the Python SDK; the script
+   *Phase three, first part,* in this order: a shared Rust guest crate (*done:*
+   `plugins/guest`, which every Rust plugin now builds on); the JavaScript SDK; the Python SDK; the script
    host; then CI builds the examples and the host loads them in its tests.
 9. Shipped plugins. *Phase three, second part,* aiming at a version that can be tried out
    with a real model:
@@ -694,13 +694,11 @@ the step it waits on is done.
   unaffected. A per-plugin queue of undelivered events would close the gap.
 - **Exports every guest must write.** Each export of the world is mandatory: the
   JavaScript and Python toolchains refuse to build a plugin without `gate`, and Rust's
-  bindings will not compile. Plugins that guard nothing carry a stub. The guest SDKs should
-  supply defaults, or generate the world without exports a plugin does not use.
+  bindings will not compile. For Rust, `corduroy-guest` supplies a default for every export
+  but `activate` (a gate that is asked anyway denies); the JavaScript and Python SDKs must
+  do the same.
 - **Blocking.** Tool calls run on blocking threads, but event listeners run inline on the
   thread that emitted, including inside the async loop. Slow listeners would need a queue.
-- **Guest SDK.** Each plugin repeats the same `generate!` and error-mapping boilerplate; a
-  small shared guest crate would remove it. For JavaScript and Python an SDK is required
-  rather than nice to have (see [Guest languages](guest-languages.md)).
 - **Durable loads.** Plugins loaded by a plugin are not reloaded after a restart unless their
   loader does it. A plugin store (components by hash, with the grants they were loaded with)
   would let the host do it, and is also where grant files come in.

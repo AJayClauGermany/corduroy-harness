@@ -121,6 +121,10 @@ fn a_plugin_calls_tools_within_its_scope_and_through_the_gates() {
     host.app
         .plugin(testbed(&dir, "testbed", &json!({}), scoped).unwrap());
 
+    // Listing leaves out what the scope does not reach, the plugin's own tools included.
+    let listed = call(&host, "tools", &json!({})).unwrap();
+    assert_eq!(listed, json!(["peek", "poke"]));
+
     let peeked = call(&host, "relay", &json!({"tool": "peek"})).unwrap();
     let poked = call(&host, "relay", &json!({"tool": "poke"})).unwrap();
     let outside = call(&host, "relay", &json!({"tool": "count"})).unwrap();

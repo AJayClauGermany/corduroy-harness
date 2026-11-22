@@ -94,6 +94,7 @@ demo drive the loop with a scripted provider.
 | `crates/corduroy-wasm` | wasmtime host that loads components as capability-gated plugins |
 | `src/` | `corduroy-harness`: the agent loop assembled from oi-kit, journaled to the event stream one commit per step; sessions, continuing an interrupted run, waiting for a person, and the model as a service |
 | `wit/corduroy.wit` | The plugin world: host capabilities in, tools / event handlers / prompt text out |
+| `plugins/guest` | `corduroy-guest`: write a plugin in Rust by implementing one trait |
 | `plugins/pi-tools` | read, write, edit, and bash on a persistent kernel |
 | `plugins/skills` | Agent-written `SKILL.md` files with a prompt index and a review nudge |
 | `plugins/approval` | A gate: permission modes with allow and deny lists |
