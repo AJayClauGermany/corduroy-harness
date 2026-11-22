@@ -1,16 +1,28 @@
 //! Assembling the pieces into an agent, and the loop that runs it.
 
-use std::collections::BTreeMap;
-use std::error::Error;
-use std::fmt;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use alloc::borrow::ToOwned;
+use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::error::Error;
+use core::fmt;
+#[cfg(feature = "std")]
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use corduroy_core::call::Serve;
+use corduroy_core::sync::Lock;
 use corduroy_core::{
-    App, ContextError, EventStream, FiberId, GATES, Gates, HTTP, HttpClients, KERNELS, Kernels,
-    LogError, MODELS, Message, Models, PROMPTS, Plugin, Prompts, Registry, Role, SECRETS, SERVICES,
-    Secrets, Services, SessionId, TOOLS, ToolResult, Tools,
+    App, ContextError, EventStream, FiberId, GATES, Gates, HTTP, HttpClients, LogError, MODELS,
+    Message, Models, PROMPTS, Plugin, Prompts, Registry, Role, SECRETS, SERVICES, Secrets,
+    Services, SessionId, TOOLS, ToolResult, Tools,
 };
+#[cfg(feature = "std")]
+use corduroy_core::{KERNELS, Kernels};
 
 use crate::children::{SESSIONS, SessionsService};
 use crate::compact::CompactOperation;
@@ -203,16 +215,20 @@ enum Turn {
 /// It starts with the session [`MAIN`], which [`run`](Self::run) uses.
 ///
 /// The harness itself does very little. It provides the registries plugins contribute to
-/// ([`Tools`], [`Prompts`], [`Kernels`], [`Gates`], [`Services`], [`Providers`], [`Models`],
+/// ([`Tools`], [`Prompts`], [`Kernels`](corduroy_core::Kernels) with `std`, [`Gates`], [`Services`], [`Providers`], [`Models`],
 /// [`Secrets`], [`HttpClients`], [`Operations`]), journals the conversation to the event
 /// stream, and runs the loop: the operations, compaction, the gates, the tools, the turn
 /// limit and the model, in that order, at every step.
 pub struct Harness {
     /// Shared with the step that applies changes plugins asked for while the loop runs.
+    #[cfg(feature = "std")]
     app: Arc<Mutex<App>>,
+    #[cfg(not(feature = "std"))]
+    app: Arc<Lock<App>>,
     events: Arc<EventStream>,
     tools: Arc<Tools>,
     prompts: Arc<Prompts>,
+    #[cfg(feature = "std")]
     kernels: Arc<Kernels>,
     gates: Arc<Gates>,
     services: Arc<Services>,
@@ -232,13 +248,12 @@ pub struct Harness {
     /// Steps plugins registered, tried next and in name order.
     contributed: Arc<Operations>,
     /// The sessions being run now, each with what stops it.
-    running: Mutex<BTreeMap<SessionId, Stop>>,
+    running: Lock<BTreeMap<SessionId, Stop>>,
 }
 
 impl fmt::Debug for Harness {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Harness")
-            .field("app", &self.app)
             .field("tools", &self.tools)
             .field("provider", &self.provider)
             .field("model", &self.model)
@@ -249,16 +264,14 @@ impl fmt::Debug for Harness {
 
 /// While alive, the session it names is being run, and [`Harness::stop`] reaches it.
 struct Running<'harness> {
-    running: &'harness Mutex<BTreeMap<SessionId, Stop>>,
+    running: &'harness Lock<BTreeMap<SessionId, Stop>>,
     session: SessionId,
 }
 
 impl Drop for Running<'_> {
     fn drop(&mut self) {
-        self.running
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&self.session);
+        let stop = self.running.with(|running| running.remove(&self.session));
+        drop(stop);
     }
 }
 
@@ -309,6 +322,7 @@ impl Harness {
         let sessions = Arc::new(Sessions::load(Arc::clone(&events))?);
         let tools = Arc::new(Tools::new());
         let prompts = Arc::new(Prompts::new());
+        #[cfg(feature = "std")]
         let kernels = Arc::new(Kernels::new());
         let gates = Arc::new(Gates::new());
         let services = Arc::new(Services::new());
@@ -320,6 +334,7 @@ impl Harness {
         let mut app = App::with_events(Arc::clone(&events));
         app.provide(TOOLS, Arc::clone(&tools))?;
         app.provide(PROMPTS, Arc::clone(&prompts))?;
+        #[cfg(feature = "std")]
         app.provide(KERNELS, Arc::clone(&kernels))?;
         app.provide(GATES, Arc::clone(&gates))?;
         app.provide(SERVICES, Arc::clone(&services))?;
@@ -335,10 +350,14 @@ impl Harness {
             .insert(SESSIONS, children)
             .map_err(|duplicate| HarnessError::Run(duplicate.to_string()))?;
         Ok(Self {
+            #[cfg(feature = "std")]
             app: Arc::new(Mutex::new(app)),
+            #[cfg(not(feature = "std"))]
+            app: Arc::new(Lock::new(app)),
             events,
             tools,
             prompts,
+            #[cfg(feature = "std")]
             kernels,
             gates,
             services,
@@ -354,7 +373,7 @@ impl Harness {
             restart_limit: 5,
             operations: Vec::new(),
             contributed,
-            running: Mutex::new(BTreeMap::new()),
+            running: Lock::new(BTreeMap::new()),
         })
     }
 
@@ -410,14 +429,29 @@ impl Harness {
 
     /// Load a plugin.
     pub fn plugin(&self, plugin: impl Plugin + 'static) -> FiberId {
-        self.app().plugin(plugin)
+        self.with_app(|app| app.plugin(plugin))
     }
 
     /// The plugin tree, for unloading and reloading plugins. Changes plugins ask for through
     /// [`Requests`](corduroy_core::Requests) are applied before each step of the loop, and by
     /// any change made here.
+    #[cfg(feature = "std")]
     pub fn app(&self) -> MutexGuard<'_, App> {
         self.app.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Run `work` with the plugin tree, as [`app`](Self::app) does, in a build with or
+    /// without the standard library. Without it the tree is held in a critical section, so
+    /// keep `work` short.
+    pub fn with_app<R>(&self, work: impl FnOnce(&mut App) -> R) -> R {
+        #[cfg(feature = "std")]
+        {
+            work(&mut self.app())
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            self.app.with(work)
+        }
     }
 
     /// The stream every event of this harness is recorded on.
@@ -432,7 +466,8 @@ impl Harness {
         &self.tools
     }
 
-    /// The kernels plugins have registered.
+    /// The kernels plugins have registered. Kernels need the `std` feature.
+    #[cfg(feature = "std")]
     #[must_use]
     pub const fn kernels(&self) -> &Arc<Kernels> {
         &self.kernels
@@ -566,7 +601,7 @@ impl Harness {
     /// [`HarnessError::Log`] if the stop could not be recorded.
     pub fn stop(&self, session: &SessionId) -> Result<bool, HarnessError> {
         let journal = self.journal(session)?;
-        let running = self.running_now().get(session).cloned();
+        let running = self.running.with(|running| running.get(session).cloned());
         if let Some(stop) = running {
             journal.stop_asked()?;
             stop.ask();
@@ -615,7 +650,10 @@ impl Harness {
     /// As [`run_in`](Self::run_in).
     pub async fn step(&self, session: &SessionId) -> Result<Stepped, HarnessError> {
         let journal = self.journal(session)?;
-        let stop = self.running_now().get(session).cloned().unwrap_or_default();
+        let stop = self
+            .running
+            .with(|running| running.get(session).cloned())
+            .unwrap_or_default();
         Ok(match self.step_once(&journal, &stop).await? {
             Turn::Applied(name) => Stepped::Applied(name),
             Turn::Wait => Stepped::Stopped,
@@ -810,13 +848,12 @@ impl Harness {
             .is_some_and(|tool| tool.spec().replay_safe)
     }
 
-    fn running_now(&self) -> MutexGuard<'_, BTreeMap<SessionId, Stop>> {
-        self.running.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
     /// Note that `session` is being run, stopped by `stop`, until the guard is dropped.
     fn running_as(&self, session: &SessionId, stop: &Stop) -> Running<'_> {
-        self.running_now().insert(session.clone(), stop.clone());
+        let earlier = self
+            .running
+            .with(|running| running.insert(session.clone(), stop.clone()));
+        drop(earlier);
         Running {
             running: &self.running,
             session: session.clone(),
@@ -849,7 +886,7 @@ impl Harness {
     /// the model has answered; the turn limit; and the model.
     async fn step_once(&self, journal: &Arc<Journal>, stop: &Stop) -> Result<Turn, HarnessError> {
         // Plugins loaded or unloaded while the loop ran take effect before the next step.
-        self.app().apply_requests();
+        self.with_app(App::apply_requests);
         let session = journal.session();
         if stop.asked() {
             return self.stopped(journal);
@@ -955,10 +992,8 @@ impl Harness {
         )
         .with_tools(self.tools.specs());
         // A person stopping the run does not wait for the model to finish.
-        let reply = tokio::select! {
-            biased;
-            () = stop.asked_now() => return self.stopped(journal),
-            reply = provider.complete(&request) => reply,
+        let Some(reply) = stop.unless_asked(provider.complete(&request)).await else {
+            return self.stopped(journal);
         };
         match reply {
             Ok(reply) => {

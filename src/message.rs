@@ -5,7 +5,12 @@
 //! message type of its own hold (oi-kit's, with `content` where this has `parts`), so those
 //! logs can still be resumed and read.
 
-use anyhow::{Context as _, Result, bail};
+use alloc::borrow::ToOwned;
+use alloc::format;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::vec::Vec;
+use anyhow::{Context as _, Result, anyhow, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use corduroy_core::{Content, Message, Part, Role, ToolCall, ToolOutput, ToolResult};
@@ -82,7 +87,7 @@ pub fn decode_content(blocks: &[Value]) -> Result<ToolOutput> {
             Some("image") => {
                 let data = BASE64
                     .decode(text(block, "data"))
-                    .context("an image is not base64")?;
+                    .map_err(|_| anyhow!("an image is not base64"))?;
                 Ok(Content::image(text(block, "mime_type"), data))
             }
             Some(kind) if kind != "text" => Ok(Content::text(format!("[{kind} content]"))),
@@ -127,7 +132,7 @@ fn decode_part(part: &Value) -> Result<Option<Part>> {
             mime_type: text(part, "mime_type"),
             data: BASE64
                 .decode(text(part, "data"))
-                .context("an image is not base64")?,
+                .map_err(|_| anyhow!("an image is not base64"))?,
         },
         Some("thinking") => Part::Thinking {
             text: text(part, "text"),
@@ -180,7 +185,7 @@ mod legacy {
     use base64::Engine as _;
 
     use super::{BASE64, Content, Part, Result, ToolCall, ToolOutput, ToolResult};
-    use super::{Value, input_of, text};
+    use super::{ToOwned, Value, Vec, input_of, text};
 
     /// The part one block of an oi-kit message's `content` stands for, if it is one this
     /// harness keeps.
@@ -239,6 +244,7 @@ mod legacy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     #[test]
     fn a_message_round_trips_through_json() {

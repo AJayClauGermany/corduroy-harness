@@ -60,11 +60,18 @@
 //! [`Harness::continue_run`]: crate::Harness::continue_run
 //! [`Harness::answer`]: crate::Harness::answer
 
-use std::collections::BTreeMap;
-use std::collections::btree_map::Entry;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use alloc::borrow::ToOwned;
+use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
+use alloc::collections::btree_map::Entry;
+use alloc::format;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 
 use anyhow::{Context as _, Result};
+use corduroy_core::sync::Lock;
 use corduroy_core::{
     Decision, Draft, Event, EventId, EventStream, LogError, Message, Part, Pattern, Role,
     SessionId, Source, TOOL_CALL, ToolCall, ToolOutput, ToolResult, Verdict,
@@ -195,11 +202,11 @@ struct Known {
 /// of the loop can find the journal of the session it is working in.
 pub struct Sessions {
     events: Arc<EventStream>,
-    known: Mutex<BTreeMap<SessionId, Known>>,
+    known: Lock<BTreeMap<SessionId, Known>>,
 }
 
-impl std::fmt::Debug for Sessions {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for Sessions {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_tuple("Sessions").field(&self.list()).finish()
     }
 }
@@ -231,7 +238,7 @@ impl Sessions {
         }
         Ok(Self {
             events,
-            known: Mutex::new(known),
+            known: Lock::new(known),
         })
     }
 
@@ -266,35 +273,33 @@ impl Sessions {
             parent: parent.cloned(),
             task,
         };
-        let mut known = self.known();
-        if known.contains_key(&info.id) {
-            return Err(HarnessError::DuplicateSession(info.id));
-        }
-        if let Some(parent) = parent.filter(|parent| !known.contains_key(parent)) {
-            return Err(HarnessError::UnknownSession(parent.clone()));
-        }
-        // Stored while the table is locked, so two callers cannot both start the same id.
-        // A listener for `session/start` must therefore not come back to this table.
-        self.events.emit(info.start())?;
-        let id = info.id.clone();
-        known.insert(
-            id.clone(),
-            Known {
-                info,
-                journal: None,
-            },
-        );
-        drop(known);
-        Ok(id)
+        self.known.with(|known| {
+            if known.contains_key(&info.id) {
+                return Err(HarnessError::DuplicateSession(info.id));
+            }
+            if let Some(parent) = parent.filter(|parent| !known.contains_key(parent)) {
+                return Err(HarnessError::UnknownSession(parent.clone()));
+            }
+            // Stored while the table is locked, so two callers cannot both start the same id.
+            // A listener for `session/start` must therefore not come back to this table.
+            self.events.emit(info.start())?;
+            let id = info.id.clone();
+            known.insert(
+                id.clone(),
+                Known {
+                    info,
+                    journal: None,
+                },
+            );
+            Ok(id)
+        })
     }
 
     /// Every session, in order of id.
     #[must_use]
     pub fn list(&self) -> Vec<SessionInfo> {
-        self.known()
-            .values()
-            .map(|known| known.info.clone())
-            .collect()
+        self.known
+            .with(|known| known.values().map(|known| known.info.clone()).collect())
     }
 
     /// The journal of `session`, rebuilt from the stream the first time it is asked for.
@@ -304,21 +309,17 @@ impl Sessions {
     /// Returns [`HarnessError::UnknownSession`] if there is no such session, or
     /// [`HarnessError::Run`] if its events cannot be decoded.
     pub fn journal(&self, session: &SessionId) -> Result<Arc<Journal>, HarnessError> {
-        let mut known = self.known();
-        let entry = known
-            .get_mut(session)
-            .ok_or_else(|| HarnessError::UnknownSession(session.clone()))?;
-        if let Some(journal) = &entry.journal {
-            return Ok(Arc::clone(journal));
-        }
-        let journal = Arc::new(Journal::new(session.clone(), Arc::clone(&self.events))?);
-        entry.journal = Some(Arc::clone(&journal));
-        drop(known);
-        Ok(journal)
-    }
-
-    fn known(&self) -> MutexGuard<'_, BTreeMap<SessionId, Known>> {
-        self.known.lock().unwrap_or_else(PoisonError::into_inner)
+        self.known.with(|known| {
+            let entry = known
+                .get_mut(session)
+                .ok_or_else(|| HarnessError::UnknownSession(session.clone()))?;
+            if let Some(journal) = &entry.journal {
+                return Ok(Arc::clone(journal));
+            }
+            let journal = Arc::new(Journal::new(session.clone(), Arc::clone(&self.events))?);
+            entry.journal = Some(Arc::clone(&journal));
+            Ok(journal)
+        })
     }
 }
 
@@ -722,7 +723,7 @@ impl State {
         if !resolved {
             return;
         }
-        let messages = std::mem::take(&mut self.messages);
+        let messages = core::mem::take(&mut self.messages);
         self.messages = messages
             .into_iter()
             .map(|message| self.resolved(message))
@@ -943,14 +944,14 @@ fn note(call: &mut OpenCall, topic: &str, payload: &Value, output: Option<ToolOu
 pub struct Journal {
     id: SessionId,
     events: Arc<EventStream>,
-    state: Mutex<State>,
+    state: Lock<State>,
 }
 
-impl std::fmt::Debug for Journal {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for Journal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Journal")
             .field("id", &self.id)
-            .field("messages", &self.state().messages.len())
+            .field("messages", &self.state(|state| state.messages.len()))
             .finish_non_exhaustive()
     }
 }
@@ -971,14 +972,14 @@ impl Journal {
         Ok(Self {
             id,
             events,
-            state: Mutex::new(state),
+            state: Lock::new(state),
         })
     }
 
     /// The session as it stands.
     #[must_use]
     pub fn session(&self) -> Session {
-        self.state().session(&self.id)
+        self.state(|state| state.session(&self.id))
     }
 
     /// The session this journal records.
@@ -1081,7 +1082,7 @@ impl Journal {
             match part {
                 Part::ToolCall(call) => batch.call(call, recorded),
                 Part::ToolResult(result) => {
-                    let open = self.state().calls.get(&result.id).cloned();
+                    let open = self.state(|state| state.calls.get(&result.id).cloned());
                     batch.result(result, open, recorded);
                 }
                 _ => {}
@@ -1093,8 +1094,7 @@ impl Journal {
     /// What a compaction could summarise now: the messages the model sees from before the
     /// current turn began. `None` if there is nothing but an earlier summary, or no turn yet.
     pub(crate) fn compactable(&self) -> Option<Compactable> {
-        let state = self.state();
-        let view = state.model_view();
+        let (view, input_tokens) = self.state(|state| (state.model_view(), state.input_tokens));
         // The turn began with the last message a person wrote that the model still sees.
         let kickoff = view.iter().rposition(|(id, message)| {
             id.is_some() && message.role == Role::User && !message.is_tool_results()
@@ -1106,7 +1106,7 @@ impl Journal {
         }
         Some(Compactable {
             keep_from: view.get(kickoff)?.0?,
-            input_tokens: state.input_tokens,
+            input_tokens,
             messages: earlier.len(),
         })
     }
@@ -1114,7 +1114,7 @@ impl Journal {
     /// The messages the model sees from before `keep_from`, as text for a summariser: who
     /// said what, and which tools were called. Built only once a compaction is due.
     pub(crate) fn transcript_before(&self, keep_from: EventId) -> String {
-        let view = self.state().model_view();
+        let view = self.state(|state| state.model_view());
         let earlier: Vec<&Message> = view
             .iter()
             .take_while(|(id, _)| *id != Some(keep_from))
@@ -1127,17 +1127,17 @@ impl Journal {
     /// going, or it was interrupted.
     #[must_use]
     pub fn unfinished(&self) -> bool {
-        self.state().unfinished
+        self.state(|state| state.unfinished)
     }
 
     /// How the last run ended, if it recorded that.
     pub(crate) fn ended(&self) -> Option<End> {
-        self.state().ended.clone()
+        self.state(|state| state.ended.clone())
     }
 
     /// How far the log says the unanswered tool call `call` got.
     pub(crate) fn progress(&self, call: &str) -> Progress {
-        match self.state().calls.get(call) {
+        self.state(|state| match state.calls.get(call) {
             Some(OpenCall {
                 result: Some((ok, output)),
                 ..
@@ -1147,40 +1147,39 @@ impl Journal {
             },
             Some(OpenCall { started: true, .. }) => Progress::Started,
             _ => Progress::NotStarted,
-        }
+        })
     }
 
     /// What the gates decided about the unanswered tool call `call`, if they were asked.
     pub(crate) fn gated(&self, call: &str) -> Option<Gated> {
-        self.state()
-            .calls
-            .get(call)
-            .and_then(|open| open.gated.clone())
+        self.state(|state| state.calls.get(call).and_then(|open| open.gated.clone()))
     }
 
     /// The tool calls a gate asked about that nobody has answered yet, in order of id. While
     /// there are any, the run is waiting and goes no further.
     #[must_use]
     pub fn waiting(&self) -> Vec<Ask> {
-        self.state()
-            .calls
-            .iter()
-            .filter_map(|(call, open)| match &open.gated {
-                Some(Gated {
-                    verdict: Verdict::Ask(reason),
-                    gate,
-                    answer: None,
-                }) => Some(Ask {
-                    session: self.id.clone(),
-                    call: call.clone(),
-                    tool: open.tool.clone(),
-                    input: open.input.clone(),
-                    reason: reason.clone(),
-                    gate: gate.clone(),
-                }),
-                _ => None,
-            })
-            .collect()
+        self.state(|state| {
+            state
+                .calls
+                .iter()
+                .filter_map(|(call, open)| match &open.gated {
+                    Some(Gated {
+                        verdict: Verdict::Ask(reason),
+                        gate,
+                        answer: None,
+                    }) => Some(Ask {
+                        session: self.id.clone(),
+                        call: call.clone(),
+                        tool: open.tool.clone(),
+                        input: open.input.clone(),
+                        reason: reason.clone(),
+                        gate: gate.clone(),
+                    }),
+                    _ => None,
+                })
+                .collect()
+        })
     }
 
     /// Record a person's answer to the gate that asked about `call`. Returns `false`, and
@@ -1196,14 +1195,15 @@ impl Journal {
         };
         let payload = json!({"id": call, "tool": tool, "allow": allow, "reason": reason});
         self.events.emit(draft.payload(payload.to_string()))?;
-        if let Some(gated) = self
-            .state()
-            .calls
-            .get_mut(call)
-            .and_then(|open| open.gated.as_mut())
-        {
-            gated.answer = Some(answer.clone());
-        }
+        self.state(|state| {
+            if let Some(gated) = state
+                .calls
+                .get_mut(call)
+                .and_then(|open| open.gated.as_mut())
+            {
+                gated.answer = Some(answer.clone());
+            }
+        });
         Ok(true)
     }
 
@@ -1213,9 +1213,11 @@ impl Journal {
         let (draft, tool) = self.about_call(call, Source::Host, "tool/start");
         self.events
             .emit(draft.payload(json!({"id": call, "tool": tool}).to_string()))?;
-        if let Some(open) = self.state().calls.get_mut(call) {
-            open.started = true;
-        }
+        self.state(|state| {
+            if let Some(open) = state.calls.get_mut(call) {
+                open.started = true;
+            }
+        });
         Ok(())
     }
 
@@ -1228,9 +1230,11 @@ impl Journal {
         let (draft, tool) = self.about_call(call, Source::Environment, "tool/result");
         let payload = result_payload(call, &tool, ok, output);
         self.events.emit(draft.payload(payload.to_string()))?;
-        if let Some(open) = self.state().calls.get_mut(call) {
-            open.result = Some((ok, output.clone()));
-        }
+        self.state(|state| {
+            if let Some(open) = state.calls.get_mut(call) {
+                open.result = Some((ok, output.clone()));
+            }
+        });
         Ok(())
     }
 
@@ -1240,7 +1244,7 @@ impl Journal {
         let (draft, tool) = self.about_call(call, Source::Host, TOOL_WAIT);
         let payload = json!({"id": call, "tool": tool, "signal": signal});
         self.events.emit(draft.payload(payload.to_string()))?;
-        self.state().wait(call, &tool, signal);
+        self.state(|state| state.wait(call, &tool, signal));
         Ok(placeholder(signal))
     }
 
@@ -1259,32 +1263,40 @@ impl Journal {
             .session(self.id.clone())
             .payload(json!({"name": name, "payload": payload}).to_string());
         self.events.emit(draft)?;
-        self.state().resolve(name, payload);
+        self.state(|state| state.resolve(name, payload));
         Ok(true)
     }
 
     /// The tool calls of this session still waiting for their signal, in order of id.
     #[must_use]
     pub fn awaiting(&self) -> Vec<Wait> {
-        self.state()
-            .waits
-            .iter()
-            .filter(|(_, waited)| waited.payload.is_none())
-            .map(|(call, waited)| Wait {
-                session: self.id.clone(),
-                call: call.clone(),
-                tool: waited.tool.clone(),
-                signal: waited.signal.clone(),
-            })
-            .collect()
+        self.state(|state| {
+            state
+                .waits
+                .iter()
+                .filter(|(_, waited)| waited.payload.is_none())
+                .map(|(call, waited)| Wait {
+                    session: self.id.clone(),
+                    call: call.clone(),
+                    tool: waited.tool.clone(),
+                    signal: waited.signal.clone(),
+                })
+                .collect()
+        })
     }
 
     /// An event of this session on `topic` caused by the open tool call `call`, and the name
     /// of the call's tool.
     fn about_call(&self, call: &str, source: Source, topic: &str) -> (Draft, String) {
         let draft = Draft::new(source, topic).session(self.id.clone());
-        match self.state().calls.get(call) {
-            Some(open) => (draft.cause(open.event), open.tool.clone()),
+        let open = self.state(|state| {
+            state
+                .calls
+                .get(call)
+                .map(|open| (open.event, open.tool.clone()))
+        });
+        match open {
+            Some((event, tool)) => (draft.cause(event), tool),
             None => (draft, String::new()),
         }
     }
@@ -1304,42 +1316,53 @@ impl Journal {
             .session(self.id.clone())
             .payload(end.payload().to_string());
         self.events.emit(draft)?;
-        let mut state = self.state();
-        (state.unfinished, state.restarts) = (false, 0);
-        state.ended = Some(end.clone());
-        drop(state);
+        self.state(|state| {
+            (state.unfinished, state.restarts) = (false, 0);
+            state.ended = Some(end.clone());
+        });
         Ok(())
     }
 
     /// Record that the unfinished run is being picked up again. Returns how many times that
     /// has now happened.
     pub(crate) fn restart(&self) -> Result<u32> {
-        let attempt = self.state().restarts.saturating_add(1);
+        let attempt = self.state(|state| state.restarts.saturating_add(1));
         let draft = Draft::new(Source::Host, RESTART)
             .session(self.id.clone())
             .payload(json!({"attempt": attempt}).to_string());
         self.events.emit(draft)?;
-        self.state().restarts = attempt;
+        self.state(|state| state.restarts = attempt);
         Ok(attempt)
     }
 
     /// Store `batch` as one commit of this session, then bring the projection up to date.
-    fn commit(&self, batch: Batch) -> Result<Vec<EventId>> {
-        let drafts = batch
-            .drafts
+    fn commit(&self, mut batch: Batch) -> Result<Vec<EventId>> {
+        let drafts = core::mem::take(&mut batch.drafts)
             .into_iter()
             .map(|draft| draft.session(self.id.clone()));
         let ids = self.events.commit(drafts)?;
-        let mut state = self.state();
+        self.state(|state| state.catch_up(&ids, batch));
+        Ok(ids)
+    }
+
+    /// Run `work` with the projection, holding its lock until it returns.
+    fn state<R>(&self, work: impl FnOnce(&mut State) -> R) -> R {
+        self.state.with(work)
+    }
+}
+
+impl State {
+    /// Bring the projection up to date with a batch committed as `ids`.
+    fn catch_up(&mut self, ids: &[EventId], batch: Batch) {
         for (position, message) in batch.messages {
             if let Some(id) = ids.get(position).copied() {
-                state.push(id, message);
+                self.push(id, message);
             }
         }
         for (position, summary, keep_from) in batch.compactions {
             if ids.get(position).is_some() {
-                state.compaction = Some((summary, keep_from));
-                state.input_tokens = 0;
+                self.compaction = Some((summary, keep_from));
+                self.input_tokens = 0;
             }
         }
         for (call, (position, tool, input)) in batch.opened {
@@ -1354,25 +1377,19 @@ impl Journal {
                 started: false,
                 result: None,
             };
-            state.calls.insert(call, open);
+            self.calls.insert(call, open);
         }
         for (call, gated) in batch.gated {
-            if let Some(open) = state.calls.get_mut(&call) {
+            if let Some(open) = self.calls.get_mut(&call) {
                 open.gated = Some(gated);
             }
         }
         for call in batch.closed {
-            state.calls.remove(&call);
+            self.calls.remove(&call);
         }
         if let Some(tokens) = batch.input_tokens {
-            state.input_tokens = tokens;
+            self.input_tokens = tokens;
         }
-        drop(state);
-        Ok(ids)
-    }
-
-    fn state(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -1465,6 +1482,8 @@ fn recorded_output(id: EventId, payload: &Value) -> Result<ToolOutput> {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
+
     use corduroy_core::Content;
 
     use super::*;

@@ -16,7 +16,11 @@
 //! the projection hides the summarised messages from the model and puts the summary in their
 //! place (see [`session`](crate::session)). With no such service, nothing happens.
 
-use std::sync::Arc;
+use alloc::borrow::ToOwned;
+use alloc::boxed::Box;
+use alloc::string::ToString;
+use alloc::sync::Arc;
+use alloc::vec;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -25,6 +29,7 @@ use serde_json::{Value, json};
 
 use crate::operation::{Next, Operation};
 use crate::session::{COMPACTION, Effect, Session, Sessions};
+use crate::tools::blocking;
 
 /// The step that asks the [`COMPACTION`] service whether to summarise the start of the
 /// conversation, and records the summary if so.
@@ -42,15 +47,13 @@ impl CompactOperation {
     }
 }
 
-/// Call `method` of the compaction service on a blocking thread, since it may ask a model.
+/// Call `method` of the compaction service as blocking work, since it may ask a model.
 async fn ask(services: &Arc<Services>, method: &'static str, payload: Value) -> Option<Value> {
     let services = Arc::clone(services);
-    let answer = tokio::task::spawn_blocking(move || {
-        services.call("host", COMPACTION, method, &payload.to_string())
-    })
-    .await
-    .ok()?
-    .ok()?;
+    let answer = blocking(move || services.call("host", COMPACTION, method, &payload.to_string()))
+        .await
+        .ok()?
+        .ok()?;
     serde_json::from_str(&answer).ok()
 }
 

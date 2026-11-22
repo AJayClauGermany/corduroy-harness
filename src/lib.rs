@@ -33,6 +33,16 @@
 //! `corduroy-providers`; [`scripted`] has one that replays a script, for tests. A run can be
 //! stopped from another task with [`Harness::stop`].
 //!
+//! # Without the standard library
+//!
+//! Like the core, the harness is `no_std` and needs only an allocator; the `std` feature (on
+//! by default) adds the standard library, and without it the `critical-section` feature gives
+//! the locks. The loop needs no particular executor: it is plain `async`, and a stop wakes it
+//! through the waker it left. The `tokio` feature (on by default) runs each tool call on
+//! tokio's blocking pool when the loop runs on a tokio runtime; without it, or on another
+//! executor, a tool runs where the loop does. The add-on host, the shell kernel and the file
+//! log (`wasm`, `shell`, `jsonl`) need the standard library.
+//!
 //! ```
 //! use std::sync::Arc;
 //! use corduroy_harness::scripted::{ScriptedProvider, call, say};
@@ -64,10 +74,15 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+#![no_std]
 #![expect(
     clippy::multiple_crate_versions,
     reason = "the wasmtime dependency tree pulls several versions of shared crates"
 )]
+
+extern crate alloc;
+#[cfg(any(feature = "std", test))]
+extern crate std;
 
 pub mod children;
 pub mod compact;

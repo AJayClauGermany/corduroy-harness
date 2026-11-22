@@ -16,7 +16,12 @@
 //! A WebAssembly plugin reaches it through the `service` capability scoped to `sessions`;
 //! the `subagents` plugin offers it to the model as `delegate`.
 
-use std::sync::Arc;
+use alloc::borrow::ToOwned;
+use alloc::format;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 
 use corduroy_core::{CallError, Service, SessionId};
 use serde_json::{Value, json};

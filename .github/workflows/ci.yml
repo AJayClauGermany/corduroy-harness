@@ -39,9 +39,11 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo fmt --manifest-path plugins/Cargo.toml --all -- --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
-      # The core without the standard library, and the harness without its default features.
+      # The core and the loop without the standard library, and the harness without its
+      # default features.
       - run: cargo clippy -p corduroy-core --no-default-features --features critical-section --target thumbv7em-none-eabihf -- -D warnings
-      - run: cargo clippy -p corduroy-harness --all-targets --no-default-features -- -D warnings
+      - run: cargo clippy -p corduroy-harness --no-default-features --features critical-section --target thumbv7em-none-eabihf -- -D warnings
+      - run: cargo clippy -p corduroy-harness --all-targets --no-default-features --features std -- -D warnings
       - run: cargo clippy --manifest-path plugins/Cargo.toml --target wasm32-unknown-unknown -- -D warnings
       # The host tests load the plugins, so they are built first.
       - run: cargo plugins

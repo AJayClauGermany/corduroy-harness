@@ -11,18 +11,28 @@
 //! provider's business: `corduroy-providers` converts for the providers it builds, and
 //! [`ScriptedProvider`](crate::scripted::ScriptedProvider) needs no conversion at all.
 
-use std::error::Error;
-use std::fmt;
-use std::sync::Arc;
+use alloc::borrow::ToOwned;
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::String;
+#[cfg(feature = "tokio")]
+use alloc::string::ToString;
+use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::error::Error;
+use core::fmt;
+#[cfg(feature = "tokio")]
+use core::time::Duration;
+#[cfg(feature = "tokio")]
 use std::sync::mpsc;
+#[cfg(feature = "tokio")]
 use std::thread;
-use std::time::Duration;
 
 use async_trait::async_trait;
-use corduroy_core::{
-    Completion, Context, MODELS, Message, Model, ModelError, Models, Plugin, PluginError, Registry,
-    Role, ToolSpec,
-};
+#[cfg(feature = "tokio")]
+use corduroy_core::{Completion, Model, ModelError, Models, Role};
+use corduroy_core::{Context, MODELS, Message, Plugin, PluginError, Registry, ToolSpec};
 
 /// Name of the service under which the harness provides the [`Providers`] registry.
 pub const PROVIDERS: &str = "providers";
@@ -203,6 +213,10 @@ pub fn provider(name: impl Into<String>, provider: Arc<dyn Provider>) -> Provide
 impl ProviderPlugin {
     /// Also offer these models of the provider to plugins, each registered under its own name
     /// in the core's [`Models`] registry.
+    ///
+    /// A plugin asks a model synchronously and the provider answers asynchronously, so each
+    /// request runs on a thread and tokio runtime of its own: this needs the `tokio` feature.
+    #[cfg(feature = "tokio")]
     #[must_use]
     pub fn serving<S: Into<String>>(mut self, models: impl IntoIterator<Item = S>) -> Self {
         self.models.extend(models.into_iter().map(Into::into));
@@ -229,7 +243,9 @@ impl Plugin for ProviderPlugin {
         if self.models.is_empty() {
             return Ok(());
         }
+        #[cfg(feature = "tokio")]
         let models = ctx.service::<Models>(MODELS)?;
+        #[cfg(feature = "tokio")]
         for model in &self.models {
             let bridged: Arc<dyn Model> = Arc::new(Bridged {
                 provider: Arc::clone(&self.provider),
@@ -242,11 +258,13 @@ impl Plugin for ProviderPlugin {
 }
 
 /// One model of a provider, asked synchronously.
+#[cfg(feature = "tokio")]
 struct Bridged {
     provider: Arc<dyn Provider>,
     model: String,
 }
 
+#[cfg(feature = "tokio")]
 impl Model for Bridged {
     fn complete(&self, request: &Completion, timeout: Duration) -> Result<String, ModelError> {
         let messages: Vec<Message> = request

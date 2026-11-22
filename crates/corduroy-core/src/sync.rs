@@ -1,8 +1,9 @@
-//! How the core locks its own shared state: registries, the event stream, the plugin
-//! requests queue and, without `std`, the [call scope](crate::call).
+//! The lock for state shared between threads, in a crate that builds with or without `std`.
 //!
-//! Nothing here is public; this is what an embedder needs to know. With the `std` feature the
-//! lock is the standard library's mutex. Without it, it is a
+//! The core keeps its registries, its event stream, its plugin requests queue and, without
+//! `std`, the [call scope](crate::call) behind a [`Lock`]; the harness and extensions that
+//! build for a device as well as for a desktop use it for the same reason. With the `std`
+//! feature the lock is the standard library's mutex. Without it, it is a
 //! [critical section](https://docs.rs/critical-section): whoever builds for the device (its
 //! HAL, or the extension made for it) supplies the implementation, so the core itself needs no
 //! `unsafe` and no operating system. A critical section may mask interrupts. The core holds
@@ -11,17 +12,18 @@
 //! commit quickly or hand it on.
 //!
 //! The lock is not re-entrant: taking it again while it is held deadlocks with `std` and
-//! panics without it. The core never does.
+//! panics without it. Keep the work inside [`Lock::with`] short, and never call out of it
+//! into code that might take the same lock.
 
 #[cfg(not(feature = "std"))]
 use core::cell::RefCell;
-// With both features the standard library's lock wins; the dependency is still there.
 use core::fmt;
+// With both features the standard library's lock wins; the dependency is still there.
 #[cfg(all(feature = "std", feature = "critical-section"))]
 use critical_section as _;
 
 /// A value shared between threads, reached only inside [`with`](Self::with).
-pub(crate) struct Lock<T> {
+pub struct Lock<T> {
     #[cfg(feature = "std")]
     inner: std::sync::Mutex<T>,
     #[cfg(not(feature = "std"))]
@@ -30,7 +32,7 @@ pub(crate) struct Lock<T> {
 
 impl<T> Lock<T> {
     /// A lock holding `value`.
-    pub(crate) const fn new(value: T) -> Self {
+    pub const fn new(value: T) -> Self {
         Self {
             #[cfg(feature = "std")]
             inner: std::sync::Mutex::new(value),
@@ -41,7 +43,7 @@ impl<T> Lock<T> {
 
     /// Run `work` with the value, holding the lock until it returns.
     #[cfg(feature = "std")]
-    pub(crate) fn with<R>(&self, work: impl FnOnce(&mut T) -> R) -> R {
+    pub fn with<R>(&self, work: impl FnOnce(&mut T) -> R) -> R {
         // Every mutation the core makes under this lock completes before anything that could
         // panic runs, so a poisoned lock holds consistent state. Recover it.
         let mut value = self
@@ -53,7 +55,7 @@ impl<T> Lock<T> {
 
     /// Run `work` with the value, inside a critical section until it returns.
     #[cfg(not(feature = "std"))]
-    pub(crate) fn with<R>(&self, work: impl FnOnce(&mut T) -> R) -> R {
+    pub fn with<R>(&self, work: impl FnOnce(&mut T) -> R) -> R {
         critical_section::with(|section| work(&mut self.inner.borrow_ref_mut(section)))
     }
 }

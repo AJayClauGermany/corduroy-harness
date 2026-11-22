@@ -1,6 +1,10 @@
 //! Asking the gates before a tool call runs.
 
-use std::sync::Arc;
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::ToString;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 
 use anyhow::Result;
 use async_trait::async_trait;
