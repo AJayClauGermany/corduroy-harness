@@ -6,8 +6,8 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
+use corduroy_harness::core::Message;
 use corduroy_harness::core::{FiberId, Pattern, Scope, SessionId};
-use corduroy_harness::oi_kit_provider_types::conversation::message::Message;
 use corduroy_harness::scripted::{ScriptedProvider, call, say};
 use corduroy_harness::wasm::WasmRuntime;
 use corduroy_harness::{Answer, Harness, MAIN, Status, shell_kernel};
@@ -405,7 +405,7 @@ async fn a_plugin_loaded_during_a_run_is_there_for_the_next_step() {
     let dir = built.parent().unwrap().to_owned();
     let empty: Vec<serde_json::Value> = [
         "log", "clock", "random", "tools", "state", "service", "events", "llm", "secret", "http",
-        "log-read", "plugins",
+        "log-read", "plugins", "session",
     ]
     .iter()
     .map(|capability| json!({"capability": capability, "allow": [], "deny": []}))
@@ -430,7 +430,7 @@ async fn a_plugin_loaded_during_a_run_is_there_for_the_next_step() {
         .grant("fs-read", Scope::subtree(&dir.to_string_lossy()));
     for capability in [
         "log", "clock", "random", "tools", "state", "service", "events", "llm", "secret", "http",
-        "log-read",
+        "log-read", "session",
     ] {
         loader = loader.grant(capability, Scope::none());
     }

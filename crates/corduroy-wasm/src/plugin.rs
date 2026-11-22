@@ -6,9 +6,9 @@ use std::sync::{Arc, Mutex};
 
 use corduroy_core::{
     CallError, Context, ContextError, Draft, Event, EventStream, GATES, Gate, Gates, Grants, HTTP,
-    HttpClients, KERNELS, Kernels, MODELS, Models, PLUGIN_LOAD, POINTS, PROMPTS, Pattern, Plugin,
+    HttpClients, KERNELS, Kernels, MODELS, Models, PLUGIN_LOAD, PROMPTS, Pattern, Plugin,
     PluginError, PromptPart, Prompts, SECRETS, SERVICES, Scope, Secrets, Service, Services, Source,
-    TOOL_CALL, TOOLS, Tool, ToolError, ToolSpec, Tools, Verdict,
+    TOOL_CALL, TOOLS, Tool, ToolError, ToolOutput, ToolSpec, Tools, Verdict,
 };
 use serde_json::Value;
 use wasmtime::component::{Component, HasSelf, Linker};
@@ -22,7 +22,7 @@ mod paths;
 
 use bindings::corduroy::plugin::{
     clock, events, fs_read, fs_write, http, kernel, llm, log, log_read, plugins, random, secret,
-    service, state, tools, types,
+    service, session, state, tools, types,
 };
 use host::{HostState, Lent, Loader};
 use instance::{Blueprint, Instance};
@@ -32,9 +32,9 @@ const PACKAGE: &str = "corduroy:plugin/";
 
 /// The host interfaces that are capabilities, by the name they are granted under, in the
 /// order the WIT world imports them.
-pub const CAPABILITIES: [&str; 15] = [
+pub const CAPABILITIES: [&str; 16] = [
     "fs-read", "fs-write", "kernel", "events", "log", "clock", "random", "tools", "state",
-    "service", "plugins", "llm", "secret", "http", "log-read",
+    "service", "plugins", "llm", "secret", "http", "log-read", "session",
 ];
 
 /// The capabilities whose host functions reach a registry the host provides, and its name.
@@ -174,6 +174,7 @@ impl WasmPlugin {
                 "secret" => secret::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state),
                 "http" => http::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state),
                 "log-read" => log_read::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state),
+                "session" => session::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state),
                 _ => Ok(()),
             }
             .map_err(|error| link_error(&error))?;
@@ -290,13 +291,9 @@ impl Plugin for WasmPlugin {
             let name = spec.name.clone();
             let tool = WasmTool {
                 instance: Arc::clone(&instance),
-                spec: ToolSpec {
-                    name: spec.name,
-                    description: spec.description,
-                    input_schema: spec.input_schema,
-                    replay_safe: spec.replay_safe,
-                    read_only: spec.read_only,
-                },
+                spec: ToolSpec::new(spec.name, spec.description, spec.input_schema)
+                    .replay_safe(spec.replay_safe)
+                    .read_only(spec.read_only),
             };
             tools.register(ctx, name, Arc::new(tool))?;
         }
@@ -337,15 +334,14 @@ impl WasmPlugin {
         if points.is_empty() {
             return Ok(());
         }
-        if let Some(unknown) = points
-            .iter()
-            .find(|point| !POINTS.contains(&point.as_str()))
-        {
+        let gates = ctx.service::<Gates>(GATES)?;
+        // A gate for a point nobody asks at would guard nothing, and say nothing about it.
+        if let Some(unknown) = points.iter().find(|point| !gates.declared(point)) {
             return Err(PluginError::new(format!(
-                "plugin `{}` wants to gate `{unknown}`, which is not a decision point; \
-                 the points are: {}",
+                "plugin `{}` wants to gate `{unknown}`, which is not a declared decision \
+                 point; the points are: {}",
                 self.name,
-                POINTS.join(", ")
+                gates.points().join(", ")
             )));
         }
         // A plugin's own tool calls and loads pass the gates, so it would be asked about them
@@ -359,7 +355,6 @@ impl WasmPlugin {
                 )));
             }
         }
-        let gates = ctx.service::<Gates>(GATES)?;
         let gate: Arc<dyn Gate> = Arc::new(WasmGate {
             instance: Arc::clone(instance),
             points,
@@ -435,12 +430,21 @@ fn deliver(instance: &Instance, event: &Event) {
         return;
     }
     let cause = event.id;
+    let session = event.session.clone();
     let event = host::event_of(event);
     // A trap is already on the event stream as `plugin/trapped`; a listener has nobody to
     // return it to.
-    drop(instance.call_caused(Some(cause), |plugin, store| {
-        plugin.call_on_event(store, &event)
-    }));
+    let handle = || {
+        drop(instance.call_caused(Some(cause), |plugin, store| {
+            plugin.call_on_event(store, &event)
+        }));
+    };
+    // An event of a session is handled for that session: the plugin can ask which it is,
+    // and what it raises belongs to it.
+    match session {
+        Some(session) => drop(corduroy_core::call::Serve::session(session).run(handle)),
+        None => handle(),
+    }
 }
 
 struct WasmTool {
@@ -453,10 +457,11 @@ impl Tool for WasmTool {
         self.spec.clone()
     }
 
-    fn call(&self, input: &str) -> Result<String, ToolError> {
+    fn call(&self, input: &str) -> Result<ToolOutput, ToolError> {
         self.instance
             .call(|plugin, store| plugin.call_call_tool(store, &self.spec.name, input))
             .map_err(ToolError::Failed)?
+            .map(|blocks| blocks.into_iter().map(host::content_from).collect())
             .map_err(|error| match error {
                 types::ToolError::UnknownTool(name) => ToolError::UnknownTool(name),
                 types::ToolError::InvalidInput(reason) => ToolError::InvalidInput(reason),

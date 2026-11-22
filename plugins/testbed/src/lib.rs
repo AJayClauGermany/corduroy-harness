@@ -6,7 +6,8 @@
 //! | `probe` | Logs a line, reads both clocks and draws 16 random bytes; returns what each gave, or the error |
 //! | `count` | Adds one to a counter held in the instance's memory and returns it |
 //! | `trap` | Traps, which kills the instance |
-//! | `relay` | Calls a tool (`{"tool", "input"}`) or a service (`{"service", "method", "payload"}`) and returns what it gave, or the error |
+//! | `relay` | Calls a tool (`{"tool", "input"}`) or a service (`{"service", "method", "payload"}`) and returns what it gave, or the error. A tool's result that is not one block of text is also there block by block, as `blocks`: `["text", text]` and `["image", mime type, [bytes]]` |
+//! | `picture` | Returns a caption and a small image (`{"bytes": [..]}` to choose its bytes) as two content blocks |
 //! | `state` | `{"op": "get" \| "set" \| "remove" \| "keys", "key", "value"}` on its `state` store |
 //! | `load` | Loads a plugin: `{"path", "name", "config", "grants": [{"capability", "allow", "deny"}]}` |
 //! | `unload` | Unloads a plugin it loaded: `{"name"}` |
@@ -15,6 +16,7 @@
 //! | `fetch` | Makes an HTTP request: `{"method", "url", "body", "headers": [{"name", "text"} \| {"name", "secret"}]}`; returns `{"status", "body"}` |
 //! | `read` | Reads the event stream: `{"session", "topic", "after", "limit"}`; returns `[[id, session, topic]]` |
 //! | `tools` | Lists the tools its `tools` scope reaches, by name |
+//! | `session` | `{"current", "call", "stopping"}`: what `session` says about the call it serves |
 //!
 //! `state` with `"trap": true` traps after the operation, to show that a trapped call's writes
 //! are not kept.
@@ -25,7 +27,8 @@
 //! `{"gates": [..]}` names decision points to gate, which the host must refuse for
 //! `tool/call` and `plugin/load` since this plugin also imports `tools` and `plugins`; and
 //! `{"echo": {"on": "ping", "emit": "pong"}}` emits `pong` for every `ping` it sees, so that
-//! two instances can be set off against each other.
+//! two instances can be set off against each other; with `"session": true` the event it
+//! emits is `{"session"}`, the session it was told it serves while handling the event.
 
 use std::fmt::Write as _;
 use std::sync::OnceLock;
@@ -33,10 +36,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use corduroy_guest::host::log::Level;
 use corduroy_guest::host::{
-    clock, events, http, llm, log, log_read, plugins, random, secret, service, state, tools,
+    clock, events, http, llm, log, log_read, plugins, random, secret, service, session, state,
+    tools,
 };
 use corduroy_guest::{
-    CallError, Event, HostError, Plugin, PluginInfo, ServiceCall, ToolError, ToolSpec,
+    CallError, Content, Event, HostError, Plugin, PluginInfo, ServiceCall, ToolError, ToolSpec,
+    text_of,
 };
 use serde_json::{Value, json};
 
@@ -48,6 +53,9 @@ static PREFIX: OnceLock<String> = OnceLock::new();
 
 /// The topic to emit for every event this plugin is sent.
 static ECHO: OnceLock<String> = OnceLock::new();
+
+/// Whether the echo says which session it was handled for, instead of repeating the payload.
+static ECHO_SESSION: OnceLock<bool> = OnceLock::new();
 
 /// A host call's answer, or its error, as JSON.
 fn report<T: Into<Value>>(result: Result<T, HostError>) -> Value {
@@ -79,24 +87,62 @@ fn text<'a>(input: &'a Value, field: &str) -> &'a str {
     input.get(field).and_then(Value::as_str).unwrap_or_default()
 }
 
+/// What `picture` shows unless told otherwise: the eight bytes every PNG file starts with.
+const PNG: [u8; 8] = [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
+
+/// A caption and an image, as two content blocks.
+fn picture(input: &Value) -> Vec<Content> {
+    let bytes = input.get("bytes").and_then(Value::as_array).map_or_else(
+        || PNG.to_vec(),
+        |bytes| {
+            let bytes = bytes.iter().filter_map(Value::as_u64);
+            bytes.filter_map(|byte| u8::try_from(byte).ok()).collect()
+        },
+    );
+    vec![
+        Content::text(format!("a picture of {} bytes", bytes.len())),
+        Content::image("image/png", bytes),
+    ]
+}
+
+/// What a tool returned, for `relay` to pass on: its text, and each block as it arrived
+/// unless the result is one block of text.
+fn relayed(blocks: &[Content]) -> Value {
+    let mut said = json!({"ok": text_of(blocks)});
+    if !matches!(blocks, [Content::Text(_)]) {
+        let blocks: Vec<Value> = blocks
+            .iter()
+            .map(|block| match block {
+                Content::Text(text) => json!(["text", text]),
+                Content::Image(image) => json!(["image", image.mime_type, image.data]),
+            })
+            .collect();
+        if let Some(said) = said.as_object_mut() {
+            said.insert("blocks".to_owned(), Value::Array(blocks));
+        }
+    }
+    said
+}
+
 /// Make the tool or service call `input` describes, and say what came of it.
 fn relay(input: &Value) -> String {
     let outcome = if let Some(tool) = input.get("tool").and_then(Value::as_str) {
         let arguments = input.get("input").cloned().unwrap_or_else(|| json!({}));
-        tools::call(tool, &arguments.to_string()).map_err(|error| format!("{error:?}"))
+        tools::call(tool, &arguments.to_string())
+            .map(|blocks| relayed(&blocks))
+            .map_err(|error| format!("{error:?}"))
     } else {
         service::call(
             text(input, "service"),
             text(input, "method"),
             text(input, "payload"),
         )
+        .map(|output| json!({"ok": output}))
         .map_err(|error| format!("{error:?}"))
     };
-    match outcome {
-        Ok(output) => json!({"ok": output}),
-        Err(error) => json!({"error": error}),
-    }
-    .to_string()
+    outcome
+        .unwrap_or_else(|error| json!({"error": error}))
+        .to_string()
 }
 
 /// A list of strings in `input`, or an empty one.
@@ -263,9 +309,10 @@ impl Plugin for Testbed {
             topic => vec![topic.to_owned()],
         };
         let _ = ECHO.set(text(&echo, "emit").to_owned());
+        let _ = ECHO_SESSION.set(echo.get("session").and_then(Value::as_bool) == Some(true));
         let tools = [
             "probe", "count", "trap", "relay", "state", "load", "unload", "loaded", "ask", "fetch",
-            "read", "tools",
+            "read", "tools", "picture", "session",
         ]
         .map(spec)
         .to_vec();
@@ -299,6 +346,12 @@ impl Plugin for Testbed {
             "ask" => Ok(ask(&input)),
             "fetch" => Ok(fetch(&input)),
             "read" => Ok(read(&input)),
+            "session" => Ok(json!({
+                "current": report(session::current().map(|current| json!(current))),
+                "call": report(session::call().map(|call| json!(call))),
+                "stopping": session::stopping(),
+            })
+            .to_string()),
             "tools" => Ok(json!(
                 tools::list()
                     .into_iter()
@@ -310,10 +363,27 @@ impl Plugin for Testbed {
         }
     }
 
+    fn call_tool_content(name: String, input: String) -> Result<Vec<Content>, ToolError> {
+        let prefix = PREFIX.get().map_or("", String::as_str);
+        if name.strip_prefix(prefix).unwrap_or(&name) != "picture" {
+            // Every other tool returns text.
+            return Self::call_tool(name, input).map(|text| vec![Content::text(text)]);
+        }
+        let input: Value = serde_json::from_str(&input)
+            .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
+        Ok(picture(&input))
+    }
+
     fn on_event(event: Event) {
         if let Some(topic) = ECHO.get().filter(|topic| !topic.is_empty()) {
+            let payload = if ECHO_SESSION.get() == Some(&true) {
+                json!({"session": report(session::current().map(|current| json!(current)))})
+                    .to_string()
+            } else {
+                event.payload
+            };
             // Refused or not, there is nobody to tell from inside a listener.
-            let _ = events::emit(topic, &event.payload);
+            let _ = events::emit(topic, &payload);
         }
     }
 

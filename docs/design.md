@@ -13,23 +13,29 @@ the part that adapts: they can be added, rewritten and removed, by people or by 
 itself, without the core moving. The aim is that whatever the plugins become, the same core
 is underneath and still enforcing the same rules.
 
-The second half records where the design is going. The core is being hardened before any
-further plugins are written, so that plugins build on a surface that does not shift under
-them. Sections and table rows marked *planned* describe that target, not the code as it is.
+The harness has three tiers, from what changes least to what changes most: the **core**,
+**extensions** (native plugins, trusted, which give the harness what the core deliberately
+lacks) and **plugins** (WebAssembly, granted capabilities). [Three tiers](#three-tiers-core-extensions-plugins)
+says what goes where, and [What is stable](#what-is-stable) which contracts are meant to
+hold from here on.
+
+The second half records where the design is going. Sections and table rows marked *planned*
+describe that target, not the code as it is.
 
 ## The shape
 
 ```
                  ┌───────────────────────── corduroy-harness (src/) ─────────────────────────┐
-                 │  Harness: oi-kit StateMachine over [settle, ops, prompt, gates, tools, …]   │
-                 │  Journal: effects ──► events            PluginTools: registry ──► oi-kit   │
+                 │  Harness: a loop of [operations, compact, gates, tools, waits, model]       │
+                 │  Journal: effects ──► events      Provider ◄── corduroy-providers (oi-kit) │
                  └───────────────┬───────────────────────────────────────┬───────────────────┘
                                  │                                       │
         ┌──────── corduroy-core (no dependencies) ────────┐   ┌──── corduroy-wasm ────┐
         │ App / Context / Plugin   (fibers, effects)      │   │ WasmRuntime, WasmPlugin │
         │ Grants / Scope           (capabilities)         │◄──┤ linker = granted WIT    │
         │ EventStream, Log, SessionId (commits + pub/sub) │   │ interfaces only         │
-        │ Tools, Prompts, Kernels, Gates, Services,       │   └───────────┬─────────────┘
+        │ Message (the conversation's shape), call scope  │   └───────────┬─────────────┘
+        │ Tools, Prompts, Kernels, Gates, Services,       │               │
         │ Models, Secrets, HttpClients (registries)       │               │
         └─────────────────────────────────────────────────┘               │ wit/corduroy.wit
                                                               ┌───────────┴─────────────┐
@@ -39,7 +45,8 @@ them. Sections and table rows marked *planned* describe that target, not the cod
 ```
 
 The core knows nothing about WebAssembly or models. The WebAssembly host knows nothing about
-models. Only the top crate depends on oi-kit. `corduroy-jsonl`, not drawn, is a store for the
+models. The harness speaks the core's `Message`; only `corduroy-providers`, which builds real
+model providers, depends on oi-kit, and converts to and from its types at that boundary. `corduroy-jsonl`, not drawn, is a store for the
 event stream: it implements the core's `Log` trait over a file.
 
 ## The six inspirations
@@ -63,6 +70,9 @@ touches shared state. `ctx.effect`, `ctx.provide`, `ctx.on`, `ctx.plugin` and
 `Registry::register(ctx, ..)` all record effects; `App::dispose` and `App::reload` unwind them
 newest first, dependents before providers. A plugin whose `apply` fails is rolled back the same
 way. `Context::service` refuses a service the plugin did not list in `inject`, as Cordis does.
+A plugin's name is its identity (the source of its events, the key of its stored state, what
+a service it calls is told), so the tree gives a name to one plugin at a time: a second
+plugin of the same name is not applied until the first is disposed.
 
 **Left out.** `ctx.isolate` (per-subtree service instances), config-driven plugin trees
 (`cordis.yml`), the five event dispatch modes (only plain emit exists), and async `apply`.
@@ -82,8 +92,9 @@ WebAssembly plugins reach kernels through the `kernel` capability, scoped by ker
 `bash` tool in `pi-tools` is a thin layer over it. A WebAssembly plugin is also a small kernel
 in its own right: its instance memory lives as long as the plugin stays loaded.
 
-**Left out.** A Python kernel, snapshot and restore, the kernel-to-host bridge (programmatic
-tool calling from inside a cell) and sub-agents. Kernels are not sandboxes: a shell kernel can
+**Left out.** A Python kernel, snapshot and restore, and the kernel-to-host bridge
+(programmatic tool calling from inside a cell). Sub-agents are child sessions here (the
+`subagents` plugin), not kernels. Kernels are not sandboxes: a shell kernel can
 do whatever the host user can, so *which kernel a plugin may use* is the security decision.
 
 ### Hermes: skills the agent writes for itself
@@ -117,6 +128,10 @@ carry their own prompt snippets, and everything else is an extension hooking typ
 **Here.** `plugins/pi-tools`, with the same four tools, schemas and limits. It is one plugin
 among others rather than a built-in: the harness has no tools of its own.
 
+**Tool results.** A tool returns content blocks, text or images, as MCP tools do, so an
+MCP server's image reaches the model and a plugin's tool can return one. Text is the
+common case and stays a one-liner in every guest language: a string is one text block.
+
 **Left out.** Fuzzy matching in `edit`, saving truncated `bash` output to a file, per-tool
 prompt snippets, and the session tree. Pi's gate-style hooks have an equivalent in
 [gates](#events-gates-and-hooks), which WebAssembly plugins can be, and in
@@ -145,7 +160,8 @@ the events immutable and typed, the agent stateless, and the conversation a *vie
 append-only log, with condensation as an event rather than a rewrite.
 
 **Here.** `corduroy_core::event` is an append-only log with synchronous, ordered delivery, and
-every event has a source, an optional cause and, if it belongs to one, a session.
+every event has a source, the time its commit was stored, an optional cause and, if it
+belongs to one, a session.
 `src/session.rs` makes the conversation a projection of it: the `Journal` turns the effects
 of one step of the loop into one commit of `message`, `tool/call` (caused by its message),
 `tool/result` (caused by its call) and `usage` events, and `Harness::resume` rebuilds every
@@ -154,32 +170,46 @@ topics share the same stream, so plugins and the model see one history. The stre
 each commit to a `Log` before showing it to anyone; `corduroy-jsonl` is the store on disk.
 See [Durability](#durability).
 
-**Left out.** Condensation, and a security analyser and confirmation policy.
+**Elsewhere.** Condensation is the `compaction` event, written by the `compact` plugin.
+The security analyser and the confirmation policy are gates: the `inspect` and `approval`
+plugins.
 
-### Goose: the base abstractions, from oi-kit
+### Goose: a loop of steps over the persisted conversation
 
 **What it is.** oi-kit ("Open Intelligence Kit") is the set of crates Goose is built from,
-published as `oi-kit-*` from the [Goose repository](https://github.com/aaif-goose/goose);
-there is no crate named just `oi-kit`. `oi-kit-provider-types` has `Provider`, `Message` and
-`Conversation`. `oi-kit-agent` unrolls the agent loop into a state machine: an ordered list of
+published as `oi-kit-*` from the [Goose repository](https://github.com/aaif-goose/goose).
+`oi-kit-agent` unrolls the agent loop into a state machine: an ordered list of
 `Operation`s, each of which looks at the persisted conversation and either declines or returns
-effects for the host to persist; inference is the last step.
+effects for the host to persist; inference is the last step. `oi-kit-provider-types` has its
+`Provider`, `Message` and `Conversation`, and `oi-kit-providers` the HTTP clients for
+Anthropic, OpenAI, Ollama and the providers Goose knows.
 
-**Here.** `src/harness.rs` uses those types directly. `Harness::steps` is the pipeline: applying the
-plugin changes plugins asked for, custom operations, the prompt, the gates, plugin tools, an
-answer for calls nobody handled, the turn limit, and oi-kit's `InferenceRunner`. The model is a service (`src/provider.rs`): the loop
-asks whichever `Provider` is registered under its provider name in the `Providers` registry,
-looked up on every request, so a `provider` plugin supplies it and swapping the plugin swaps
-the model. `Harness::machine` hands the state machine to
-callers who want to drive it step by step. This is also the programmable loop: an
-`Operation` placed ahead of the tools can approve, rewrite or refuse what the model asked for.
+**Here.** The idea, not the crate. `src/harness.rs` runs a loop of its own of the same shape:
+at each step the host's operations, the operations extensions registered (the `Operations`
+registry), compaction, the gates, the tools, waiting for a signal, the turn limit and the
+model are tried in order, and the first that does something is the step; its effects become
+one commit. `Operation` is a small trait of the harness's own (`Next`: pass, continue,
+stop), and `Harness::step` runs one step for a caller who wants to watch. The model is a
+service (`src/provider.rs`): the loop asks whichever `Provider` is registered under its
+provider name in the `Providers` registry, looked up on every request, so a `provider`
+plugin supplies it and swapping the plugin swaps the model.
 
-**Cost.** oi-kit is async (tokio) and brings about 315 crates, and it is a two-day-old alpha
-pinned to an exact version. That weight is confined to the top crate; `corduroy-core` stays
-synchronous and dependency-free.
+*Changed from the plan:* the harness used oi-kit's state machine, messages and provider
+trait directly. That made oi-kit's `Message` the payload of every `message` event, so the
+log, the plugins that read it and every extension depended on an alpha crate's
+serialisation, and its `Operation` the extension point for loop steps. oi-kit-agent is 14,000
+lines (an MCP client, skills, compaction, sub-agents, a malware check) of which the harness
+used about a thousand, much of it overridden. The loop is now some 300 lines here; the
+conversation is the core's `Message`; and oi-kit is confined to `corduroy-providers`, whose
+`build` returns a harness `Provider` that converts at the boundary. That keeps what is worth
+keeping, real and maintained HTTP clients for many providers (oi-kit-providers is 17,000
+lines, its formats another 15,000), without letting their types past it. The harness library
+lost about 60 crates of dependencies with it.
 
-**Left out.** Real providers (`oi-kit-providers`), MCP extensions, compaction and
-sub-agents. All exist as oi-kit operations and slot into `Harness::with_operation`.
+**Not taken from oi-kit.** Its MCP, compaction and sub-agent operations. Here those are
+plugins over the core's own primitives (`corduroy-mcp` through a kernel, the `compaction`
+event, child sessions), so that they are recorded, gated and unloaded like everything
+else.
 
 **The baseline.** Goose is also the measure for the plugins shipped with the harness: what a
 user gets from Goose out of the box should be reachable here with shipped plugins alone. See
@@ -187,7 +217,7 @@ user gets from Goose out of the box should be reachable here with shipped plugin
 
 ## Capabilities
 
-The plugin world in `wit/corduroy.wit` imports fifteen host interfaces and nothing else. There
+The plugin world in `wit/corduroy.wit` imports sixteen host interfaces and nothing else. There
 is no WASI in the linker, so a plugin has no clock, environment, filesystem or network of its
 own beyond what these give it.
 
@@ -208,6 +238,7 @@ own beyond what these give it.
 | `secret` | an opaque handle to a named credential, never its value | secret name |
 | `http` | an HTTP request through the client registered for its scheme, with credentials written in by the host | host name |
 | `log-read` | events of any session, by topic, in pages | `<session>:<topic>`, the session with `%` and `:` percent-encoded (empty for harness events) |
+| `session` | which session the plugin is being called for (a tool call, a prompt part, a gate request, an event of the session), the tool call's id, and whether the run was asked to stop | session id |
 
 Two limits hold whatever a grant says. **Protected paths** (the host binary, the compiled-code
 cache and whatever the host adds with `WasmRuntime::protect`, such as the event log and grant
@@ -258,19 +289,19 @@ Everything else is a plugin, and a plugin may itself offer primitives to other p
 
 | Primitive | Status | Target |
 | --- | --- | --- |
-| Plugin tree (`App`, `Context`, effects, `inject`) | built | Built for WebAssembly: a call that traps kills the instance, and the next call makes a new one and activates it again, keeping the plugin's registrations; after `Limits::restarts` restarts (default 3) the next trap stops the plugin until it is reloaded (`plugin/trapped`, `plugin/restarted`, `plugin/stopped`). Still to do: the same limit in the plugin tree itself, so a stopped plugin shows as suspended in `App` rather than only refusing calls. |
-| Event log | built | A fallible `Log` trait. A step's events are one atomic commit, stored before any listener or the model sees them. The core has the trait and the in-memory stream; stores are separate crates. |
-| Sessions | built | Many sessions, each with an id and an optional parent. Every event of a run names its session; events about the plugin tree name none. Events a plugin raises while serving a tool call carry that call's session (`corduroy_core::call`). A session may be started by another for a task (a child), and nests at most `MAX_DEPTH` deep. |
-| Tool lifecycle | partly built | Built: `tool/call`, `tool/start` and `tool/result` are each committed as they happen, per call; `ToolSpec::replay_safe` says whether a call that was running at a crash may be repeated, and `read_only` whether it changes anything. Still to do: results as content blocks rather than one string, progress and cancellation. |
-| Gates | built for `tool/call` and `plugin/load` | A fourth registry. A gate is asked at a named decision point before something happens and answers allow, deny or ask; the strictest answer wins and is recorded. Reachable from WebAssembly through the `gate` export. Still to do: more decision points (the user's input, the model request), and letting a person answer an ask at `plugin/load`. See [Events, gates and hooks](#events-gates-and-hooks). |
-| Waits and signals | built | A run whose tool call a gate asked about waits for `Harness::answer`. In general, a tool call may wait for a named signal: whatever serves it says so through `corduroy_core::call::wait_for`, the call gets a placeholder and a `tool/wait`, `WaitOperation` stops the run before the model is asked again, and a `signal` event (`Harness::signal`) brings the result. A child session's end is such a signal, which the harness raises itself. All of it is in the log, so a wait survives a restart. Still to do: a timer that raises signals. |
+| Plugin tree (`App`, `Context`, effects, `inject`) | built | A name belongs to one plugin at a time, and never to another event source (`host`, `agent`, `user`, `environment`). Built for WebAssembly: a call that traps kills the instance, and the next call makes a new one and activates it again, keeping the plugin's registrations; after `Limits::restarts` restarts (default 3) the next trap stops the plugin until it is reloaded (`plugin/trapped`, `plugin/restarted`, `plugin/stopped`). Still to do: the same limit in the plugin tree itself, so a stopped plugin shows as suspended in `App` rather than only refusing calls. |
+| Event log | built | A fallible `Log` trait. A step's events are one atomic commit, stored before any listener or the model sees them, and stamped with the time it was stored: one reading of the clock per commit, never earlier than the commit before. The core has the trait and the in-memory stream; stores are separate crates. |
+| Sessions | built | Many sessions, each with an id and an optional parent. Every event of a run names its session; events about the plugin tree name none. Whatever is done for a session (a tool call, rendering a prompt part, asking a gate, delivering an event of the session) is done in its call scope (`corduroy_core::call`), so the events a plugin raises then carry the session, and a plugin can ask which session it serves (the `session` capability) and keep something per session: `todo` keeps a list for each, so a sub-agent's plan does not overwrite its parent's. A session may be started by another for a task (a child), and nests at most `MAX_DEPTH` deep. |
+| Tool lifecycle | built | `tool/call`, `tool/start` and `tool/result` are each committed as they happen, per call; `ToolSpec::replay_safe` says whether a call that was running at a crash may be repeated, and `read_only` whether it changes anything. A run can be stopped (`Harness::stop`): a running tool learns it through its call scope (`call::stopping`, the `session` capability's `stopping`), the calls not yet begun are answered as not run, and the run ends as stopped. A result is a list of content blocks, text or images (`ToolOutput`, `content` in the WIT), which reach the model as they are; `tool/result` records the result's text as `output` and, when it is anything but one block of text, the blocks as `content`, so a finished result is handed over from the log after a crash. Still to do: progress and cancellation, which need no change to this contract (see [Open questions](#open-questions)). |
+| Gates | built | A fourth registry. A gate is asked at a named decision point before something happens and answers allow, deny or ask; the strictest answer wins and is recorded. Reachable from WebAssembly through the `gate` export. Decision points are declared: the core declares `tool/call` and `plugin/load`, an extension declares the points it asks at, and asking at an undeclared point is denied. Still to do: letting a person answer an ask at `plugin/load`. See [Events, gates and hooks](#events-gates-and-hooks). |
+| Waits and signals | built | A run whose tool call a gate asked about waits for `Harness::answer`. In general, a tool call may wait for a named signal: whatever serves it says so through `corduroy_core::call::wait_for`, the call gets a placeholder and a `tool/wait`, the loop stops the run before the model is asked again, and a `signal` event (`Harness::signal`) brings the result. A child session's end is such a signal, which the harness raises itself. All of it is in the log, so a wait survives a restart. Still to do: a timer that raises signals. |
 | Services | built | A fifth registry, `Services`: calls between plugins in JSON text, with the caller's name, across the WebAssembly boundary in both directions. See [Plugins extending plugins](#plugins-extending-plugins). |
-| Capabilities | fifteen | The mechanism is settled; the set grows (below). |
+| Capabilities | sixteen | The mechanism is settled; the set grows (below). |
 | Kernels | built | The trait and registry, and `Kernel::spawn` for long-lived processes with pipes (MCP servers). `ShellKernel` is an implementation, not a primitive, and lives in `corduroy-shell`. |
 | Conversation projection | built | Messages, and the `compaction` event: the messages before `keep_from` stay in the log and the conversation but are hidden from the model, which sees the summary in their place. The harness cuts only before the current turn; when, and the summary, come from the plugin providing the `compaction` service, asked by a loop step (`CompactOperation`). |
 | Model access | built | The loop asks the provider registered under a name in `Providers`, on every request, so a plugin supplies the model and unloading it takes the model away. `Harness::new` registers its argument there for convenience. For plugins, the core's `Models` registry: one completion, synchronously, by model name; a `provider` plugin can serve its models there. |
 | Secrets and outbound requests | built | `Secrets` and `HttpClients` registries. The core checks and records; native plugins hold the values and send the requests, so an HTTP client is a plugin like a kernel is. |
-| Versioning | WIT package version, log schema version | Built: a schema version in each log's header. Still to do: a version on each plugin's stored state, and a rule for what a minor version of the world may change. |
+| Versioning | WIT package version, log schema version | Built: a schema version in each log's header (2, which added the time; 1 is still read), and the rule for the world in [What is stable](#what-is-stable). Still to do: a version on each plugin's stored state. |
 
 **Child sessions, a service rather than a capability (built).** The plan was a `session`
 capability to start a child session and await it. It became a service the harness
@@ -281,6 +312,71 @@ for as long as the child runs: `start` makes the call wait for the child's end, 
 runs the child to its end and signals the parent, and `continue_run` picks the chain up
 after a crash wherever it stopped. A gate asking in a child surfaces on the parent's
 outcome, with the child's session on the ask.
+
+## Three tiers: core, extensions, plugins
+
+| Tier | What it is | Trust | Changes |
+| --- | --- | --- | --- |
+| **Core** | `corduroy-core` (the plugin tree, capabilities, the event stream, the registries), the WIT world and the WebAssembly host that enforces it, and the loop with its journal | is the trusted base | rarely: it is the contract the other two are written against |
+| **Extension** | a native plugin: Rust compiled into the command, loaded into the same tree through the same `Plugin` trait | trusted, with the host's authority | when a new kind of thing is needed that the core should not own |
+| **Plugin** | a WebAssembly component | none beyond its grants | freely: people and the agent itself add, rewrite and remove them |
+
+An extension is not a second mechanism. It is a plugin (its registrations are effects, it
+is unloaded like any other, it follows the services it injects) that happens to be native,
+and so may do the things only native code can:
+
+| An extension contributes | Through | Example |
+| --- | --- | --- |
+| An implementation of a core trait | the core's registries | `corduroy-shell` (a kernel), `corduroy-http` (the client behind `http`), `provider` (a model), a secret source, `corduroy-jsonl` (a log store) |
+| A service WebAssembly plugins call | `Services`, reached with the `service` capability | the harness's own `sessions`; an MCP plugin accepting server definitions |
+| A typed service or registry for other extensions | `ctx.provide`, `inject` | `Providers` |
+| A decision point of its own | `Gates::declare`, then `Gates::decide` | asking the gates before a request leaves the machine |
+| A step of the loop | the harness's `Operations` registry | a policy that answers a call before it runs; a compaction strategy |
+| Tools, prompt parts, gates, event listeners | as any plugin does | `corduroy-mcp` |
+
+That table is also the answer to *how extensions make plugins easier to write*: a plugin
+never gains authority from an extension, it gains something to ask. A WebAssembly plugin
+that needs what no capability gives (a database, a browser, a queue) calls a service an
+extension provides, and its grant names that service; a plugin that wants to veto something
+the core knows nothing about gates a point an extension declared. Neither needs a change to
+the core or to the WIT world.
+
+What an extension cannot do is widen the plugin boundary. The capabilities are the imports
+of the WIT world, and a new one is a change to the core (see
+[Capabilities](#capabilities)), because the boundary is what the sandbox is made of: if
+extensions could link host functions of their own, "what can a plugin do" would no longer
+have one answer in one file. A service is the pressure valve: text in, text out, scoped by
+name, with the caller's name attached.
+
+**Where something goes.** The core if every effect passes through it, if plugins contribute
+to it, or if plugins must agree on it ([The core boundary](#the-core-boundary)). An
+extension if it needs the host's authority or a native library (a process, a socket, a
+database, the loop itself) and the core can stay ignorant of it. A plugin otherwise, and
+always if a third party or the agent wrote it.
+
+**In the `corduroy` command.** The kernels, providers, MCP servers and secrets of an agent
+file are extensions with sections of their own. Any other goes under
+`[extensions.<name>]`, where `kind` names one of the kinds the command was built with and
+the remaining keys are its configuration. Kinds are compiled in, so a command of one's own
+is the shipped one with more kinds (`corduroy_cli::command::main_with` and
+`extension::Extensions`); the agent file still decides which are loaded.
+
+## What is stable
+
+Four contracts are meant to hold, so that plugins and extensions written against them keep
+working. Everything else may move.
+
+| Contract | Where | Rule for change |
+| --- | --- | --- |
+| The plugin world | `wit/corduroy.wit` | Adding an import interface (a capability) breaks nobody: a plugin that does not import it is unaffected, and a host without it refuses, at load, a plugin that does. Changing an export, or a type a guest sees, changes the package version, and guests are rebuilt against it; so exports and shared types change only together, rarely, and never to add what an import could add. |
+| The core's traits and registries | `corduroy-core` | New trait methods come with defaults (as `Kernel::spawn` did). Types that grow are `#[non_exhaustive]` with constructors (`ToolSpec`, tool results), so a new field breaks no extension. |
+| The log | `corduroy-jsonl`, the topic table in `src/session.rs` | The header's schema version changes when a line's shape does, and older versions stay readable. Events gain fields; they do not lose or repurpose them. Readers ignore topics and fields they do not know. |
+| The agent file | `crates/corduroy-cli` | Keys are added, not renamed; an unknown key is an error, so a typo is never a silently ignored grant. |
+
+The `message` event's payload is the core's `Message` (`{"role", "parts"}`, see
+`corduroy_core::message`), part of the log contract like the rest: parts gain kinds, and a
+reader keeps what it knows and skips the rest. Logs written while the payload was oi-kit's
+message are still read, so they resume.
 
 Two rules came with the capabilities that reach outside:
 
@@ -311,12 +407,17 @@ What other harnesses call hooks are two different things here, and both are plug
   (deny over ask over allow). The outcome does not depend on which plugin loaded first. The
   decision itself is then recorded as an event.
 
-The core defines a small, fixed set of decision points (`corduroy_core::POINTS`): `tool/call`
-and `plugin/load`. Likely additions are the user's input and the request about to be sent to
-the model, each added when a plugin needs it. A WebAssembly plugin that lists a point the
-core does not define is refused at activation. A plugin that wants to ask other plugins a
-question of its own does so through a [service](#plugins-extending-plugins), not through the
-event stream.
+Decision points are *declared*. The core declares the two it asks at itself
+(`corduroy_core::POINTS`): `tool/call` and `plugin/load`. An extension that needs an answer
+before something of its own happens declares a point (`Gates::declare`, an effect like any
+other, with a description of the request it sends) and asks the gates there; the user's
+input and the request about to be sent to the model are the likely next ones. A point
+nobody declared does not exist: asking at one is denied, and a WebAssembly plugin that
+lists one is refused at activation, so a policy never silently guards a point that is never
+asked. *Changed from the plan:* the points were to be a closed list in the core, each added
+as a plugin needed it, which made every new point a change to the core. A plugin that wants
+to ask other plugins a question of its own, rather than a yes or no, does so through a
+[service](#plugins-extending-plugins), not through the event stream.
 
 A deny or an ask always carries a reason. A denied tool call becomes an error tool result
 holding that reason, so the model learns what was wrong and can try again, as with any other
@@ -361,11 +462,11 @@ wins" lets a permissive plugin loaded early pre-empt a strict one.
 
 ## Durability
 
-The oi-kit state machine already has the right shape: an operation reads the persisted
-conversation and returns effects for the host to persist. One step is therefore one commit.
+A step of the loop reads the persisted conversation and returns effects for the journal to
+persist. One step is therefore one commit.
 All but the last point are built; kernel state is *planned*.
 
-- **Commit, then deliver.** `Journal::apply_effects` turns a step's effects into one batch
+- **Commit, then deliver.** `Journal::apply` turns a step's effects into one batch
   and hands it to `EventStream::commit`. The batch is written to the `Log`; only then is it
   added to the stream, are listeners called and is the next step allowed to start. A refused
   write closes the stream, since the log may hold part of the batch, and is a broken
@@ -374,7 +475,8 @@ All but the last point are built; kernel state is *planned*.
   run fails with the same one.
 - **Stores are plugins of the log.** The core carries the `Log` trait and nothing that
   touches a disk. `corduroy-jsonl` is the first store: a header line with the schema
-  version, then one line per commit, written with one `write` and synced. An unfinished last
+  version, then one line per commit (each event with its time), written with one `write`
+  and synced. An unfinished last
   line, which is all a crash can leave, is cut off when the file is opened, and the file is
   locked because a log has one writer. *Changed from the plan:* the JSONL store was to live
   in the core, std only. Reading it back needs a JSON parser, and a hand-written parser on
@@ -388,10 +490,7 @@ All but the last point are built; kernel state is *planned*.
   are one commit, stored before the tools step starts. Each call then leaves a trail of
   its own: `tool/start` is committed just before the tool runs and `tool/result` as soon as
   it returns, each a commit, and only then does the message carrying the step's results go
-  to the model. oi-kit's tools step runs every call of a message and returns the results
-  together, and nothing in it splits that up; but every call passes through our
-  `ToolProvider` (`PluginTools`), which is where the two events are written, so the step
-  itself is still oi-kit's and the conversation keeps one result message per step.
+  to the model, so the conversation keeps one result message per step (`PluginTools`).
 - **Continue, not only resume.** A run is *unfinished* from its first message to its
   `turn/end`, and a session with an unfinished run refuses a new prompt.
   `Harness::continue_run` picks the run up without one, and treats each unanswered call by
@@ -484,12 +583,16 @@ the harness runs). An automation is a WebAssembly plugin with three parts:
 
 | Part | Provided by |
 | --- | --- |
-| A trigger | An event subscription (built). Time-based triggers are events too, emitted by a native `scheduler` plugin, since a plugin cannot wake itself. |
+| A trigger | An event subscription (built). Time-based triggers are events too, emitted by a `scheduler` extension (not built), since a plugin cannot wake itself. |
 | An action | Host capabilities, and the `tools` capability to call other plugins' tools. Such calls pass through the gates and are logged like the model's, with the plugin as their source. |
-| Optionally, the model | The `llm` capability for one request, or `session` to start a run. |
+| Optionally, the model | The `llm` capability for one request, or the `sessions` service to start a run. |
 
 What the core must guarantee, because the author is now the agent (built):
 
+- **No impersonation.** A plugin loads a child under a name of its choosing, and a
+  plugin's stored state and its place as a caller go by name. The plugin tree therefore
+  never applies a plugin whose name another loaded plugin holds: a child named after an
+  existing plugin fails to start (`plugin/failed`) instead of reading that plugin's state.
 - **No amplification.** A plugin holding the `plugins` capability grants a plugin it loads
   each requested scope *within* its own (`Scope::within`: a resource must be in both), so
   never more than it holds. A capability it does not hold at all it can grant only with an
@@ -585,7 +688,7 @@ harness.
 
 | Goose feature | Plugin here | Kind | Waits on |
 | --- | --- | --- | --- |
-| Developer: `write`, `edit`, `shell`, `tree`, `read_image` | `pi-tools` (`tree` added) | WebAssembly | `read_image` waits on content blocks |
+| Developer: `write`, `edit`, `shell`, `tree`, `read_image` | `pi-tools` (`tree` added) | WebAssembly | `read_image` waits on reading a file as bytes (`fs-read` reads text); tool results already carry images |
 | MCP extensions (stdio, streamable HTTP) | `corduroy-mcp` | native (`rmcp`) | done: stdio servers start through a kernel |
 | Providers | `corduroy-providers` (`oi-kit-providers`) | native | done |
 | Permission modes, per-tool permissions | `approval` (exists: `auto`, `smart`, `approve`, `chat`, allow and deny lists) | WebAssembly | done |
@@ -672,7 +775,7 @@ the step it waits on is done.
      servers too. `crates/corduroy-mcp` is a native plugin per server, stdio or streamable
      HTTP, registering its tools as `<server>__<tool>`; `[mcp.<name>]` in the agent file.
    - *Done:* compaction. The projection understands a `compaction` event and hides what
-     it summarises from the model (oi-kit sends only agent-visible messages), keeping it in
+     it summarises from the model (`Session::for_model`), keeping it in
      the log and the conversation. `CompactOperation`, before the prompt step, asks the
      plugin providing the `compaction` service whether a session is due and for a summary
      of what came before the current turn; the `compact` plugin answers with a model of its
@@ -681,7 +784,20 @@ the step it waits on is done.
      for a named signal, in the log), child sessions started through the harness's
      `sessions` service, and the `subagents` plugin's `delegate`.
 
-   Left for later: code mode (the kernel-to-host bridge) and `read_image` (content blocks).
+   Left for later: code mode (the kernel-to-host bridge) and `read_image` (needs reading
+   a file as bytes; tool results can carry an image).
+10. *Done.* A review of the core before calling it stable, which found and fixed: events
+    had no time; two plugins could share a name, and with it a state store; decision points
+    were a closed list in the core; loop steps could be added only by the host, not by a
+    plugin that can be unloaded; tool results were one string. With it, the extension
+    tier: `[extensions]` in the agent file, and the command as a library so a binary can
+    add kinds. See [Three tiers](#three-tiers-core-extensions-plugins) and
+    [What is stable](#what-is-stable).
+11. *Done.* Three things the review left open. The conversation's shape is the core's
+    `Message`, and the loop is the harness's own, with oi-kit kept behind the provider
+    boundary. A plugin can ask which session it serves (the `session` capability), and
+    `todo` keeps a list per session. A run can be stopped, at any point, and Ctrl-C in the
+    `corduroy` command does it.
 
 ## Open questions
 
@@ -698,8 +814,24 @@ the step it waits on is done.
   common starting point for several attempts. Because every event names its session and a
   session names its parent, branching can be added as "a new session whose parent is event N
   of another" without changing the log.
-- **Operations from plugins.** Loop steps are native `Operation`s. Letting plugins contribute
-  steps needs an async-friendly, effect-returning export.
+- **Operations from plugins.** Loop steps are native `Operation`s, which extensions
+  register in `Operations`. Letting WebAssembly plugins contribute steps needs an
+  async-friendly, effect-returning export.
+- **Delivery order across threads.** Commits are stored in one order, and each is
+  delivered by the thread that made it, so two threads committing at once may deliver out
+  of id order. Listeners that must not get order wrong read the log. A single delivery
+  queue would fix it at the cost of a commit returning before its listeners ran.
+- **Progress from a running tool.** A tool can learn that its run is stopping, but cannot
+  say how far it has got while it runs; its result comes when it returns. An event it
+  emits is the way today. A progress call in the call scope, and behind the `session`
+  capability, would add it without changing a contract.
+- **Providers of our own.** `corduroy-providers` still builds on oi-kit-providers, an
+  alpha, for the HTTP side of each model's API. It is confined to that crate, behind the
+  harness's `Provider`, so replacing it (with clients of our own for the two or three APIs
+  that matter, or with another crate) touches nothing else.
+- **Scopes below a service.** The `service` capability is scoped by service name, so a
+  grant gives all of a service's methods. `service:method` resources would let a grant
+  name one.
 - **Listeners and re-entry.** An event a native tool emits while a WebAssembly plugin's
   call is in progress is delivered at once, and a listener in that same plugin is refused
   (it is running), so it misses the event. Events plugins raise themselves are queued and

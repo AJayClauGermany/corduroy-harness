@@ -36,7 +36,7 @@ python3 -m venv .venv && .venv/bin/pip install -e .
 
 | Decorator | Becomes |
 | --- | --- |
-| `@plugin.tool(name=None, description=, input=, read_only=, replay_safe=)` | a tool; the function takes the parsed input and returns text, or anything else as JSON |
+| `@plugin.tool(name=None, description=, input=, read_only=, replay_safe=)` | a tool; the function takes the parsed input and returns text, anything else as JSON, or content blocks (below) |
 | `@plugin.on_activate` | called with the parsed configuration when the plugin starts, and again after a trap |
 | `@plugin.on("turn/end", "tool/*")` | called with each matching event |
 | `@plugin.prompt` | text for the system prompt, or `None` |
@@ -47,11 +47,30 @@ Raise `ToolError(kind, message)` (`invalid-input`, `failed`, `denied`, `unknown-
 `CallError(kind, message)` to choose the error; any other exception becomes `failed`, and a
 host call's `denied` keeps its kind.
 
+## Content blocks
+
+A tool's result is a list of content blocks, text or images. Whatever a tool returns is one
+block of text, unless it is a `Text` or an `Image`, or a non-empty list of them:
+
+```python
+from corduroy_plugin import Image, Text
+
+@plugin.tool(description="Draw the sales chart.")
+def chart(input):
+    return [Text("sales by month"), Image("image/png", draw_png())]
+```
+
+`Image(mime_type, data)` takes the image's bytes, not base64. A list of anything else is
+still JSON. A plugin that calls another tool through the `tools` capability gets its blocks
+as the host's own types (`Content_Text`, `Content_Image`), which a tool may return as they
+are; `text_of(blocks)` is their text, with an image as a marker such as
+`[image: image/png, 1234 bytes]`.
+
 ## Capabilities
 
 Each `wit_world.imports.<capability>` module is one capability: `fs_read`, `fs_write`,
 `kernel`, `events`, `log`, `clock`, `random`, `tools`, `state`, `service`, `plugins`, `llm`,
-`secret`, `http`, `log_read` (named with hyphens on the command line). A Python component
+`secret`, `http`, `log_read`, `session` (named with hyphens on the command line). A Python component
 imports every interface of the world it is built against, so `--capabilities` is the
 plugin's declaration of what it needs: the build generates a world with exactly those
 imports, and the host instantiates the plugin only if it granted all of them.

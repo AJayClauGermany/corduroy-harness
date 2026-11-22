@@ -5,11 +5,11 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use corduroy_harness::core::Message;
 use corduroy_harness::core::{
     CallError, EventStream, Pattern, Scope, Service, SessionId, TOOLS, ToolSpec, Tools, plugin_fn,
     tool_fn,
 };
-use corduroy_harness::oi_kit_provider_types::conversation::message::Message;
 use corduroy_harness::scripted::{ScriptedProvider, call, say};
 use corduroy_harness::wasm::WasmRuntime;
 use corduroy_harness::{COMPACTION, Harness, MAIN, Status, provider};
@@ -20,13 +20,9 @@ use serde_json::{Value, json};
 fn harness(model: &Arc<ScriptedProvider>, events: Arc<EventStream>) -> Harness {
     let harness = Harness::resume(Arc::<ScriptedProvider>::clone(model), events).unwrap();
     harness.plugin(plugin_fn("echo", &[TOOLS], |ctx| {
-        let spec = ToolSpec {
-            name: "echo".into(),
-            description: String::new(),
-            input_schema: r#"{"type":"object"}"#.into(),
-            replay_safe: true,
-            read_only: true,
-        };
+        let spec = ToolSpec::new("echo", "", r#"{"type":"object"}"#)
+            .replay_safe(true)
+            .read_only(true);
         let tools = ctx.service::<Tools>(TOOLS)?;
         tools.register(
             ctx,
@@ -60,10 +56,9 @@ fn service(summaries: &Arc<AtomicUsize>) -> Arc<dyn Service> {
 fn seen_by_model(harness: &Harness) -> Vec<String> {
     let session = harness.journal(&SessionId::new(MAIN)).unwrap().session();
     session
-        .conversation()
-        .agent_visible_messages()
+        .for_model()
         .iter()
-        .map(Message::as_concat_text)
+        .map(Message::text_content)
         .collect()
 }
 
@@ -116,8 +111,7 @@ async fn earlier_turns_give_way_to_a_summary_and_the_current_turn_is_kept_whole(
     assert_eq!(seen_by_model(&replayed), seen);
     // Nothing is lost: the whole conversation is still there for a person.
     let all = replayed.journal(&SessionId::new(MAIN)).unwrap().session();
-    let all = all.conversation().user_visible_messages();
-    assert_eq!(all[0].as_concat_text(), "first question");
+    assert_eq!(all.conversation()[0].text_content(), "first question");
 }
 
 fn harness_from(events: &EventStream) -> Harness {

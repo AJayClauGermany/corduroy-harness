@@ -8,27 +8,19 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use async_trait::async_trait;
 
 use corduroy_harness::core::{
-    Context, Event, EventStream, Log, LogError, Pattern, Plugin, PluginError, SessionId, TOOLS,
-    ToolSpec, Tools, plugin_fn, tool_fn,
+    Content, Context, Event, EventStream, Log, LogError, Message, Pattern, Plugin, PluginError,
+    SessionId, TOOLS, ToolCall, ToolSpec, Tools, plugin_fn, tool_fn,
 };
-use corduroy_harness::oi_kit_agent::operation::{Emitter, Operation, OperationResult};
-use corduroy_harness::oi_kit_provider_types::conversation::Conversation;
-use corduroy_harness::oi_kit_provider_types::conversation::message::Message;
 use corduroy_harness::scripted::{ScriptedProvider, call, say};
-use corduroy_harness::{Effect, Harness, HarnessError, MAIN, Session, Status, jsonl};
+use corduroy_harness::{Harness, HarnessError, MAIN, Next, Operation, Session, Status, jsonl};
 use corduroy_test_support::scratch;
-use rmcp::model::CallToolRequestParams;
-use serde_json::json;
+use serde_json::{Value, json};
 
 /// A native plugin contributing `echo`, which returns its input.
 fn echo(ctx: &mut Context<'_>) -> Result<(), PluginError> {
-    let spec = ToolSpec {
-        name: "echo".into(),
-        description: "Return the input.".into(),
-        input_schema: r#"{"type":"object"}"#.into(),
-        replay_safe: true,
-        read_only: true,
-    };
+    let spec = ToolSpec::new("echo", "Return the input.", r#"{"type":"object"}"#)
+        .replay_safe(true)
+        .read_only(true);
     ctx.service::<Tools>(TOOLS)?.register(
         ctx,
         "echo",
@@ -153,13 +145,9 @@ fn rocketry(launches: &Arc<AtomicUsize>, peeks: &Arc<AtomicUsize>) -> impl Plugi
     plugin_fn("rocketry", &[TOOLS], move |ctx| {
         let tools = ctx.service::<Tools>(TOOLS)?;
         for (name, replay_safe, calls) in [("launch", false, &launches), ("peek", true, &peeks)] {
-            let spec = ToolSpec {
-                name: name.into(),
-                description: String::new(),
-                input_schema: r#"{"type":"object"}"#.into(),
-                replay_safe,
-                read_only: replay_safe,
-            };
+            let spec = ToolSpec::new(name, "", r#"{"type":"object"}"#)
+                .replay_safe(replay_safe)
+                .read_only(replay_safe);
             let calls = Arc::clone(calls);
             let tool = tool_fn(spec, move |_| {
                 calls.fetch_add(1, Ordering::SeqCst);
@@ -176,7 +164,7 @@ fn asks(calls: &[(&str, &str)]) -> Message {
     calls
         .iter()
         .fold(Message::assistant(), |message, (id, tool)| {
-            message.with_tool_request(*id, Ok(CallToolRequestParams::new((*tool).to_owned())))
+            message.call(ToolCall::new(*id, *tool, "{}"))
         })
 }
 
@@ -230,7 +218,7 @@ async fn a_continued_run_treats_each_call_by_how_far_it_got() {
 
     assert_eq!(
         refused.to_string(),
-        "session `main` has an unfinished run: continue it first"
+        "session `main` has an unfinished run: continue or stop it first"
     );
     assert_eq!(
         outcome.status,
@@ -295,6 +283,100 @@ async fn a_call_that_was_running_is_made_again_only_if_its_tool_says_it_is_safe(
     );
 }
 
+/// A plugin contributing `snap`, which counts its calls, is not safe to run twice, and
+/// returns a caption and an image.
+fn camera(shots: &Arc<AtomicUsize>) -> impl Plugin + 'static {
+    let shots = Arc::clone(shots);
+    plugin_fn("camera", &[TOOLS], move |ctx| {
+        let shots = Arc::clone(&shots);
+        let snap = tool_fn(
+            ToolSpec::new("snap", "", r#"{"type":"object"}"#),
+            move |_| {
+                shots.fetch_add(1, Ordering::SeqCst);
+                Ok(vec![
+                    Content::text("the view"),
+                    Content::image("image/png", *b"\x89PNG\r\n\x1a\n"),
+                ])
+            },
+        );
+        ctx.service::<Tools>(TOOLS)?
+            .register(ctx, "snap", Arc::new(snap))?;
+        Ok(())
+    })
+}
+
+/// The blocks of each tool result in the conversation, in order.
+fn results(session: &Session) -> Vec<Vec<Content>> {
+    session
+        .conversation()
+        .iter()
+        .flat_map(Message::tool_results)
+        .map(|result| result.output.content().to_vec())
+        .collect()
+}
+
+#[tokio::test]
+async fn a_finished_image_is_handed_over_from_the_log_and_the_tool_is_not_run_again() {
+    // The process died once `snap` had returned and its result was stored, before the
+    // message handing that result to the model was: the session's start, the plugin's
+    // activation, the prompt, the model's message, the tool's start and its result.
+    let log = Failing {
+        healthy: 6,
+        commits: Arc::new(AtomicUsize::new(0)),
+    };
+    let model = Arc::new(ScriptedProvider::new([asks(&[("c1", "snap")])]));
+    let first = Harness::resume(model, Arc::new(EventStream::new().with_log(log))).unwrap();
+    let shots = Arc::default();
+    first.plugin(camera(&shots));
+    first.run("take a picture").await.unwrap_err();
+    assert_eq!(shots.load(Ordering::SeqCst), 1);
+    let stored = payloads(&first, "tool/result");
+    let events = first.events().events();
+    drop(first);
+
+    // A new process, with nothing but the log.
+    let again = Arc::default();
+    let model = Arc::new(ScriptedProvider::new([say("a fine view")]));
+    let second = Harness::resume(model, Arc::new(EventStream::replay(events))).unwrap();
+    second.plugin(camera(&again));
+    let outcome = second.continue_run(&SessionId::new(MAIN)).await.unwrap();
+
+    assert_eq!(
+        outcome.status,
+        Status::Finished {
+            answer: "a fine view".into()
+        }
+    );
+    // The tool did not run in this process, and no second result was recorded.
+    assert_eq!(again.load(Ordering::SeqCst), 0);
+    assert_eq!(payloads(&second, "tool/result"), stored);
+    let recorded: Value = serde_json::from_str(&stored[0]).unwrap();
+    assert_eq!(
+        recorded,
+        json!({
+            "id": "c1",
+            "tool": "snap",
+            "ok": true,
+            "output": "the view\n[image: image/png, 8 bytes]",
+            "content": [
+                {"type": "text", "text": "the view"},
+                {"type": "image", "mime_type": "image/png", "data": "iVBORw0KGgo="},
+            ],
+        })
+    );
+    // The model was handed the result the tool returned, image included, from the log.
+    assert_eq!(
+        results(&outcome.session),
+        [[
+            Content::text("the view"),
+            Content::image(
+                "image/png",
+                [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n']
+            ),
+        ]]
+    );
+}
+
 #[tokio::test]
 async fn continuing_a_finished_run_changes_nothing() {
     let (harness, _model) = harness(EventStream::new(), [say("done")]).unwrap();
@@ -350,17 +432,12 @@ async fn a_run_that_keeps_being_restarted_is_given_up() {
 struct Broken;
 
 #[async_trait]
-impl Operation<Session, Effect> for Broken {
+impl Operation for Broken {
     fn name(&self) -> &'static str {
         "broken"
     }
 
-    async fn run(
-        &self,
-        _session: &Session,
-        _conversation: &Conversation,
-        _emit: &Emitter,
-    ) -> anyhow::Result<OperationResult<Effect>> {
+    async fn run(&self, _session: &Session) -> anyhow::Result<Next> {
         anyhow::bail!("the process died")
     }
 }

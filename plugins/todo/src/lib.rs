@@ -5,13 +5,18 @@
 //! is shown in the system prompt while it is not empty, so the plan stays in view as the
 //! conversation grows.
 //!
-//! Tools: `todo_read`, and `todo_write`, which replaces the whole list. Needs `state`.
+//! Each session has a list of its own: a sub-agent planning its task does not overwrite the
+//! plan of the session that started it. The session comes from the `session` capability.
+//!
+//! Tools: `todo_read`, and `todo_write`, which replaces the whole list. Needs `state` and
+//! `session`.
 
-use corduroy_guest::host::state;
+use corduroy_guest::host::{session, state};
 use corduroy_guest::{Plugin, PluginInfo, ToolError, ToolSpec, parse};
 use serde::Deserialize;
 
-/// The state key the list is kept under.
+/// The state key of the list when no session is being served, and the start of each
+/// session's key.
 const KEY: &str = "list";
 /// The longest list kept, in bytes (the `state` store holds 64 KiB a value).
 const MAX_BYTES: usize = 32 * 1024;
@@ -21,8 +26,18 @@ struct Write {
     content: String,
 }
 
+/// The state key of the list of `session`, or of the list kept outside any session.
+fn key_for(session: Option<&str>) -> String {
+    session.map_or_else(|| KEY.to_owned(), |session| format!("{KEY}/{session}"))
+}
+
+/// The state key of the list of the session being served.
+fn key() -> Result<String, ToolError> {
+    Ok(key_for(session::current()?.as_deref()))
+}
+
 fn current() -> Result<String, ToolError> {
-    Ok(state::get(KEY)?.unwrap_or_default())
+    Ok(state::get(&key()?)?.unwrap_or_default())
 }
 
 struct Todo;
@@ -71,11 +86,12 @@ impl Plugin for Todo {
                         content.len()
                     )));
                 }
+                let key = key()?;
                 if content.trim().is_empty() {
-                    state::remove(KEY)?;
+                    state::remove(&key)?;
                     return Ok("Cleared the todo list.".to_owned());
                 }
-                state::set(KEY, &content)?;
+                state::set(&key, &content)?;
                 Ok(format!(
                     "Saved the todo list ({} lines).",
                     content.lines().count()
@@ -97,3 +113,15 @@ impl Plugin for Todo {
 }
 
 corduroy_guest::export!(Todo);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_session_has_a_key_of_its_own() {
+        assert_eq!(key_for(None), "list");
+        assert_eq!(key_for(Some("main")), "list/main");
+        assert_eq!(key_for(Some("main/1")), "list/main/1");
+    }
+}

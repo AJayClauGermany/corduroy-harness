@@ -27,6 +27,7 @@ export const CAPABILITIES = [
   'secret',
   'http',
   'log-read',
+  'session',
 ];
 
 /** The WIT package version imports are qualified with. */

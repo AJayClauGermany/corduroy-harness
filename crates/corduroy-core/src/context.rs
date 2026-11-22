@@ -12,6 +12,12 @@
 //!   (effects reverted) when one disappears, and is applied again when it returns. Dependents
 //!   are always unloaded before the service they depend on.
 //!
+//! **A name belongs to one plugin at a time.** Events, a plugin's stored state and calls
+//! between plugins all identify a plugin by its name, so two loaded plugins never share one:
+//! the plugin loaded first holds the name until it is disposed, and a later plugin of the
+//! same name is not applied ([`FiberState::Failed`]) until then. The names of the other
+//! event sources ([`RESERVED_NAMES`]) and the empty name are never a plugin's.
+//!
 //! The tree is changed through `&mut App`. Code that cannot have that (another thread, or a
 //! plugin's call while the tree is busy elsewhere) asks for a change through [`Requests`]; it
 //! is applied the next time the tree settles, and in the meantime the new plugin already has
@@ -29,6 +35,10 @@ use crate::event::{Draft, Event, EventId, EventStream, ListenerId, LogError, Sou
 use crate::json;
 use crate::pattern::Pattern;
 
+/// Names no plugin may have: they are how the other sources of events, and the harness as
+/// a caller of services, are written.
+pub const RESERVED_NAMES: [&str; 4] = ["host", "agent", "user", "environment"];
+
 /// Identifies one loaded plugin instance within an [`App`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FiberId(u64);
@@ -40,7 +50,10 @@ impl fmt::Display for FiberId {
 }
 
 /// Where a plugin instance is in its lifecycle. A disposed plugin has no state at all.
+///
+/// More states may be added, so match with a wildcard arm.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FiberState {
     /// Waiting for an injected service, or for its parent to become active.
     Pending,
@@ -68,6 +81,22 @@ pub trait Plugin: Send + Sync {
     /// Returns a [`PluginError`] if the plugin cannot start. Everything it registered through
     /// `ctx` before failing is reverted.
     fn apply(&mut self, ctx: &mut Context<'_>) -> Result<(), PluginError>;
+}
+
+/// A boxed plugin is a plugin, so code that chooses a plugin at run time (from a
+/// configuration file, say) can hand over whichever it built.
+impl<P: Plugin + ?Sized> Plugin for Box<P> {
+    fn name(&self) -> &str {
+        (**self).name()
+    }
+
+    fn inject(&self) -> Vec<String> {
+        (**self).inject()
+    }
+
+    fn apply(&mut self, ctx: &mut Context<'_>) -> Result<(), PluginError> {
+        (**self).apply(ctx)
+    }
 }
 
 /// A [`Plugin`] built from a closure. See [`plugin_fn`].
@@ -186,6 +215,7 @@ impl Error for ContextError {}
 
 /// A snapshot of one plugin instance, from [`App::fibers`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FiberInfo {
     /// The instance's id.
     pub id: FiberId,
@@ -551,7 +581,25 @@ impl App {
             .map(|(&id, _)| id)
     }
 
+    /// Why the fiber `id` may not go by its name, if it may not: the name is empty or
+    /// reserved, or a plugin loaded earlier holds it.
+    fn name_refused(&self, id: FiberId) -> Option<String> {
+        let name = self.fibers.get(&id)?.name.as_str();
+        if name.is_empty() {
+            return Some("a plugin needs a name".to_owned());
+        }
+        if RESERVED_NAMES.contains(&name) {
+            return Some(format!("`{name}` is reserved and cannot name a plugin"));
+        }
+        // Ids are handed out in the order plugins were loaded, so the earliest holds the name.
+        self.fibers
+            .range(..id)
+            .any(|(_, earlier)| earlier.name == name)
+            .then(|| format!("another plugin named `{name}` is already loaded"))
+    }
+
     fn activate(&mut self, id: FiberId) {
+        let refused = self.name_refused(id);
         let Some(mut plugin) = self
             .fibers
             .get_mut(&id)
@@ -559,10 +607,15 @@ impl App {
         else {
             return;
         };
-        let result = plugin.apply(&mut Context {
-            app: self,
-            fiber: id,
-        });
+        let result = refused.map_or_else(
+            || {
+                plugin.apply(&mut Context {
+                    app: self,
+                    fiber: id,
+                })
+            },
+            |reason| Err(PluginError::new(reason)),
+        );
         if let Err(error) = &result {
             // Temporal composability also covers a failed start: leave nothing behind.
             self.unwind(id);
@@ -876,7 +929,7 @@ mod tests {
         let log = journal();
         let mut app = App::new();
 
-        let user = app.plugin(tracked("user", &["db"], &log));
+        let user = app.plugin(tracked("client", &["db"], &log));
         assert_eq!(app.state(user), Some(&FiberState::Pending));
 
         let db = app.plugin(provider("db"));
@@ -887,7 +940,7 @@ mod tests {
 
         app.plugin(provider("db"));
         assert_eq!(app.state(user), Some(&FiberState::Active));
-        assert_eq!(entries(&log), ["+user", "-user", "+user"]);
+        assert_eq!(entries(&log), ["+client", "-client", "+client"]);
     }
 
     #[test]
@@ -901,11 +954,11 @@ mod tests {
             ctx.effect(move || note(&log, "-db"));
             Ok(())
         }));
-        app.plugin(tracked("user", &["db"], &log));
+        app.plugin(tracked("client", &["db"], &log));
 
         app.dispose(db).unwrap();
 
-        assert_eq!(entries(&log), ["+user", "-user", "-db"]);
+        assert_eq!(entries(&log), ["+client", "-client", "-db"]);
     }
 
     #[test]
@@ -1020,6 +1073,57 @@ mod tests {
                 "plugin/disposed {\"plugin\":\"ears\"}",
             ]
         );
+    }
+
+    #[test]
+    fn a_boxed_plugin_is_a_plugin() {
+        let log = journal();
+        let mut app = App::new();
+        let boxed: Box<dyn Plugin> = Box::new(tracked("boxed", &["db"], &log));
+
+        let id = app.plugin(boxed);
+        assert_eq!(app.state(id), Some(&FiberState::Pending));
+        app.plugin(provider("db"));
+
+        assert_eq!(app.fibers()[0].name, "boxed");
+        assert_eq!(entries(&log), ["+boxed"]);
+    }
+
+    #[test]
+    fn a_name_belongs_to_the_plugin_loaded_first() {
+        let log = journal();
+        let mut app = App::new();
+        let first = app.plugin(tracked("todo", &[], &log));
+        let second = app.plugin(tracked("todo", &[], &log));
+
+        assert_eq!(app.state(first), Some(&FiberState::Active));
+        assert_eq!(
+            app.state(second),
+            Some(&FiberState::Failed(
+                "another plugin named `todo` is already loaded".into()
+            ))
+        );
+        // Not applied at all, so there was nothing to revert.
+        assert_eq!(entries(&log), ["+todo"]);
+
+        // The name is free once its holder is gone, and a reload takes it.
+        app.dispose(first).unwrap();
+        app.reload(second).unwrap();
+        assert_eq!(app.state(second), Some(&FiberState::Active));
+
+        // A plugin still waiting for a service holds its name all the same.
+        let waiting = app.plugin(tracked("memory", &["db"], &log));
+        let impostor = app.plugin(tracked("memory", &[], &log));
+        assert_eq!(app.state(waiting), Some(&FiberState::Pending));
+        assert!(matches!(app.state(impostor), Some(FiberState::Failed(_))));
+
+        for reserved in ["host", "agent", ""] {
+            let id = app.plugin(tracked(reserved, &[], &log));
+            assert!(
+                matches!(app.state(id), Some(FiberState::Failed(_))),
+                "{reserved:?}"
+            );
+        }
     }
 
     #[test]

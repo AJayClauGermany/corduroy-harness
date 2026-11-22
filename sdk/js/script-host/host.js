@@ -5,7 +5,8 @@
 //   {"name": "tidy", "script": "return { tools: { ... }, subscriptions: [...], onEvent(e) {} }"}
 //
 // The script is the body of a function called with `host` (every capability, by name),
-// `ToolError` and `CallError`; it returns a plugin object of the same shape the SDK takes.
+// `ToolError`, `CallError` and `Content`; it returns a plugin object of the same shape the SDK
+// takes.
 // Nothing is compiled per automation, so the agent can write one as a file, and each loaded
 // instance is granted on its own: the host imports every capability, so an automation is
 // given `Scope::none()` for each it may not use, and a call outside its grant is refused like
@@ -27,9 +28,10 @@ import * as plugins from 'corduroy:plugin/plugins@0.1.0';
 import * as random from 'corduroy:plugin/random@0.1.0';
 import * as secret from 'corduroy:plugin/secret@0.1.0';
 import * as service from 'corduroy:plugin/service@0.1.0';
+import * as session from 'corduroy:plugin/session@0.1.0';
 import * as state from 'corduroy:plugin/state@0.1.0';
 import * as tools from 'corduroy:plugin/tools@0.1.0';
-import { CallError, ToolError } from 'corduroy-plugin';
+import { CallError, Content, ToolError } from 'corduroy-plugin';
 
 const host = Object.freeze({
   clock,
@@ -45,6 +47,7 @@ const host = Object.freeze({
   random,
   secret,
   service,
+  session,
   state,
   tools,
 });
@@ -58,7 +61,8 @@ const automation = {
       throw new Error('the script host needs `script` in its configuration: the body of a function returning a plugin');
     }
     // A restarted instance is activated again with the same configuration.
-    const defined = new Function('host', 'ToolError', 'CallError', config.script)(host, ToolError, CallError);
+    const define = new Function('host', 'ToolError', 'CallError', 'Content', config.script);
+    const defined = define(host, ToolError, CallError, Content);
     if (defined === null || typeof defined !== 'object') {
       throw new Error('the script must return a plugin object');
     }

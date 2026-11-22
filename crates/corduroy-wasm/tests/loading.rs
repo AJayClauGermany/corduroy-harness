@@ -65,7 +65,7 @@ fn loader(runtime: &WasmRuntime, work: &Path) -> Result<WasmPlugin, Box<dyn Erro
         .grant("fs-read", readable);
     for capability in [
         "events", "log", "clock", "random", "tools", "state", "service", "llm", "secret", "http",
-        "log-read",
+        "log-read", "session",
     ] {
         testbed = testbed.grant(capability, Scope::none());
     }
@@ -76,7 +76,7 @@ fn loader(runtime: &WasmRuntime, work: &Path) -> Result<WasmPlugin, Box<dyn Erro
 fn load(host: &Host, path: &Path, name: &str, grants: &Value) -> Result<Value, Box<dyn Error>> {
     let input = json!({"path": path, "name": name, "grants": grants});
     Ok(serde_json::from_str(
-        &host.tools.call("l.load", &input.to_string())?,
+        &host.tools.call("l.load", &input.to_string())?.to_text(),
     )?)
 }
 
@@ -161,7 +161,7 @@ fn protected_paths_are_out_of_reach_whatever_the_grant() {
         .tools
         .call("write", r#"{"path":"vault/new.txt","content":"x"}"#);
 
-    assert_eq!(notes.unwrap(), "fine");
+    assert_eq!(notes.unwrap().to_text(), "fine");
     assert!(
         matches!(&key, Err(ToolError::Denied(reason)) if reason.contains("protected by the host")),
         "{key:?}"
@@ -188,17 +188,82 @@ fn a_plugin_loads_children_with_no_more_than_it_holds() {
         .tools
         .call("read", &json!({"path": work.join("a.txt")}).to_string());
     let outside = host.tools.call("read", r#"{"path":"/etc/hostname"}"#);
-    assert_eq!(inside.unwrap(), "in reach");
+    assert_eq!(inside.unwrap().to_text(), "in reach");
     // It asked for every path, and got only those its loader can read.
     assert!(matches!(outside, Err(ToolError::Denied(_))), "{outside:?}");
     assert_eq!(
-        host.tools.call("l.loaded", "{}").unwrap(),
+        host.tools.call("l.loaded", "{}").unwrap().to_text(),
         r#"["child-tools"]"#
     );
 
     // Unloading the loader takes its children with it.
     host.app.dispose(parent).unwrap();
     assert!(host.tools.get("read").is_none());
+}
+
+#[test]
+fn a_child_cannot_take_the_name_of_a_plugin_that_is_loaded() {
+    let work = scratch("load-impostor");
+    let mut host = host(&work).unwrap();
+    let runtime = WasmRuntime::new().unwrap().with_root(&work);
+    // A plugin with something in its `state` store, which goes by the plugin's name.
+    let mut victim = runtime
+        .load(plugin("testbed"))
+        .unwrap()
+        .named("victim")
+        .config(json!({"prefix": "v."}).to_string());
+    for capability in corduroy_wasm::CAPABILITIES {
+        let scope = if capability == "state" {
+            Scope::any()
+        } else {
+            Scope::none()
+        };
+        victim = victim.grant(capability, scope);
+    }
+    host.app.plugin(victim);
+    let kept = json!({"op": "set", "key": "token", "value": "private"});
+    host.tools.call("v.state", &kept.to_string()).unwrap();
+    // A loader that may name its children anything and pass on a `state` of its own.
+    let loader = loader(&runtime, &work)
+        .unwrap()
+        .grant("plugins", Scope::any())
+        .grant("state", Scope::any());
+    host.app.plugin(loader);
+    let grants: Vec<Value> = corduroy_wasm::CAPABILITIES
+        .iter()
+        .map(|capability| {
+            let allow = if *capability == "state" {
+                vec!["*"]
+            } else {
+                vec![]
+            };
+            json!({"capability": capability, "allow": allow, "deny": []})
+        })
+        .collect();
+
+    load(&host, &plugin("testbed"), "victim", &json!(grants)).unwrap();
+    host.app.apply_requests();
+
+    // The impostor is in the tree but was never started, so it read nothing.
+    let impostor = host
+        .app
+        .fibers()
+        .into_iter()
+        .find(|fiber| fiber.name == "victim" && fiber.parent.is_some())
+        .unwrap();
+    assert_eq!(
+        impostor.state,
+        FiberState::Failed("another plugin named `victim` is already loaded".into())
+    );
+    assert!(host.tools.get("state").is_none());
+    let read = json!({"op": "get", "key": "token"});
+    assert_eq!(
+        host.tools
+            .call("v.state", &read.to_string())
+            .unwrap()
+            .to_text(),
+        r#""private""#
+    );
 }
 
 #[test]
@@ -328,7 +393,7 @@ fn echo(name: &str, on: &str, emit: &str, cascade: usize) -> Result<WasmPlugin, 
         .grant("events", Scope::any());
     for capability in [
         "log", "clock", "random", "tools", "state", "service", "plugins", "llm", "secret", "http",
-        "log-read",
+        "log-read", "session",
     ] {
         testbed = testbed.grant(capability, Scope::none());
     }

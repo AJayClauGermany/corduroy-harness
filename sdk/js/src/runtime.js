@@ -26,6 +26,62 @@ export class CallError extends Error {
   }
 }
 
+/** The bytes of an image, from whatever holds them. */
+function bytesOf(data) {
+  if (data instanceof Uint8Array) {
+    return data;
+  }
+  if (data instanceof ArrayBuffer) {
+    return new Uint8Array(data);
+  }
+  if (ArrayBuffer.isView(data)) {
+    return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  }
+  if (Array.isArray(data)) {
+    return Uint8Array.from(data);
+  }
+  throw new TypeError('an image needs its bytes: a Uint8Array, an ArrayBuffer or an array of numbers');
+}
+
+/**
+ * One block of a tool's result: text, or an image. A tool that returns one of these, or an
+ * array of them, returns those blocks as they are; anything else a tool returns is one block
+ * of text. Make them with `Content.text` and `Content.image`.
+ */
+export class Content {
+  constructor(tag, val) {
+    this.tag = tag;
+    this.val = val;
+    Object.freeze(this);
+  }
+
+  /** A block of text. Anything but a string is written as JSON. */
+  static text(value) {
+    return new Content('text', text(value));
+  }
+
+  /** An image of the kind `mimeType` names, such as `image/png`, from its bytes. */
+  static image(mimeType, data) {
+    if (typeof mimeType !== 'string' || mimeType === '') {
+      throw new TypeError('an image needs a MIME type, such as image/png');
+    }
+    return new Content('image', { mimeType, data: bytesOf(data) });
+  }
+
+  /**
+   * The text of a tool's result, such as `call` of the `tools` capability returns: its text
+   * blocks joined by newlines, with an image standing as a marker such as
+   * `[image: image/png, 1234 bytes]`.
+   */
+  static textOf(blocks) {
+    return blocks
+      .map((block) =>
+        block.tag === 'image' ? `[image: ${block.val.mimeType}, ${block.val.data.length} bytes]` : block.val,
+      )
+      .join('\n');
+  }
+}
+
 /** The host interfaces the runtime itself uses: `log`, `clock` and `random`, if granted. */
 let host = {};
 
@@ -223,6 +279,19 @@ function callError(error) {
   return { tag: 'failed', val: describe(error) };
 }
 
+/**
+ * What a tool returned, as the content blocks the host passes on: blocks made with `Content`
+ * as they are, and anything else as one block of text. An array is a list of blocks only if
+ * it has something in it and all of it is blocks; any other array is JSON, as it always was.
+ */
+function content(value) {
+  const blocks = Array.isArray(value) ? value : [value];
+  if (blocks.length > 0 && blocks.every((block) => block instanceof Content)) {
+    return blocks.map(({ tag, val }) => ({ tag, val }));
+  }
+  return [{ tag: 'text', val: text(value) }];
+}
+
 /** What a tool or service returned, as the text the host passes on. */
 function text(value) {
   if (value === undefined || value === null) {
@@ -259,6 +328,7 @@ function verdict(answer) {
  * {
  *   name: 'notes', version: '0.1.0',
  *   activate(config) {},                                       // optional
+ *   // `run` returns text, anything else as JSON, or blocks made with `Content`.
  *   tools: { note: { description, input, readOnly, replaySafe, run(input) {} } },
  *   subscriptions: ['turn/end'], onEvent(event) {},            // optional
  *   prompt() { return 'text for the system prompt'; },         // optional
@@ -305,7 +375,7 @@ export function exportsFor(plugin) {
       let parsed;
       try {
         parsed = parse(input, (message) => new ToolError('invalid-input', message));
-        return text(tool.run(parsed));
+        return content(tool.run(parsed));
       } catch (error) {
         throw toolError(error);
       }

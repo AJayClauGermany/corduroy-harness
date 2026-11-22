@@ -6,10 +6,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use corduroy_harness::core::{Completion, EventStream, ModelError, Pattern, Role, Scope, Turn};
-use corduroy_harness::oi_kit_provider_types::base::Provider;
 use corduroy_harness::scripted::{ScriptedProvider, call, say};
 use corduroy_harness::wasm::WasmRuntime;
-use corduroy_harness::{Harness, Status, provider};
+use corduroy_harness::{Harness, Provider, Status, provider};
 use corduroy_test_support::plugin;
 use serde_json::json;
 

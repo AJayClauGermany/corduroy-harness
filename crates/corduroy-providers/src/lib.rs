@@ -10,6 +10,10 @@
 //! API keys are read from the environment variable the spec names, by the provider, when it
 //! is built. They are never part of the spec, the agent file or the event log.
 //!
+//! What is built is a [`corduroy_harness::Provider`]: it speaks the harness's own messages,
+//! and converts to and from oi-kit's for each request. oi-kit's types go no further than this
+//! crate, so the harness, its log and its plugins do not depend on them.
+//!
 //! ```no_run
 //! use corduroy_providers::{ProviderSpec, build};
 //!
@@ -23,11 +27,13 @@
     reason = "the oi-kit and reqwest dependency trees pull several versions of shared crates"
 )]
 
+pub mod adapter;
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
-use oi_kit_provider_types::base::Provider;
+use corduroy_harness::Provider;
 use oi_kit_providers::declarative::{EnvKeyResolver, fixed_provider_config_entries, from_json};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -196,7 +202,7 @@ pub fn build(name: &str, spec: &ProviderSpec) -> Result<Arc<dyn Provider>, Build
     let config = config(name, spec)?;
     let provider = from_json(&config.to_string(), None, EnvKeyResolver::new())
         .map_err(|error| BuildError(format!("provider `{name}`: {error:#}")))?;
-    Ok(Arc::from(provider))
+    Ok(Arc::new(adapter::Adapted(Arc::from(provider))))
 }
 
 #[cfg(test)]
@@ -253,7 +259,6 @@ mod tests {
 
     #[test]
     fn a_provider_needing_no_key_builds_without_the_network() {
-        let provider = build("local", &ProviderSpec::new("ollama")).unwrap();
-        assert_eq!(provider.get_name(), "local");
+        assert!(build("local", &ProviderSpec::new("ollama")).is_ok());
     }
 }

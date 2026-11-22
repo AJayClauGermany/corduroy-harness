@@ -32,9 +32,27 @@ interface types {
         denied(string),
     }
 
+    /// An image in a tool's result.
+    record image {
+        /// What kind of image `data` is, such as `image/png`.
+        mime-type: string,
+        /// The image's bytes, as they would be in a file.
+        data: list<u8>,
+    }
+
+    /// One block of a tool's result. A result is a list of them, in the order the model
+    /// should see them; a tool that returns text returns one `text`.
+    variant content {
+        text(string),
+        image(image),
+    }
+
     /// One entry of the harness event stream.
     record event {
         id: u64,
+        /// When the event was stored, in milliseconds since 1970-01-01T00:00:00Z. Times never
+        /// decrease along the stream.
+        time: u64,
         /// The session the event belongs to. Events about the harness itself have none.
         session: option<string>,
         /// `user`, `agent`, `environment`, `host` or `plugin:<name>`.
@@ -200,13 +218,14 @@ interface random {
 /// Capability `tools`: call tools other plugins registered, as the model does. Scoped by tool
 /// name. Each call passes the gates first, with the plugin as its caller.
 interface tools {
-    use types.{tool-spec, tool-error};
+    use types.{tool-spec, tool-error, content};
 
     /// The tools the plugin's scope reaches, by name.
     %list: func() -> list<tool-spec>;
-    /// Call `name` with `input`, a JSON object. A gate's deny, and a gate's ask (a plugin's
-    /// call cannot wait for a person), come back as `denied`.
-    call: func(name: string, input: string) -> result<string, tool-error>;
+    /// Call `name` with `input`, a JSON object, and get the blocks of its result. A gate's
+    /// deny, and a gate's ask (a plugin's call cannot wait for a person), come back as
+    /// `denied`.
+    call: func(name: string, input: string) -> result<list<content>, tool-error>;
 }
 
 /// Capability `state`: a durable key-value store of the plugin's own. Scoped by key. Values
@@ -357,10 +376,31 @@ interface log-read {
     read: func(session: option<string>, topic: string, after: u64, limit: u32) -> result<list<event>, host-error>;
 }
 
+/// Capability `session`: which session the plugin is being called for. Scoped by session id.
+///
+/// A harness holds many sessions (a sub-agent is a session of its own), and one plugin serves
+/// all of them. A plugin that keeps something per session (a list, a count, notes) keys it by
+/// the session this says it is serving.
+interface session {
+    use types.{host-error};
+
+    /// The session the current call into the plugin serves: the tool call, prompt part,
+    /// gate request or event it is handling. `none` when it serves the harness itself (on
+    /// `activate`, or for an event that belongs to no session). `denied` if the grant does
+    /// not reach that session.
+    current: func() -> result<option<string>, host-error>;
+    /// The id of the tool call being served, if the plugin is serving one. Checked against
+    /// the grant like `current`.
+    call: func() -> result<option<string>, host-error>;
+    /// Whether the run being served was asked to stop. A tool that takes long looks now and
+    /// then and returns early when it was; what it returns is still recorded.
+    stopping: func() -> bool;
+}
+
 /// A plugin. Every import is a capability the host must grant before the plugin is
 /// instantiated; a plugin that imports nothing can only compute.
 world plugin {
-    use types.{plugin-info, tool-error, event, verdict, call-error, service-call};
+    use types.{plugin-info, tool-error, content, event, verdict, call-error, service-call};
 
     import fs-read;
     import fs-write;
@@ -377,11 +417,13 @@ world plugin {
     import secret;
     import http;
     import log-read;
+    import session;
 
     /// Called once per instantiation with the plugin's configuration as JSON text.
     export activate: func(config: string) -> result<plugin-info, string>;
-    /// Run one of the tools listed by `activate`. `input` is a JSON object.
-    export call-tool: func(name: string, input: string) -> result<string, tool-error>;
+    /// Run one of the tools listed by `activate`. `input` is a JSON object. The result is a
+    /// list of content blocks; text is a list of one `text`.
+    export call-tool: func(name: string, input: string) -> result<list<content>, tool-error>;
     /// Called for each event matching the plugin's subscriptions.
     export on-event: func(event: event);
     /// Text to add to the system prompt for the next model request.

@@ -25,6 +25,7 @@ CAPABILITIES = [
     "secret",
     "http",
     "log-read",
+    "session",
 ]
 
 

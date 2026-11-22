@@ -8,7 +8,6 @@ use corduroy_harness::core::{
     Draft, EventStream, Gate, Pattern, Scope, SessionId, Source, TOOLS, ToolError, ToolSpec, Tools,
     Verdict, plugin_fn, tool_fn,
 };
-use corduroy_harness::oi_kit_provider_types::conversation::message::MessageContent;
 use corduroy_harness::scripted::{ScriptedProvider, call, say};
 use corduroy_harness::wasm::WasmRuntime;
 use corduroy_harness::{Answer, Harness, MAIN, SIGNAL, Status};
@@ -16,13 +15,7 @@ use corduroy_test_support::plugin;
 use serde_json::json;
 
 fn spec(name: &str) -> ToolSpec {
-    ToolSpec {
-        name: name.into(),
-        description: String::new(),
-        input_schema: r#"{"type":"object"}"#.into(),
-        replay_safe: false,
-        read_only: false,
-    }
+    ToolSpec::new(name, "", r#"{"type":"object"}"#)
 }
 
 /// A harness over `events` with the `subagents` plugin, a `poke` tool, and a `ci` tool whose
@@ -34,11 +27,11 @@ fn harness(model: &Arc<ScriptedProvider>, events: Arc<EventStream>) -> Harness {
         tools.register(
             ctx,
             "poke",
-            Arc::new(tool_fn(spec("poke"), |_| Ok("poked".into()))),
+            Arc::new(tool_fn(spec("poke"), |_| Ok("poked"))),
         )?;
         let ci = tool_fn(spec("ci"), |_| {
             if corduroy_harness::core::call::wait_for("ci/done") {
-                Ok("started the build".into())
+                Ok("started the build")
             } else {
                 Err(ToolError::Failed("not in a call".into()))
             }
@@ -62,21 +55,9 @@ fn results(harness: &Harness, session: &str) -> Vec<String> {
     journal
         .session()
         .conversation()
-        .messages()
         .iter()
-        .flat_map(|message| message.content.clone())
-        .filter_map(|content| match content {
-            MessageContent::ToolResponse(response) => response.tool_result.ok(),
-            _ => None,
-        })
-        .map(|result| {
-            let texts: Vec<String> = result
-                .content
-                .iter()
-                .filter_map(|block| block.as_text().map(|text| text.text.clone()))
-                .collect();
-            texts.join("\n")
-        })
+        .flat_map(|message| message.tool_results().cloned().collect::<Vec<_>>())
+        .map(|result| result.output.to_text())
         .collect()
 }
 
@@ -326,4 +307,45 @@ async fn a_plugins_event_does_not_answer_a_gate_or_write_the_conversation() {
 
 fn harness_with(model: &Arc<ScriptedProvider>, events: Arc<EventStream>) -> Harness {
     harness(model, events)
+}
+
+#[tokio::test]
+async fn a_sub_agent_keeps_a_todo_list_of_its_own() {
+    let model = Arc::new(ScriptedProvider::new([
+        call(
+            "p1",
+            "todo_write",
+            &json!({"content": "- [ ] the parent's plan"}),
+        ),
+        call("p2", "delegate", &json!({"task": "do the small part"})),
+        call(
+            "c1",
+            "todo_write",
+            &json!({"content": "- [ ] the sub-agent's plan"}),
+        ),
+        say("small part done"),
+        say("all done"),
+    ]));
+    let harness = harness(&model, Arc::new(EventStream::new()));
+    let mut todo = WasmRuntime::new().unwrap().load(plugin("todo")).unwrap();
+    for capability in todo.requires().to_vec() {
+        todo = todo.grant(capability, Scope::any());
+    }
+    harness.plugin(todo);
+
+    let outcome = harness.run("plan, then delegate").await.unwrap();
+
+    assert_eq!(
+        outcome.status,
+        Status::Finished {
+            answer: "all done".into()
+        }
+    );
+    // Each request's system prompt shows the list of the session that asked, and no other.
+    let systems: Vec<String> = model.requests().into_iter().map(|r| r.system).collect();
+    let (child, parent) = (&systems[3], &systems[4]);
+    assert!(child.contains("the sub-agent's plan"), "{child}");
+    assert!(!child.contains("the parent's plan"), "{child}");
+    assert!(parent.contains("the parent's plan"), "{parent}");
+    assert!(!parent.contains("the sub-agent's plan"), "{parent}");
 }

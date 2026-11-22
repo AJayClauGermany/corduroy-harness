@@ -14,6 +14,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+/// How often a running cell looks whether the run it is for was asked to stop.
+const STOP_POLL: Duration = Duration::from_millis(100);
+
 use corduroy_core::{
     Cell, KERNELS, Kernel, KernelError, Kernels, MAX_OUTPUT, Plugin, Process, Spawn, plugin_fn,
 };
@@ -209,9 +212,16 @@ impl Session {
         let mut truncated = false;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
-            let line = match self.lines.recv_timeout(remaining) {
+            // Woken now and then, to end the cell if the run it is for was asked to stop.
+            let line = match self.lines.recv_timeout(remaining.min(STOP_POLL)) {
                 Ok(line) => line,
-                Err(RecvTimeoutError::Timeout) => return Err(KernelError::TimedOut(timeout)),
+                Err(RecvTimeoutError::Timeout) if remaining <= STOP_POLL => {
+                    return Err(KernelError::TimedOut(timeout));
+                }
+                Err(RecvTimeoutError::Timeout) if corduroy_core::call::stopping() => {
+                    return Err(KernelError::Stopped { output });
+                }
+                Err(RecvTimeoutError::Timeout) => continue,
                 Err(RecvTimeoutError::Disconnected) => return Err(KernelError::Exited { output }),
             };
             let Some(status) = line.strip_prefix(marker) else {
@@ -398,6 +408,39 @@ mod tests {
 
         assert_eq!(run(&mut kernel, "cat").output, "");
         assert_eq!(run(&mut kernel, "echo still here").output, "still here\n");
+    }
+
+    #[test]
+    fn a_cell_ends_when_the_run_it_is_for_is_stopped() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use corduroy_core::SessionId;
+        use corduroy_core::call::Serve;
+
+        let mut kernel = ShellKernel::new();
+        run(&mut kernel, "lost=yes");
+        let stop = Arc::new(AtomicBool::new(false));
+        let asker = Arc::clone(&stop);
+        let started = Instant::now();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(300));
+            asker.store(true, Ordering::SeqCst);
+        });
+
+        let serve = Serve::session(SessionId::new("main"))
+            .call("1")
+            .stopped_by(stop);
+        let (ended, _) = serve.run(|| kernel.exec("echo begun; sleep 30", PATIENT));
+
+        assert_eq!(
+            ended,
+            Err(KernelError::Stopped {
+                output: "begun\n".into()
+            })
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+        // As after a timeout, the next cell runs in a fresh shell.
+        assert_eq!(run(&mut kernel, "echo \"[$lost]\"").output, "[]\n");
     }
 
     #[test]

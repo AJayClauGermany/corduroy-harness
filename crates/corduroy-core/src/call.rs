@@ -1,60 +1,131 @@
-//! The tool call being served on this thread, and the signals it waits for.
+//! What a thread is being called for: the session it serves, the tool call if there is one,
+//! the signals that call waits for, and whether the run was asked to stop.
 //!
 //! A tool runs synchronously on the thread that calls it, and so does everything it calls in
 //! turn: a WebAssembly plugin's host functions, a service another plugin provides. Whoever
-//! runs a tool on behalf of a session wraps the call in [`within`], and anything on that call
-//! chain can then ask which session and which call it serves ([`current`]), so that events it
-//! raises carry the session, and can say that the call's result is not ready yet but will come
-//! with a signal ([`wait_for`]).
+//! calls into plugins on behalf of a session says so with [`Serve`] (or [`within`], for a
+//! tool call), and anything on that call chain can then ask which session and which call it
+//! serves ([`current`]). That is how a plugin keeps something of its own for each session
+//! (a list per session, a sub-agent's apart from its parent's), and how the events it
+//! raises carry the session.
 //!
-//! A call that waits is not a failure. Whoever ran it records that it waits; the run stops
-//! before the model sees anything, waits in the log, and takes the call's result from the
-//! signal when it comes. That is how a parent session waits for a child session: the call
-//! that started the child waits for the signal its end raises.
+//! Three things use the scope:
+//!
+//! * **Session.** A tool call, a prompt part being rendered and a gate being asked are all
+//!   served for one session.
+//! * **Waiting.** A tool call can say that its result is not ready yet but will come with a
+//!   signal ([`wait_for`]). That is not a failure: whoever ran the call records that it
+//!   waits; the run stops before the model sees anything, waits in the log, and takes the
+//!   call's result from the signal when it comes. A parent session waits for a child
+//!   session this way.
+//! * **Stopping.** When a person stops a run, whatever is still working for it can find out
+//!   ([`stopping`]) and finish early: a kernel ends the cell it is running, a long tool
+//!   returns what it has.
 
 use std::cell::RefCell;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::event::SessionId;
 
-/// The call a thread is serving.
+/// What a thread is serving.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Scope {
-    /// The session the call belongs to.
+    /// The session being served.
     pub session: SessionId,
-    /// The tool call's id.
-    pub call: String,
+    /// The id of the tool call being served, if it is one: not when a prompt part is
+    /// rendered or a gate is asked.
+    pub call: Option<String>,
 }
 
 struct Serving {
     scope: Scope,
     waits: Vec<String>,
+    stop: Option<Arc<AtomicBool>>,
 }
 
 thread_local! {
     static SERVING: RefCell<Vec<Serving>> = const { RefCell::new(Vec::new()) };
 }
 
+/// A description of what a thread is about to do for a session. Build it, then
+/// [`run`](Self::run) the work inside it.
+///
+/// ```
+/// use corduroy_core::SessionId;
+/// use corduroy_core::call::{Serve, current};
+///
+/// let session = SessionId::new("main");
+/// let (seen, _waits) = Serve::session(session.clone()).run(|| current().map(|scope| scope.session));
+/// assert_eq!(seen, Some(session));
+/// assert_eq!(current(), None);
+/// ```
+#[derive(Debug, Clone)]
+pub struct Serve {
+    scope: Scope,
+    stop: Option<Arc<AtomicBool>>,
+}
+
+impl Serve {
+    /// Serve `session`, with no tool call: rendering a prompt part, asking a gate.
+    #[must_use]
+    pub const fn session(session: SessionId) -> Self {
+        Self {
+            scope: Scope {
+                session,
+                call: None,
+            },
+            stop: None,
+        }
+    }
+
+    /// Serve the tool call `id` of the session. Only a tool call can [wait](wait_for).
+    #[must_use]
+    pub fn call(mut self, id: impl Into<String>) -> Self {
+        self.scope.call = Some(id.into());
+        self
+    }
+
+    /// Let the work find out, through [`stopping`], when `flag` is set: the run it is for
+    /// was asked to stop.
+    #[must_use]
+    pub fn stopped_by(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.stop = Some(flag);
+        self
+    }
+
+    /// Run `serve` in this scope. Returns what it returned, and the signals anything on the
+    /// call chain said the call waits for, in order.
+    ///
+    /// Scopes nest: work that serves another call inside this one serves the inner call
+    /// until it returns, then this one again.
+    pub fn run<R>(self, serve: impl FnOnce() -> R) -> (R, Vec<String>) {
+        SERVING.with(|serving| {
+            serving.borrow_mut().push(Serving {
+                scope: self.scope,
+                waits: Vec::new(),
+                stop: self.stop,
+            });
+        });
+        // Popped even if `serve` panics, so a later call on this thread is not misattributed.
+        let guard = Pop;
+        let result = serve();
+        drop(guard);
+        let waits = SERVING.with(|serving| serving.borrow_mut().pop().map(|served| served.waits));
+        (result, waits.unwrap_or_default())
+    }
+}
+
 /// Run `serve` as the tool call `call` of `session`. Returns what it returned, and the
 /// signals anything on the call chain said the call waits for, in order.
 ///
-/// Calls nest: a tool that calls another tool through [`within`] serves the inner call
-/// until it returns, then the outer one again.
+/// Short for [`Serve::session`], [`call`](Serve::call) and [`run`](Serve::run).
 pub fn within<R>(session: SessionId, call: String, serve: impl FnOnce() -> R) -> (R, Vec<String>) {
-    SERVING.with(|serving| {
-        serving.borrow_mut().push(Serving {
-            scope: Scope { session, call },
-            waits: Vec::new(),
-        });
-    });
-    // Popped even if `serve` panics, so a later call on this thread is not misattributed.
-    let guard = Pop;
-    let result = serve();
-    drop(guard);
-    let waits = SERVING.with(|serving| serving.borrow_mut().pop().map(|served| served.waits));
-    (result, waits.unwrap_or_default())
+    Serve::session(session).call(call).run(serve)
 }
 
-/// Pops the innermost call on drop, unless [`within`] already did.
+/// Pops the innermost scope on drop, unless [`Serve::run`] already did.
 struct Pop;
 
 impl Drop for Pop {
@@ -65,23 +136,43 @@ impl Drop for Pop {
     }
 }
 
-/// The call this thread is serving, if any.
+/// What this thread is serving, if anything.
 #[must_use]
 pub fn current() -> Option<Scope> {
     SERVING.with(|serving| serving.borrow().last().map(|served| served.scope.clone()))
 }
 
-/// Say that the call this thread is serving waits for `signal`: its result will be the
-/// signal's payload. Returns `false`, and does nothing, if no call is being served.
+/// Say that the tool call this thread is serving waits for `signal`: its result will be the
+/// signal's payload. Returns `false`, and does nothing, if no tool call is being served.
 #[must_use = "a call that cannot wait must answer now"]
 pub fn wait_for(signal: &str) -> bool {
     SERVING.with(|serving| {
         let mut serving = serving.borrow_mut();
-        let Some(served) = serving.last_mut() else {
+        let Some(served) = serving
+            .last_mut()
+            .filter(|served| served.scope.call.is_some())
+        else {
             return false;
         };
         served.waits.push(signal.to_owned());
         true
+    })
+}
+
+/// Whether the run this thread works for was asked to stop. Work that can take long should
+/// look now and then, and finish early when it is: the result it returns is still recorded.
+///
+/// `false` when nothing is being served, or whoever serves it cannot be stopped.
+#[must_use]
+pub fn stopping() -> bool {
+    SERVING.with(|serving| {
+        // A call made for an outer call stops with it.
+        serving.borrow().iter().any(|served| {
+            served
+                .stop
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::SeqCst))
+        })
     })
 }
 
@@ -98,7 +189,7 @@ mod tests {
             assert!(wait_for("session/main/1/end"));
             let (nested, nested_waits) = within(SessionId::new("main"), "2".into(), || {
                 assert!(wait_for("inner"));
-                current().map(|scope| scope.call)
+                current().and_then(|scope| scope.call)
             });
             assert_eq!(nested_waits, ["inner"]);
             assert_eq!(current(), outer);
@@ -107,6 +198,43 @@ mod tests {
         assert_eq!(inner.as_deref(), Some("2"));
         assert_eq!(waits, ["session/main/1/end"]);
         assert_eq!(current(), None);
+    }
+
+    #[test]
+    fn a_session_is_served_without_a_call_and_then_cannot_wait() {
+        let session = SessionId::new("main/1");
+        let ((scope, waited), waits) =
+            Serve::session(session.clone()).run(|| (current(), wait_for("anything")));
+
+        assert_eq!(
+            scope,
+            Some(Scope {
+                session,
+                call: None
+            })
+        );
+        assert!(!waited);
+        assert_eq!(waits, Vec::<String>::new());
+    }
+
+    #[test]
+    fn work_learns_that_its_run_was_asked_to_stop() {
+        assert!(!stopping());
+        let flag = Arc::new(AtomicBool::new(false));
+        let serve = Serve::session(SessionId::new("main"))
+            .call("1")
+            .stopped_by(Arc::clone(&flag));
+
+        let ((before, after, nested), _waits) = serve.run(|| {
+            let before = stopping();
+            flag.store(true, Ordering::SeqCst);
+            // A call made for this one, with no flag of its own, stops with it.
+            let (nested, _) = within(SessionId::new("main"), "2".into(), stopping);
+            (before, stopping(), nested)
+        });
+
+        assert_eq!((before, after, nested), (false, true, true));
+        assert!(!stopping());
     }
 
     #[test]

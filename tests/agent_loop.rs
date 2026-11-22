@@ -5,30 +5,25 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 use corduroy_harness::core::{
-    Context, EventStream, Pattern, PluginError, SessionId, TOOLS, ToolError, ToolSpec, Tools,
-    plugin_fn, tool_fn,
+    Context, EventStream, Message, Pattern, PluginError, SessionId, TOOLS, ToolError, ToolResult,
+    ToolSpec, Tools, plugin_fn, tool_fn,
 };
-use corduroy_harness::oi_kit_agent::operation::{
-    Emitter, Operation, OperationResult, RunStatus, applied, not_applicable,
-};
-use corduroy_harness::oi_kit_agent::tool_call_state::pending_tool_requests;
-use corduroy_harness::oi_kit_provider_types::conversation::Conversation;
-use corduroy_harness::oi_kit_provider_types::conversation::message::Message;
 use corduroy_harness::scripted::{ScriptedProvider, call, say};
-use corduroy_harness::{Effect, Harness, HarnessError, MAIN, Session, SessionInfo, Status};
-use rmcp::model::{CallToolResult, ContentBlock};
+use corduroy_harness::{
+    Effect, Harness, HarnessError, MAIN, Next, OPERATIONS, Operation, Operations, Session,
+    SessionInfo, Status, Stepped,
+};
 use serde_json::json;
-use tokio_util::sync::CancellationToken;
 
 /// A native plugin contributing `add`, which sums the numbers in `{"terms": [...]}`.
 fn calculator(ctx: &mut Context<'_>) -> Result<(), PluginError> {
-    let spec = ToolSpec {
-        name: "add".into(),
-        description: "Sum a list of integers.".into(),
-        input_schema: r#"{"type":"object","properties":{"terms":{"type":"array"}}}"#.into(),
-        replay_safe: true,
-        read_only: true,
-    };
+    let spec = ToolSpec::new(
+        "add",
+        "Sum a list of integers.",
+        r#"{"type":"object","properties":{"terms":{"type":"array"}}}"#,
+    )
+    .replay_safe(true)
+    .read_only(true);
     let add = tool_fn(spec, |input| {
         let input: serde_json::Value = serde_json::from_str(input)
             .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
@@ -121,12 +116,12 @@ async fn every_event_records_its_source_and_cause() {
             "#1 host session/start in main",
             "#2 host plugin/activated",
             "#3 user message in main",
-            "#5 agent message in main",
-            "#6 agent tool/call in main <- #5",
-            "#7 host tool/start in main <- #6",
-            "#8 environment tool/result in main <- #6",
+            "#4 agent message in main",
+            "#5 agent tool/call in main <- #4",
+            "#7 host tool/start in main <- #5",
+            "#8 environment tool/result in main <- #5",
             "#9 environment message in main",
-            "#11 agent message in main",
+            "#10 agent message in main",
             "#12 host turn/end in main",
         ]
     );
@@ -148,7 +143,7 @@ async fn tool_failures_go_back_to_the_model_as_data() {
     assert_eq!(
         tool_results(&harness),
         [
-            r#"{"id":"c1","tool":"calculator","ok":false,"output":"Tool 'calculator' was not available in this request. Available tools: [add]."}"#,
+            r#"{"id":"c1","tool":"calculator","ok":false,"output":"unknown tool `calculator`"}"#,
             r#"{"id":"c2","tool":"add","ok":false,"output":"invalid input: `terms` must be a list"}"#,
             r#"{"id":"c3","tool":"add","ok":true,"output":"5"}"#,
         ]
@@ -175,7 +170,7 @@ async fn a_model_that_never_answers_runs_out_of_turns() {
 }
 
 #[tokio::test]
-async fn a_failing_model_ends_the_run_with_the_error_in_the_conversation() {
+async fn a_failing_model_ends_the_run_with_the_error_recorded() {
     let (harness, _model) = harness([]).unwrap();
 
     let outcome = harness.run("anyone there?").await.unwrap();
@@ -184,6 +179,11 @@ async fn a_failing_model_ends_the_run_with_the_error_in_the_conversation() {
         panic!("expected a failure, got {:?}", outcome.status);
     };
     assert!(reason.contains("the script ran out"), "{reason}");
+    let ends = harness.events().matching(&Pattern::new("turn/end"));
+    assert_eq!(
+        ends[0].payload,
+        r#"{"status":"failed","reason":"the script ran out"}"#
+    );
 }
 
 #[tokio::test]
@@ -203,32 +203,23 @@ async fn unloading_a_plugin_takes_its_tools_away_from_the_next_request() {
 struct Forbid(&'static str);
 
 #[async_trait]
-impl Operation<Session, Effect> for Forbid {
+impl Operation for Forbid {
     fn name(&self) -> &'static str {
         "forbid"
     }
 
-    async fn run(
-        &self,
-        _session: &Session,
-        conversation: &Conversation,
-        _emit: &Emitter,
-    ) -> Result<OperationResult<Effect>> {
-        let mut refusals = Message::user();
-        for request in pending_tool_requests(conversation.messages()) {
-            let forbidden = request
-                .tool_call
-                .as_ref()
-                .is_ok_and(|call| call.name == self.0);
-            if forbidden {
-                let refusal = CallToolResult::error(vec![ContentBlock::text("not allowed here")]);
-                refusals = refusals.with_tool_response(request.id.clone(), Ok(refusal));
-            }
+    async fn run(&self, session: &Session) -> Result<Next> {
+        let refusals = session
+            .pending_calls()
+            .into_iter()
+            .filter(|call| call.name == self.0)
+            .fold(Message::user(), |refusals, call| {
+                refusals.result(ToolResult::failed(call.id, "not allowed here"))
+            });
+        if refusals.is_empty() {
+            return Ok(Next::Pass);
         }
-        if refusals.content.is_empty() {
-            return not_applicable();
-        }
-        applied([Effect::from(refusals)])
+        Ok(Next::Continue(vec![Effect::from(refusals)]))
     }
 }
 
@@ -247,34 +238,53 @@ async fn a_custom_operation_can_step_in_before_tools_run() {
 }
 
 #[tokio::test]
+async fn a_native_plugin_contributes_a_step_that_leaves_with_it() {
+    let script = [
+        call("c1", "add", &json!({"terms": [1, 1]})),
+        say("refused"),
+        call("c2", "add", &json!({"terms": [2, 2]})),
+        say("four"),
+    ];
+    let (harness, _model) = harness(script).unwrap();
+    let policy = harness.plugin(plugin_fn("policy", &[OPERATIONS], |ctx| {
+        let operations = ctx.service::<Operations>(OPERATIONS)?;
+        operations.register(ctx, "policy/forbid", Arc::new(Forbid("add")))?;
+        Ok(())
+    }));
+    assert_eq!(harness.operations().names(), ["policy/forbid"]);
+
+    harness.run("add").await.unwrap();
+    harness.app().dispose(policy).unwrap();
+    harness.run("add again").await.unwrap();
+
+    assert_eq!(harness.operations().names(), Vec::<String>::new());
+    assert_eq!(
+        tool_results(&harness),
+        [
+            r#"{"id":"c1","tool":"add","ok":false,"output":"not allowed here"}"#,
+            r#"{"id":"c2","tool":"add","ok":true,"output":"4"}"#
+        ]
+    );
+}
+
+#[tokio::test]
 async fn the_loop_can_be_driven_one_step_at_a_time() {
     let (harness, _model) =
         harness([call("c1", "add", &json!({"terms": [20, 22]})), say("42")]).unwrap();
-    let cancel = CancellationToken::new();
-    let machine = harness.machine(cancel.clone());
-    let (updates, _unwatched) = tokio::sync::mpsc::unbounded_channel();
-    let emitter = Emitter::new(updates, cancel);
-    let journal = harness.journal(&MAIN.into()).unwrap();
+    let main = SessionId::new(MAIN);
+    let journal = harness.journal(&main).unwrap();
     journal
-        .record(&Message::user().with_text("what is 20 + 22?"))
+        .record(&Message::user().text("what is 20 + 22?"))
         .unwrap();
 
     let mut applied_steps = Vec::new();
-    loop {
-        let session = journal.session();
-        let mut result = machine.step(&session, &emitter).await.unwrap();
-        applied_steps.extend(result.applied_step);
-        machine
-            .apply(journal.as_ref(), &session, &mut result.effects, &emitter)
-            .await
-            .unwrap();
-        if result.status != RunStatus::Continuing {
-            break;
-        }
+    while let Stepped::Applied(step) = harness.step(&main).await.unwrap() {
+        applied_steps.push(step);
     }
 
-    assert_eq!(applied_steps, ["llm", "tools", "llm"]);
+    assert_eq!(applied_steps, ["model", "tools", "model"]);
     assert_eq!(journal.session().conversation().len(), 4);
+    assert!(!journal.unfinished());
 }
 
 #[tokio::test]

@@ -7,8 +7,8 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
+use corduroy_harness::core::Message;
 use corduroy_harness::core::{Pattern, Scope};
-use corduroy_harness::oi_kit_provider_types::conversation::message::Message;
 use corduroy_harness::scripted::{ScriptedProvider, call, say};
 use corduroy_harness::wasm::{WasmPlugin, WasmRuntime};
 use corduroy_harness::{Harness, Status, provider};
@@ -114,7 +114,14 @@ async fn the_todo_list_is_kept_in_state_and_shown_until_it_is_cleared() {
         say("done"),
     ])
     .unwrap();
-    let loaded = harness.plugin(load(&work, "todo", &[("state", Scope::any())]).unwrap());
+    let loaded = harness.plugin(
+        load(
+            &work,
+            "todo",
+            &[("state", Scope::any()), ("session", Scope::any())],
+        )
+        .unwrap(),
+    );
 
     harness.run("plan it").await.unwrap();
     assert_eq!(outputs(&harness)[1], list);
@@ -126,7 +133,14 @@ async fn the_todo_list_is_kept_in_state_and_shown_until_it_is_cleared() {
 
     // A fresh instance reads the list back from the stream.
     harness.app().dispose(loaded).unwrap();
-    harness.plugin(load(&work, "todo", &[("state", Scope::any())]).unwrap());
+    harness.plugin(
+        load(
+            &work,
+            "todo",
+            &[("state", Scope::any()), ("session", Scope::any())],
+        )
+        .unwrap(),
+    );
     harness.run("finish").await.unwrap();
     assert!(model.requests()[3].system.contains("fix the bug"));
     assert!(!model.requests()[4].system.contains("<todo>"));
@@ -347,7 +361,7 @@ async fn the_plugin_manager_loads_a_plugin_the_model_then_uses() {
         call(
             "2",
             "plugin_load",
-            &json!({"name": "todo", "path": todo, "grants": {"state": "*"}}),
+            &json!({"name": "todo", "path": todo, "grants": {"state": "*", "session": "*"}}),
         ),
         call("3", "todo_write", &json!({"content": "- [ ] ship it"})),
         call("4", "plugin_list", &json!({})),
@@ -362,6 +376,7 @@ async fn the_plugin_manager_loads_a_plugin_the_model_then_uses() {
                 ("fs-read", within(&components)),
                 ("plugins", Scope::none().allow("todo")),
                 ("state", Scope::any()),
+                ("session", Scope::any()),
             ],
         )
         .unwrap()

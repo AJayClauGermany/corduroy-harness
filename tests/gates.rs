@@ -8,11 +8,10 @@ use corduroy_harness::core::{
     EventStream, GATES, Gate, Gates, Pattern, Plugin, SessionId, TOOL_CALL, TOOLS, ToolSpec, Tools,
     Verdict, plugin_fn, tool_fn,
 };
-use corduroy_harness::oi_kit_provider_types::conversation::message::Message;
+use corduroy_harness::core::{Message, ToolCall};
 use corduroy_harness::scripted::{ScriptedProvider, call, say};
 use corduroy_harness::{Answer, Harness, HarnessError, MAIN, Status, jsonl};
 use corduroy_test_support::scratch;
-use rmcp::model::CallToolRequestParams;
 use serde_json::{Value, json};
 
 /// `peek`, which only looks, and `poke` and `launch`, which change things. Each counts the
@@ -22,13 +21,9 @@ fn toolbox(runs: &Arc<AtomicUsize>) -> impl Plugin + 'static {
     plugin_fn("toolbox", &[TOOLS], move |ctx| {
         let tools = ctx.service::<Tools>(TOOLS)?;
         for (name, read_only) in [("peek", true), ("poke", false), ("launch", false)] {
-            let spec = ToolSpec {
-                name: name.into(),
-                description: String::new(),
-                input_schema: r#"{"type":"object"}"#.into(),
-                replay_safe: read_only,
-                read_only,
-            };
+            let spec = ToolSpec::new(name, "", r#"{"type":"object"}"#)
+                .replay_safe(read_only)
+                .read_only(read_only);
             let runs = Arc::clone(&runs);
             let tool = tool_fn(spec, move |_| {
                 runs.fetch_add(1, Ordering::SeqCst);
@@ -226,7 +221,7 @@ async fn a_message_waits_until_every_ask_in_it_is_answered() {
     let runs = Arc::new(AtomicUsize::new(0));
     let mut both = Message::assistant();
     for (id, tool) in [("c1", "poke"), ("c2", "peek"), ("c3", "poke")] {
-        both = both.with_tool_request(id, Ok(CallToolRequestParams::new(tool.to_owned())));
+        both = both.call(ToolCall::new(id, tool, "{}"));
     }
     let harness = harness(EventStream::new(), [both, say("all done")], &runs).unwrap();
     let main = SessionId::new(MAIN);

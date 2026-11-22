@@ -62,7 +62,7 @@ grants = { fs-read = ["{workspace}/AGENTS.md", "{workspace}/.goosehints", "{work
 [[plugins]]
 name = "todo"
 path = "todo.wasm"
-grants = { state = "*" }
+grants = { state = "*", session = "*" }
 
 [[plugins]]
 name = "memory"

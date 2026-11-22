@@ -12,11 +12,13 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use corduroy_core::{
-    CallError as CoreCallError, Completion, Draft, Event, EventId, EventStream, FiberId, Gates,
-    Grants, HttpClients, HttpRequest, Kernels, ModelError, Models, PLUGIN_LOAD, Pattern, Requests,
-    Role, Scope, Secrets, Services, SessionId, Source, TOOL_CALL, ToolError as CoreToolError,
-    Tools, Turn, Verdict, json,
+    CallError as CoreCallError, Completion, Content, Draft, Event, EventId, EventStream, FiberId,
+    Gates, Grants, HttpClients, HttpRequest, Kernels, ModelError, Models, PLUGIN_LOAD, Pattern,
+    Requests, Role, Scope, Secrets, Services, SessionId, Source, TOOL_CALL,
+    ToolError as CoreToolError, ToolOutput, Tools, Turn, Verdict, json,
 };
 use serde_json::{Value, json};
 use wasmtime::StoreLimits;
@@ -26,7 +28,7 @@ use super::bindings::Credential;
 use super::bindings::corduroy::plugin::types::{CallError, HostError, ToolError, ToolSpec};
 use super::bindings::corduroy::plugin::{
     clock, events, fs_read, fs_write, http, kernel, llm, log, log_read, plugins, random, secret,
-    service, state, tools, types,
+    service, session, state, tools, types,
 };
 use super::paths;
 use crate::runtime::WasmRuntime;
@@ -327,6 +329,28 @@ impl clock::Host for HostState {
     }
 }
 
+impl session::Host for HostState {
+    fn current(&mut self) -> Result<Option<String>, HostError> {
+        let Some(scope) = corduroy_core::call::current() else {
+            return Ok(None);
+        };
+        self.check("session", scope.session.as_str())?;
+        Ok(Some(scope.session.as_str().to_owned()))
+    }
+
+    fn call(&mut self) -> Result<Option<String>, HostError> {
+        let Some(scope) = corduroy_core::call::current() else {
+            return Ok(None);
+        };
+        self.check("session", scope.session.as_str())?;
+        Ok(scope.call)
+    }
+
+    fn stopping(&mut self) -> bool {
+        corduroy_core::call::stopping()
+    }
+}
+
 impl random::Host for HostState {
     fn get_bytes(&mut self, len: u32) -> Result<Vec<u8>, HostError> {
         self.check("random", "secure")?;
@@ -359,6 +383,46 @@ fn bounded<T: Send + 'static>(
 /// A registry the host was to lend and did not: a host misconfiguration, not the plugin's.
 fn unlent(what: &str) -> String {
     format!("the host provides no {what}")
+}
+
+/// A block of a tool's result, as a plugin returned it.
+pub(super) fn content_from(block: types::Content) -> Content {
+    match block {
+        types::Content::Text(text) => Content::Text(text),
+        types::Content::Image(image) => Content::image(image.mime_type, image.data),
+    }
+}
+
+/// A block of a tool's result, as a plugin receives it. A kind of block the plugin world has
+/// no case for goes as the text that stands for it.
+fn content_for(block: Content) -> types::Content {
+    match block {
+        Content::Text(text) => types::Content::Text(text),
+        Content::Image { mime_type, data } => {
+            types::Content::Image(types::Image { mime_type, data })
+        }
+        other => types::Content::Text(other.to_string()),
+    }
+}
+
+/// The payload of the `tool/result` event for the call `id`: the result's text as `output`,
+/// and its blocks as `content` unless the result is one block of text, which `output`
+/// already is. The harness records the model's own calls in the same form; its `session`
+/// module says what that is.
+fn result_payload(id: &str, tool: &str, ok: bool, output: &ToolOutput) -> Value {
+    let mut payload = json!({"id": id, "tool": tool, "ok": ok, "output": output.to_text()});
+    if !matches!(output.content(), [Content::Text(_)])
+        && let Some(fields) = payload.as_object_mut()
+    {
+        let blocks = output.content().iter().map(|block| match block {
+            Content::Image { mime_type, data } => {
+                json!({"type": "image", "mime_type": mime_type, "data": BASE64.encode(data)})
+            }
+            text => json!({"type": "text", "text": text.to_string()}),
+        });
+        fields.insert("content".to_owned(), blocks.collect());
+    }
+    payload
 }
 
 impl HostState {
@@ -417,7 +481,7 @@ impl tools::Host for HostState {
             .collect()
     }
 
-    fn call(&mut self, name: String, input: String) -> Result<String, ToolError> {
+    fn call(&mut self, name: String, input: String) -> Result<Vec<types::Content>, ToolError> {
         self.check("tools", &name).map_err(|_| {
             ToolError::Denied(format!("capability `tools` does not cover `{name}`"))
         })?;
@@ -439,18 +503,18 @@ impl tools::Host for HostState {
         );
         self.outbox.push(call);
         if let Some(refusal) = self.gate(&id, &name, &arguments, tool.spec().read_only) {
-            let result = json!({"id": id, "tool": name, "ok": false, "output": refusal});
+            let result = result_payload(&id, &name, false, &ToolOutput::text(&*refusal));
             self.outbox.push(self.draft("tool/result", &result));
             return Err(ToolError::Denied(refusal));
         }
         let outcome = tool.call(&input);
-        let (ok, output) = match &outcome {
-            Ok(output) => (true, output.clone()),
-            Err(error) => (false, error.to_string()),
+        let result = match &outcome {
+            Ok(output) => result_payload(&id, &name, true, output),
+            Err(error) => result_payload(&id, &name, false, &ToolOutput::text(error.to_string())),
         };
-        let result = json!({"id": id, "tool": name, "ok": ok, "output": output});
         self.outbox.push(self.draft("tool/result", &result));
-        outcome.map_err(|error| match error {
+        let blocks = outcome.map(|output| output.into_content().into_iter().map(content_for));
+        blocks.map(Iterator::collect).map_err(|error| match error {
             CoreToolError::UnknownTool(name) => ToolError::UnknownTool(name),
             CoreToolError::InvalidInput(reason) => ToolError::InvalidInput(reason),
             CoreToolError::Failed(reason) => ToolError::Failed(reason),
@@ -902,6 +966,7 @@ fn escaped(session: &str) -> String {
 pub(super) fn event_of(event: &Event) -> types::Event {
     types::Event {
         id: event.id.get(),
+        time: event.time,
         session: event
             .session
             .as_ref()

@@ -5,6 +5,10 @@
 //! Both languages implement the same `notes` plugin, so the same checks run against each:
 //! tools work, a tool's error reaches the host as the right kind, notes are kept in `state`,
 //! and the SDK routes `console.log`/`print`, the clock and the random source to host calls.
+//!
+//! Both SDKs also let a tool return content blocks, images included, and hand a plugin the
+//! blocks of a tool it calls. JavaScript is checked through the script host and Python
+//! through the SDK's own test plugin (`sdk/python/tests/blocks.py`).
 
 use std::error::Error;
 use std::path::Path;
@@ -12,9 +16,9 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use corduroy_core::{
-    App, Draft, EventStream, FiberState, GATES, Gates, HTTP, HttpClients, KERNELS, Kernels, MODELS,
-    Models, PROMPTS, Pattern, Prompts, SECRETS, SERVICES, Scope, Secrets, Services, Source, TOOLS,
-    ToolError, Tools,
+    App, Content, Draft, EventStream, FiberState, GATES, Gates, HTTP, HttpClients, KERNELS,
+    Kernels, MODELS, Models, PROMPTS, Pattern, Prompts, SECRETS, SERVICES, Scope, Secrets,
+    Services, Source, TOOLS, ToolError, ToolOutput, ToolSpec, Tools, tool_fn,
 };
 use corduroy_test_support::{compile_cache, guest, scratch};
 use corduroy_wasm::{CAPABILITIES, WasmPlugin, WasmRuntime};
@@ -58,7 +62,9 @@ fn notes(dir: &Path, component: &Path) -> Result<WasmPlugin, Box<dyn Error>> {
 }
 
 fn call(host: &Host, tool: &str, input: &Value) -> Result<String, ToolError> {
-    host.tools.call(tool, &input.to_string())
+    host.tools
+        .call(tool, &input.to_string())
+        .map(|output| output.to_text())
 }
 
 /// The current year, near enough.
@@ -270,4 +276,127 @@ return {
     assert_eq!(pongs.len(), 1);
     assert_eq!(pongs[0].payload, r#"{"n":1}"#);
     assert_eq!(pongs[0].source.to_string(), "plugin:echo");
+}
+
+/// The eight bytes every PNG file starts with. Not text, and not valid UTF-8.
+const PNG: [u8; 8] = [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
+
+/// Register the native tool `snap`, which returns a caption and an image.
+fn snap(host: &Host) -> Result<(), Box<dyn Error>> {
+    let spec = ToolSpec::new("snap", "", r#"{"type":"object"}"#).read_only(true);
+    let snap = tool_fn(spec, |_| {
+        Ok(vec![
+            Content::text("the view"),
+            Content::image("image/png", PNG),
+        ])
+    });
+    host.tools.insert("snap", Arc::new(snap))?;
+    Ok(())
+}
+
+/// What the content tools of a plugin return, in every SDK: `picture`, given bytes of every
+/// value, a caption and those bytes as an image; `image` one image on its own; `numbers` a
+/// list that is not blocks; and `relay` the text of what `snap` returned followed by its
+/// blocks. `numbers` is JSON, read and written again here so that a language's spacing does
+/// not matter.
+fn content_tools(host: &Host) -> Result<[ToolOutput; 4], Box<dyn Error>> {
+    let every_byte: Vec<u8> = (0..=u8::MAX).collect();
+    let picture = json!({"bytes": every_byte}).to_string();
+    let picture = host.tools.call("picture", &picture)?;
+    let image = host.tools.call("image", "{}")?;
+    let numbers = host.tools.call("numbers", "{}")?.to_text();
+    let numbers: Value = serde_json::from_str(&numbers)?;
+    let relayed = host.tools.call("relay", r#"{"tool":"snap"}"#)?;
+    Ok([
+        picture,
+        image,
+        ToolOutput::text(numbers.to_string()),
+        relayed,
+    ])
+}
+
+/// What [`content_tools`] must give, whatever the language.
+fn expected_content() -> [ToolOutput; 4] {
+    let every_byte: Vec<u8> = (0..=u8::MAX).collect();
+    [
+        // Bytes of every value: an image crosses the boundary as it is.
+        ToolOutput::new(vec![
+            Content::text("a picture of 256 bytes"),
+            Content::image("image/png", every_byte),
+        ]),
+        ToolOutput::from(Content::image("image/gif", *b"GIF89a")),
+        // A list of anything but blocks is what it always was: JSON, as one block of text.
+        ToolOutput::text("[1,2,3]"),
+        // The plugin was handed the blocks of the tool it called, and passed the image on.
+        ToolOutput::new(vec![
+            Content::text("the view\n[image: image/png, 8 bytes]"),
+            Content::text("the view"),
+            Content::image("image/png", PNG),
+        ]),
+    ]
+}
+
+const BLOCKS: &str = r"
+return {
+  tools: {
+    picture: {
+      description: 'A caption and an image made of the bytes given.',
+      run({ bytes }) {
+        return [Content.text(`a picture of ${bytes.length} bytes`), Content.image('image/png', bytes)];
+      },
+    },
+    image: {
+      description: 'One image, on its own.',
+      run() { return Content.image('image/gif', new TextEncoder().encode('GIF89a')); },
+    },
+    numbers: {
+      description: 'A list that is not content blocks, so JSON.',
+      run() { return [1, 2, 3]; },
+    },
+    relay: {
+      description: 'Call a tool; return what it said as text, then its blocks as they came.',
+      run({ tool }) {
+        const blocks = host.tools.call(tool, '{}');
+        const passed = blocks.map((block) =>
+          block.tag === 'image' ? Content.image(block.val.mimeType, block.val.data) : Content.text(block.val));
+        return [Content.text(Content.textOf(blocks)), ...passed];
+      },
+    },
+  },
+};";
+
+#[test]
+fn a_javascript_tool_returns_and_receives_content_blocks() {
+    let dir = scratch("script-host-blocks");
+    let mut host = host(Arc::new(EventStream::new())).unwrap();
+    snap(&host).unwrap();
+    let grants = [("tools", Scope::none().allow("snap"))];
+    let Some(blocks) = automation(&dir, "blocks", BLOCKS, &grants).unwrap() else {
+        return;
+    };
+    let id = host.app.plugin(blocks);
+    assert_eq!(host.app.state(id), Some(&FiberState::Active));
+
+    assert_eq!(content_tools(&host).unwrap(), expected_content());
+}
+
+#[test]
+fn a_python_tool_returns_and_receives_content_blocks() {
+    let Some(component) = guest("blocks_py") else {
+        return;
+    };
+    let dir = scratch("blocks-py");
+    let mut host = host(Arc::new(EventStream::new())).unwrap();
+    snap(&host).unwrap();
+    let blocks = WasmRuntime::cached(compile_cache())
+        .unwrap()
+        .with_root(&dir)
+        .load(component)
+        .unwrap()
+        .named("blocks")
+        .grant("tools", Scope::none().allow("snap"));
+    let id = host.app.plugin(blocks);
+    assert_eq!(host.app.state(id), Some(&FiberState::Active));
+
+    assert_eq!(content_tools(&host).unwrap(), expected_content());
 }

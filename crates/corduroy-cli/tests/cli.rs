@@ -232,6 +232,40 @@ fn a_run_waits_across_processes_for_its_answer() {
 }
 
 #[test]
+fn a_run_left_waiting_can_be_stopped_from_another_process() {
+    let workspace = scratch("cli-stop");
+    let plugins = plugin("pi-tools").parent().unwrap().to_owned();
+    let target = workspace.join("never.txt");
+    let (address, _seen) = model(vec![
+        tool_call("write", &json!({"path": target, "content": "never"})),
+        answer("Starting over."),
+    ])
+    .unwrap();
+    fs::write(
+        workspace.join("corduroy.toml"),
+        agent_file(address, &plugins),
+    )
+    .unwrap();
+    let waiting = corduroy(&workspace, &["run", "write", "it"], "").unwrap();
+    assert!(text(&waiting.stdout).contains("corduroy continue"));
+
+    let stopped = corduroy(&workspace, &["stop"], "").unwrap();
+    assert!(stopped.status.success(), "{}", text(&stopped.stderr));
+    assert!(text(&stopped.stdout).contains("stopped the run of `main`"));
+    let again = corduroy(&workspace, &["stop"], "").unwrap();
+    assert!(text(&again.stdout).contains("`main` has no run to stop"));
+
+    // The write never ran, and the session takes a new prompt.
+    assert!(!target.exists());
+    let next = corduroy(&workspace, &["run", "start", "over"], "").unwrap();
+    assert!(
+        text(&next.stdout).contains("Starting over."),
+        "{}",
+        text(&next.stdout)
+    );
+}
+
+#[test]
 fn a_declined_call_goes_back_to_the_model_with_the_reason() {
     let workspace = scratch("cli-decline");
     let plugins = plugin("pi-tools").parent().unwrap().to_owned();

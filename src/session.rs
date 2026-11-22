@@ -1,26 +1,26 @@
 //! The conversation as a projection of the event stream.
 //!
-//! oi-kit's state machine never mutates a conversation. Its operations return [`Effect`]s,
-//! and the host decides what persisting them means. Here it means appending to the event
-//! stream: the [`Journal`] turns each effect into events, and the conversation a model sees
-//! is whatever the `message` events add up to. A run can therefore be resumed, replayed or
-//! inspected from the log alone, and every plugin sees the same history the model does.
+//! The loop never changes a conversation in place. Each step returns [`Effect`]s, and the
+//! [`Journal`] turns them into events: the conversation a model sees is whatever the
+//! `message` events add up to. A run can therefore be resumed, replayed or inspected from
+//! the log alone, and every plugin sees the same history the model does.
 //!
 //! One stream holds many sessions. Each begins with a `session/start` event, and every event
 //! below names the session it belongs to, so a session is rebuilt from its own events alone.
 //!
 //! | Topic | Source | Payload |
 //! | --- | --- | --- |
-//! | `session/start` | `host` | `{"parent"}`, or `{}` for a session with no parent |
-//! | `message` | `user`, `agent` or `environment` | the oi-kit message, as JSON |
+//! | `session/start` | `host` | `{"parent", "task"}`, each only if there is one |
+//! | `message` | `user`, `agent` or `environment` | the message, in the shape [`crate::message`] reads and writes |
 //! | `tool/call` | `agent` | `{"id", "tool", "input"}`, caused by its `message` |
 //! | `gate/decision` | `host` | `{"point", "id", "tool", "verdict", "reason", "gate", "caller"}`, caused by its `tool/call`: what the gates said |
 //! | `gate/answer` | `user` | `{"id", "tool", "allow", "reason"}`, caused by its `tool/call`: a person's answer to a gate that asked |
 //! | `tool/start` | `host` | `{"id", "tool"}`, caused by its `tool/call`: the tool is about to run |
-//! | `tool/result` | `environment` | `{"id", "tool", "ok", "output"}`, caused by its `tool/call` |
-//! | `usage` | `agent` | the provider's usage report, as JSON |
-//! | `turn/end` | `host` | empty |
+//! | `tool/result` | `environment` | `{"id", "tool", "ok", "output"}`, and `"content"` when the result is not one block of text, caused by its `tool/call` |
+//! | `usage` | `agent` | `{"model", "input_tokens", "output_tokens"}`, each count only if the provider gave it |
+//! | `turn/end` | `host` | `{"status"}`: `finished`, `turn-limit`, `failed` (with `"reason"`), `stopped` or `yielded` |
 //! | `run/restart` | `host` | `{"attempt"}`: an unfinished run was picked up again |
+//! | `run/stop` | `user` | `{}`: a person asked the run to stop |
 //! | `tool/wait` | `host` | `{"id", "tool", "signal"}`, caused by its `tool/call`: the call's result comes with the signal |
 //! | `signal` | `environment` | `{"name", "payload"}`: what a waiting call was waiting for |
 //! | `compaction` | `host` | `{"summary", "keep_from", "by"}`: the messages before the `message` event `keep_from` are summarised |
@@ -31,13 +31,18 @@
 //! model. After a crash the log therefore says of each call whether it never started, was
 //! running, or finished with a result that only needs handing over.
 //!
+//! `output` is the result's text. A result that is anything but one block of text (an image,
+//! several blocks, none) also has its blocks as `content`, so that a run picked up after a
+//! crash hands the model exactly what the tool returned.
+//!
 //! Where a gate guards tool calls, its decision on each call is stored before the tool can
 //! start. A call a gate asked about waits for a `gate/answer`.
 //!
-//! A run is *unfinished* from its first `message` until its `turn/end`. A session whose
-//! events stop short of that was interrupted, and [`Harness::continue_run`] picks it up,
-//! unless it is *waiting*: a gate asked about one of its calls and nobody has answered yet.
-//! [`Harness::answer`] gives the answer and takes the run on.
+//! A run is *unfinished* from its first `message` until its `turn/end`, which says how it
+//! ended. A session whose events stop short of that was interrupted, and
+//! [`Harness::continue_run`] picks it up, unless it is *waiting*: a gate asked about one of
+//! its calls and nobody has answered yet. [`Harness::answer`] gives the answer and takes the
+//! run on.
 //!
 //! A tool call may *wait*: whatever served it said, through
 //! [`corduroy_core::call::wait_for`], that its result will come with a signal. The call
@@ -60,23 +65,15 @@ use std::collections::btree_map::Entry;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use anyhow::{Context as _, Result};
-use async_trait::async_trait;
 use corduroy_core::{
-    Decision, Draft, Event, EventId, EventStream, LogError, Pattern, SessionId, Source, TOOL_CALL,
-    Verdict,
+    Decision, Draft, Event, EventId, EventStream, LogError, Message, Part, Pattern, Role,
+    SessionId, Source, TOOL_CALL, ToolCall, ToolOutput, ToolResult, Verdict,
 };
+use serde_json::{Value, json};
 
 use crate::harness::HarnessError;
-use oi_kit_agent::inference::InferenceEffect;
-use oi_kit_agent::machine::{EffectHandler, MachineSession, SessionLoader};
-use oi_kit_agent::operation::{Emitter, MachineEffect};
-use oi_kit_provider_types::conversation::Conversation;
-use oi_kit_provider_types::conversation::message::{
-    Message, MessageContent, ToolRequest, ToolResponse,
-};
-use oi_kit_provider_types::conversation::token_usage::ProviderUsage;
-use rmcp::model::{CallToolResult, ContentBlock, Role};
-use serde_json::{Value, json};
+use crate::message::{decode, decode_content, encode, encode_content};
+use crate::provider::Usage;
 
 /// Topic of the events that make up the conversation.
 pub const MESSAGE: &str = "message";
@@ -89,6 +86,9 @@ const USAGE: &str = "usage";
 
 /// Topic of the event that records an unfinished run being picked up again.
 const RESTART: &str = "run/restart";
+
+/// Topic of the event that records a person asking a run to stop.
+pub const STOP: &str = "run/stop";
 
 /// Topic of the event that records what the gates decided about a tool call.
 const GATE_DECISION: &str = "gate/decision";
@@ -322,39 +322,123 @@ impl Sessions {
     }
 }
 
-/// One conversation, as the state machine sees it at the start of a step.
+/// One conversation, as a step of the loop sees it.
 #[derive(Debug, Clone)]
 pub struct Session {
-    id: String,
-    conversation: Conversation,
+    id: SessionId,
+    messages: Vec<Message>,
+    /// The summary that stands in for the messages before index `.1`, for the model.
+    summary: Option<(String, usize)>,
 }
 
 impl Session {
-    /// The messages so far.
+    /// The session's id.
     #[must_use]
-    pub const fn conversation(&self) -> &Conversation {
-        &self.conversation
-    }
-}
-
-impl MachineSession for Session {
-    fn id(&self) -> &str {
+    pub const fn id(&self) -> &SessionId {
         &self.id
     }
 
-    fn conversation(&self) -> Option<&Conversation> {
-        Some(&self.conversation)
+    /// Every message, oldest first, as a person sees the conversation: what a summary
+    /// stands in for included.
+    #[must_use]
+    pub fn conversation(&self) -> &[Message] {
+        &self.messages
+    }
+
+    /// The conversation as the model is sent it: a summary in place of what it stands for,
+    /// and messages of the same role one after another joined into one, so roles alternate.
+    #[must_use]
+    pub fn for_model(&self) -> Vec<Message> {
+        let mut view: Vec<Message> = Vec::new();
+        let kept = match &self.summary {
+            Some((summary, from)) => {
+                view.push(summary_message(summary));
+                view.push(Message::assistant().text(SUMMARY_ACK));
+                self.messages.get(*from..).unwrap_or_default()
+            }
+            None => &self.messages,
+        };
+        for message in kept.iter().filter(|message| !message.is_empty()) {
+            match view.last_mut() {
+                Some(last) if last.role == message.role => {
+                    last.parts.extend(message.parts.iter().cloned());
+                }
+                _ => view.push(message.clone()),
+            }
+        }
+        view
+    }
+
+    /// The messages of the current turn: from the last one a person wrote on.
+    #[must_use]
+    pub fn turn(&self) -> &[Message] {
+        let start = self
+            .messages
+            .iter()
+            .rposition(|message| message.role == Role::User && !message.is_tool_results())
+            .unwrap_or(0);
+        self.messages.get(start..).unwrap_or_default()
+    }
+
+    /// The tool calls of the current turn that have no result yet, in the order the model
+    /// asked for them.
+    #[must_use]
+    pub fn pending_calls(&self) -> Vec<ToolCall> {
+        let turn = self.turn();
+        let answered: Vec<&str> = turn
+            .iter()
+            .flat_map(Message::tool_results)
+            .map(|result| result.id.as_str())
+            .collect();
+        let mut seen: Vec<&str> = Vec::new();
+        turn.iter()
+            .flat_map(Message::tool_calls)
+            .filter(|call| !answered.contains(&call.id.as_str()))
+            .filter(|call| {
+                let first = !seen.contains(&call.id.as_str());
+                seen.push(&call.id);
+                first
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// How many times the model has answered in the current turn.
+    #[must_use]
+    pub fn model_turns(&self) -> usize {
+        self.turn()
+            .iter()
+            .filter(|message| message.role == Role::Assistant)
+            .count()
+    }
+
+    /// The model's last answer, if the conversation ends with one that asks for nothing.
+    #[must_use]
+    pub fn answer(&self) -> Option<String> {
+        let last = self.messages.last()?;
+        (last.role == Role::Assistant && last.tool_calls().next().is_none())
+            .then(|| last.text_content())
     }
 }
 
-/// Something an operation wants recorded.
+/// The message that stands in for what `summary` summarises.
+fn summary_message(summary: &str) -> Message {
+    Message::user().text(format!("{SUMMARY_INTRO}\n<summary>\n{summary}\n</summary>"))
+}
+
+/// Something a step of the loop wants recorded.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Effect {
     /// Append a message to the conversation.
     Message(Box<Message>),
     /// Note what a model request cost.
-    Usage(Box<ProviderUsage>),
+    Usage {
+        /// The model asked.
+        model: String,
+        /// What it cost.
+        usage: Usage,
+    },
     /// Note what the gates decided about a tool call the model asked for.
     Gated {
         /// The tool call's id.
@@ -371,6 +455,12 @@ pub enum Effect {
         /// Who wrote the summary.
         by: String,
     },
+}
+
+impl From<Message> for Effect {
+    fn from(message: Message) -> Self {
+        Self::Message(Box::new(message))
+    }
 }
 
 /// A person's answer to a gate that asked about a tool call.
@@ -412,6 +502,52 @@ pub struct Wait {
     pub signal: String,
 }
 
+/// How a run ended, as its `turn/end` records it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum End {
+    /// The model answered.
+    Finished,
+    /// The model was still working when it ran out of turns.
+    TurnLimit,
+    /// The model, or the run, failed, for this reason.
+    Failed(String),
+    /// A person stopped it.
+    Stopped,
+    /// It stopped with nothing left to do and no answer.
+    Yielded,
+}
+
+impl End {
+    fn payload(&self) -> Value {
+        match self {
+            Self::Finished => json!({"status": "finished"}),
+            Self::TurnLimit => json!({"status": "turn-limit"}),
+            Self::Failed(reason) => json!({"status": "failed", "reason": reason}),
+            Self::Stopped => json!({"status": "stopped"}),
+            Self::Yielded => json!({"status": "yielded"}),
+        }
+    }
+
+    /// What a `turn/end` payload says, or `None` for one that says nothing (as those
+    /// written before runs recorded how they ended).
+    fn read(payload: &str) -> Option<Self> {
+        let payload: Value = serde_json::from_str(payload).ok()?;
+        Some(match payload.get("status")?.as_str()? {
+            "finished" => Self::Finished,
+            "turn-limit" => Self::TurnLimit,
+            "failed" => Self::Failed(
+                payload
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            ),
+            "stopped" => Self::Stopped,
+            _ => Self::Yielded,
+        })
+    }
+}
+
 /// What a waiting call's result is until its signal comes. The model never sees it: a run
 /// with a waiting call stops before the model is asked again.
 fn placeholder(signal: &str) -> String {
@@ -429,28 +565,6 @@ pub(crate) struct Gated {
     pub(crate) answer: Option<Answer>,
 }
 
-impl From<Message> for Effect {
-    fn from(message: Message) -> Self {
-        Self::Message(Box::new(message))
-    }
-}
-
-impl InferenceEffect for Effect {
-    fn record_usage(usage: ProviderUsage) -> Self {
-        Self::Usage(Box::new(usage))
-    }
-}
-
-impl MachineEffect for Effect {
-    fn ensure_message_ids(&mut self) {
-        if let Self::Message(message) = self
-            && message.id.is_none()
-        {
-            **message = message.as_ref().clone().with_generated_id_if_missing();
-        }
-    }
-}
-
 /// A tool call the model asked for whose response is not in the conversation yet.
 #[derive(Clone)]
 struct OpenCall {
@@ -464,7 +578,7 @@ struct OpenCall {
     /// Whether a `tool/start` was stored for it.
     started: bool,
     /// Whether it succeeded and what it returned, once a `tool/result` was stored for it.
-    result: Option<(bool, String)>,
+    result: Option<(bool, ToolOutput)>,
 }
 
 /// How far the log says a tool call got, for one whose response is not in the conversation.
@@ -478,16 +592,17 @@ pub(crate) enum Progress {
     Finished {
         /// Whether the call succeeded.
         ok: bool,
-        /// What the tool returned.
-        output: String,
+        /// What the tool returned, every block of it.
+        output: ToolOutput,
     },
 }
 
 struct State {
-    conversation: Conversation,
-    /// The event each message of `conversation` came from, in the same order. A summary
-    /// and its acknowledgement have their `compaction` event's id.
+    messages: Vec<Message>,
+    /// The `message` event each of `messages` came from, in the same order.
     message_ids: Vec<EventId>,
+    /// The latest summary, and the first `message` event it does not stand for.
+    compaction: Option<(String, EventId)>,
     /// The input tokens of the last model request, unless a compaction came after it.
     input_tokens: u64,
     /// Tool calls that waited for a signal, by tool-call id, with the payload once it came.
@@ -498,6 +613,8 @@ struct State {
     unfinished: bool,
     /// How many times the unfinished run has been picked up again.
     restarts: u32,
+    /// How the last run ended, if it recorded that.
+    ended: Option<End>,
 }
 
 /// A tool call that waited for a signal.
@@ -527,16 +644,13 @@ struct Batch {
 }
 
 impl Batch {
-    /// Add the `tool/call` event for `request`, caused by the message at `message`.
-    fn call(&mut self, request: &ToolRequest, message: usize) {
-        let (tool, input) = request.tool_call.as_ref().map_or_else(
-            |error| ("<malformed>".to_owned(), json!({"error": error.message})),
-            |call| (call.name.to_string(), json!(call.arguments)),
-        );
-        let payload = json!({"id": request.id, "tool": tool, "input": input});
+    /// Add the `tool/call` event for `call`, caused by the message at `message`.
+    fn call(&mut self, call: &ToolCall, message: usize) {
+        let input: Value = serde_json::from_str(&call.input).unwrap_or_else(|_| json!({}));
+        let payload = json!({"id": call.id, "tool": call.name, "input": input});
         self.opened.insert(
-            request.id.clone(),
-            (self.drafts.len(), tool, input.to_string()),
+            call.id.clone(),
+            (self.drafts.len(), call.name.clone(), input.to_string()),
         );
         self.drafts.push(
             Draft::new(Source::Agent, "tool/call")
@@ -545,29 +659,39 @@ impl Batch {
         );
     }
 
-    /// Add the `tool/result` event for `response`, unless the `open` call it answers already
+    /// Add the `tool/result` event for `result`, unless the `open` call it answers already
     /// has one from when the tool returned. The event is caused by its call, which is in
     /// this batch, or is the `open` one from an earlier commit, or else is unknown, in which
     /// case the message at `message` stands in.
-    fn result(&mut self, response: &ToolResponse, open: Option<OpenCall>, message: usize) {
-        self.closed.push(response.id.clone());
+    fn result(&mut self, result: &ToolResult, open: Option<OpenCall>, message: usize) {
+        self.closed.push(result.id.clone());
         let draft = Draft::new(Source::Environment, "tool/result");
-        let (draft, tool) = match (self.opened.get(&response.id), open) {
+        let (draft, tool) = match (self.opened.get(&result.id), open) {
             (Some((call, tool, _)), _) => (draft.cause_in_batch(*call), tool.clone()),
             (None, Some(open)) if open.result.is_some() => return,
             (None, Some(open)) => (draft.cause(open.event), open.tool),
             (None, None) => (draft.cause_in_batch(message), String::new()),
         };
-        let (ok, output) = match &response.tool_result {
-            Ok(result) => (result.is_error != Some(true), text_of(result)),
-            Err(error) => (false, error.message.to_string()),
-        };
-        let payload = json!({"id": response.id, "tool": tool, "ok": ok, "output": output});
+        let payload = result_payload(&result.id, &tool, result.ok, &result.output);
         self.drafts.push(draft.payload(payload.to_string()));
     }
 }
 
 impl State {
+    const fn new() -> Self {
+        Self {
+            messages: Vec::new(),
+            message_ids: Vec::new(),
+            compaction: None,
+            input_tokens: 0,
+            waits: BTreeMap::new(),
+            calls: BTreeMap::new(),
+            unfinished: false,
+            restarts: 0,
+            ended: None,
+        }
+    }
+
     /// Note that the open call `call` to `tool` waits for `signal`. It counts as having a
     /// result, the placeholder, so a run picked up after a crash hands that to the model's
     /// turn and waits rather than calling the tool again.
@@ -582,49 +706,8 @@ impl State {
         );
         if let Some(open) = self.calls.get_mut(call) {
             open.started = true;
-            open.result = Some((true, placeholder(signal)));
+            open.result = Some((true, ToolOutput::text(placeholder(signal))));
         }
-    }
-
-    fn project_signal(&mut self, event: &Event) -> Result<()> {
-        let payload: Value = serde_json::from_str(&event.payload)
-            .with_context(|| format!("event {} is not a signal", event.id))?;
-        let text = |name: &str| {
-            payload
-                .get(name)
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-        };
-        self.resolve(text("name"), text("payload"));
-        Ok(())
-    }
-
-    fn project_compaction(&mut self, event: &Event) -> Result<()> {
-        let payload: Value = serde_json::from_str(&event.payload)
-            .with_context(|| format!("event {} is not a compaction", event.id))?;
-        let summary = payload
-            .get("summary")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let keep_from = payload
-            .get("keep_from")
-            .and_then(Value::as_u64)
-            .map_or(event.id, EventId::new);
-        self.compact(event.id, summary, keep_from);
-        Ok(())
-    }
-
-    fn project_wait(&mut self, event: &Event) -> Result<()> {
-        let payload: Value = serde_json::from_str(&event.payload)
-            .with_context(|| format!("event {} is not a tool/wait", event.id))?;
-        let text = |name: &str| {
-            payload
-                .get(name)
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-        };
-        self.wait(text("id"), text("tool"), text("signal"));
-        Ok(())
     }
 
     /// Give every call waiting for `name` the signal's `payload`, in place of its placeholder.
@@ -639,51 +722,77 @@ impl State {
         if !resolved {
             return;
         }
-        let messages = std::mem::take(self.conversation.messages_mut());
-        let messages = messages
+        let messages = std::mem::take(&mut self.messages);
+        self.messages = messages
             .into_iter()
             .map(|message| self.resolved(message))
             .collect();
-        *self.conversation.messages_mut() = messages;
     }
 
     /// `message` with the result of each call whose signal came in place of its placeholder.
     fn resolved(&self, mut message: Message) -> Message {
-        for content in &mut message.content {
-            if let MessageContent::ToolResponse(response) = content
+        for part in &mut message.parts {
+            if let Part::ToolResult(result) = part
                 && let Some(payload) = self
                     .waits
-                    .get(&response.id)
+                    .get(&result.id)
                     .and_then(|waited| waited.payload.as_ref())
             {
-                response.tool_result = Ok(CallToolResult::success(vec![ContentBlock::text(
-                    payload.clone(),
-                )]));
+                *result = ToolResult::new(result.id.clone(), true, payload.as_str());
             }
         }
         message
     }
 
-    /// Hide the messages before `keep_from` from the model and stand `summary`, from the
-    /// `compaction` event `id`, in for them.
-    fn compact(&mut self, id: EventId, summary: &str, keep_from: EventId) {
-        let at = self
-            .message_ids
+    /// Add `message`, from the `message` event `id`, to the conversation.
+    fn push(&mut self, id: EventId, message: Message) {
+        // A call is open until its response is in the conversation.
+        for result in message.tool_results() {
+            self.calls.remove(&result.id);
+        }
+        let message = self.resolved(message);
+        self.messages.push(message);
+        self.message_ids.push(id);
+        self.unfinished = true;
+    }
+
+    /// The index of the first message the latest summary does not stand for.
+    fn kept_from(&self, keep_from: EventId) -> usize {
+        self.message_ids
             .iter()
             .position(|message| *message >= keep_from)
-            .unwrap_or(self.message_ids.len());
-        let messages = self.conversation.messages_mut();
-        for message in messages.iter_mut().take(at) {
-            let user_visible = message.metadata.user_visible;
-            *message = message.clone().with_visibility(user_visible, false);
+            .unwrap_or(self.message_ids.len())
+    }
+
+    /// The session as a step sees it.
+    fn session(&self, id: &SessionId) -> Session {
+        let summary = self
+            .compaction
+            .as_ref()
+            .map(|(summary, keep_from)| (summary.clone(), self.kept_from(*keep_from)));
+        Session {
+            id: id.clone(),
+            messages: self.messages.clone(),
+            summary,
         }
-        let summary = Message::user()
-            .with_text(format!("{SUMMARY_INTRO}\n<summary>\n{summary}\n</summary>"))
-            .agent_only();
-        let ack = Message::assistant().with_text(SUMMARY_ACK).agent_only();
-        messages.splice(at..at, [summary, ack]);
-        self.message_ids.splice(at..at, [id, id]);
-        self.input_tokens = 0;
+    }
+
+    /// The conversation the model sees, before joining, each message with the event it
+    /// came from: `None` for the summary and its acknowledgement.
+    fn model_view(&self) -> Vec<(Option<EventId>, Message)> {
+        let mut view = Vec::new();
+        let from = match &self.compaction {
+            Some((summary, keep_from)) => {
+                view.push((None, summary_message(summary)));
+                view.push((None, Message::assistant().text(SUMMARY_ACK)));
+                self.kept_from(*keep_from)
+            }
+            None => 0,
+        };
+        for (id, message) in self.message_ids.iter().zip(&self.messages).skip(from) {
+            view.push((Some(*id), message.clone()));
+        }
+        view
     }
 
     /// Bring the projection up to date with one stored event of the session.
@@ -696,33 +805,53 @@ impl State {
         }
         match event.topic.as_str() {
             MESSAGE => {
-                let message: Message = serde_json::from_str(&event.payload)
+                let message = decode(&event.payload)
                     .with_context(|| format!("event {} is not a message", event.id))?;
-                // A call is open until its response is in the conversation.
-                let answered = message.content.iter().filter_map(|content| match content {
-                    MessageContent::ToolResponse(response) => Some(&response.id),
-                    _ => None,
-                });
-                for call in answered {
-                    self.calls.remove(call);
-                }
-                let message = self.resolved(message);
-                self.conversation.push(message);
-                self.message_ids.push(event.id);
-                self.unfinished = true;
+                self.push(event.id, message);
             }
             USAGE => {
                 let usage: Value = serde_json::from_str(&event.payload).unwrap_or(Value::Null);
+                // Written by this version at the top, by those before it under `usage`.
                 self.input_tokens = usage
-                    .pointer("/usage/input_tokens")
+                    .get("input_tokens")
+                    .or_else(|| usage.pointer("/usage/input_tokens"))
                     .and_then(Value::as_u64)
                     .unwrap_or(0);
             }
-            COMPACTION => self.project_compaction(event)?,
-            TURN_END => (self.unfinished, self.restarts) = (false, 0),
+            COMPACTION => {
+                let payload: Value = serde_json::from_str(&event.payload)
+                    .with_context(|| format!("event {} is not a compaction", event.id))?;
+                let summary = payload
+                    .get("summary")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let keep_from = payload
+                    .get("keep_from")
+                    .and_then(Value::as_u64)
+                    .map_or(event.id, EventId::new);
+                self.compaction = Some((summary.to_owned(), keep_from));
+                self.input_tokens = 0;
+            }
+            TURN_END => {
+                (self.unfinished, self.restarts) = (false, 0);
+                self.ended = End::read(&event.payload);
+            }
             RESTART => self.restarts = self.restarts.saturating_add(1),
-            TOOL_WAIT => self.project_wait(event)?,
-            SIGNAL => self.project_signal(event)?,
+            TOOL_WAIT | SIGNAL => {
+                let payload: Value = serde_json::from_str(&event.payload)
+                    .with_context(|| format!("event {} is not a {}", event.id, event.topic))?;
+                let text = |name: &str| {
+                    payload
+                        .get(name)
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                };
+                if event.topic == SIGNAL {
+                    self.resolve(text("name"), text("payload"));
+                } else {
+                    self.wait(text("id"), text("tool"), text("signal"));
+                }
+            }
             "tool/call" | "tool/start" | "tool/result" | GATE_DECISION | GATE_ANSWER => {
                 self.project_call(event)?;
             }
@@ -753,11 +882,26 @@ impl State {
             self.calls.insert(id, call);
             return Ok(());
         }
-        let Some(call) = self.calls.get_mut(&id) else {
-            return Ok(());
+        // Read before the call is borrowed: an image that is not base64 is an error.
+        let output = if event.topic == "tool/result" {
+            Some(recorded_output(event.id, &payload)?)
+        } else {
+            None
         };
-        let reason = text("reason").unwrap_or_default();
-        match event.topic.as_str() {
+        if let Some(call) = self.calls.get_mut(&id) {
+            note(call, &event.topic, &payload, output);
+        }
+        Ok(())
+    }
+}
+
+/// Note on the open `call` what the event on `topic` with `payload` says about it:
+/// `output` is what a `tool/result` says the tool returned.
+fn note(call: &mut OpenCall, topic: &str, payload: &Value, output: Option<ToolOutput>) {
+    let text = |name: &str| payload.get(name).and_then(Value::as_str).map(str::to_owned);
+    let reason = text("reason").unwrap_or_default();
+    {
+        match topic {
             GATE_DECISION => {
                 let verdict = match text("verdict").as_deref() {
                     Some("allow") => Verdict::Allow,
@@ -781,15 +925,14 @@ impl State {
                     gated.answer = Some(answer);
                 }
             }
-            topic => {
+            _ => {
                 call.started = true;
-                if topic == "tool/result" {
+                if let Some(output) = output {
                     let ok = payload.get("ok").and_then(Value::as_bool) == Some(true);
-                    call.result = Some((ok, text("output").unwrap_or_default()));
+                    call.result = Some((ok, output));
                 }
             }
         }
-        Ok(())
     }
 }
 
@@ -807,7 +950,7 @@ impl std::fmt::Debug for Journal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Journal")
             .field("id", &self.id)
-            .field("messages", &self.state().conversation.len())
+            .field("messages", &self.state().messages.len())
             .finish_non_exhaustive()
     }
 }
@@ -821,15 +964,7 @@ impl Journal {
     ///
     /// Fails if a `message` or tool-call event of the session cannot be decoded.
     pub fn new(id: SessionId, events: Arc<EventStream>) -> Result<Self> {
-        let mut state = State {
-            conversation: Conversation::empty(),
-            message_ids: Vec::new(),
-            input_tokens: 0,
-            waits: BTreeMap::new(),
-            calls: BTreeMap::new(),
-            unfinished: false,
-            restarts: 0,
-        };
+        let mut state = State::new();
         for event in events.session(&id) {
             state.project(&event)?;
         }
@@ -843,102 +978,7 @@ impl Journal {
     /// The session as it stands.
     #[must_use]
     pub fn session(&self) -> Session {
-        Session {
-            id: self.id.as_str().to_owned(),
-            conversation: self.state().conversation.clone(),
-        }
-    }
-
-    /// Append `message` to the conversation and publish it, along with an event for each
-    /// tool call and tool result it carries, as one commit.
-    ///
-    /// # Errors
-    ///
-    /// Fails if the message cannot be encoded as JSON or the commit cannot be stored.
-    pub fn record(&self, message: &Message) -> Result<EventId> {
-        let mut batch = Batch::default();
-        let position = self.draft_message(&mut batch, message)?;
-        let ids = self.commit(batch)?;
-        ids.get(position)
-            .copied()
-            .context("the commit returned no id for the message")
-    }
-
-    /// Add `message` to `batch`, with an event for each tool call and tool result it carries.
-    /// Returns the position of the `message` event in the batch.
-    fn draft_message(&self, batch: &mut Batch, message: &Message) -> Result<usize> {
-        let payload = serde_json::to_string(message).context("message is not valid JSON")?;
-        let source = match message.role {
-            Role::Assistant => Source::Agent,
-            Role::User if message.is_tool_response() => Source::Environment,
-            Role::User => Source::User,
-        };
-        let recorded = batch.drafts.len();
-        batch
-            .drafts
-            .push(Draft::new(source, MESSAGE).payload(payload));
-        batch.messages.push((recorded, message.clone()));
-        for content in &message.content {
-            match content {
-                MessageContent::ToolRequest(request) => batch.call(request, recorded),
-                MessageContent::ToolResponse(response) => {
-                    let open = self.state().calls.get(&response.id).cloned();
-                    batch.result(response, open, recorded);
-                }
-                _ => {}
-            }
-        }
-        Ok(recorded)
-    }
-
-    /// What a compaction could summarise now: the messages the model sees from before the
-    /// current turn began. `None` if there is nothing but an earlier summary, or no turn yet.
-    pub(crate) fn compactable(&self) -> Option<Compactable> {
-        let state = self.state();
-        let messages = state.conversation.messages();
-        // The turn began with the last message a person wrote that the model still sees.
-        let kickoff = messages.iter().rposition(|message| {
-            message.role == Role::User
-                && !message.is_tool_response()
-                && message.metadata.agent_visible
-                && message.metadata.user_visible
-        })?;
-        let earlier: Vec<&Message> = messages
-            .get(..kickoff)?
-            .iter()
-            .filter(|message| message.metadata.agent_visible)
-            .collect();
-        // A summary is only for the model; with nothing a person saw, there is nothing new.
-        if !earlier.iter().any(|message| message.metadata.user_visible) {
-            return None;
-        }
-        Some(Compactable {
-            keep_from: *state.message_ids.get(kickoff)?,
-            input_tokens: state.input_tokens,
-            messages: earlier.len(),
-        })
-    }
-
-    /// The messages the model sees from before `keep_from`, as text for a summariser: who
-    /// said what, and which tools were called. Built only once a compaction is due.
-    pub(crate) fn transcript_before(&self, keep_from: EventId) -> String {
-        let state = self.state();
-        let at = state
-            .message_ids
-            .iter()
-            .position(|id| *id == keep_from)
-            .unwrap_or(0);
-        let earlier: Vec<&Message> = state
-            .conversation
-            .messages()
-            .iter()
-            .take(at)
-            .filter(|message| message.metadata.agent_visible)
-            .collect();
-        let text = transcript(&earlier);
-        drop(earlier);
-        drop(state);
-        text
+        self.state().session(&self.id)
     }
 
     /// The session this journal records.
@@ -947,11 +987,152 @@ impl Journal {
         &self.id
     }
 
+    /// Append `message` to the conversation and publish it, along with an event for each
+    /// tool call and tool result it carries, as one commit.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the commit cannot be stored.
+    pub fn record(&self, message: &Message) -> Result<EventId> {
+        let mut batch = Batch::default();
+        let position = self.draft_message(&mut batch, message);
+        let ids = self.commit(batch)?;
+        ids.get(position)
+            .copied()
+            .context("the commit returned no id for the message")
+    }
+
+    /// Store the effects of one step as one commit, then bring the projection up to date.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the commit cannot be stored.
+    pub fn apply(&self, effects: Vec<Effect>) -> Result<()> {
+        let mut batch = Batch::default();
+        for effect in effects {
+            match effect {
+                Effect::Message(message) => {
+                    self.draft_message(&mut batch, &message);
+                }
+                Effect::Usage { model, usage } => {
+                    let payload = usage_payload(&model, usage);
+                    batch
+                        .drafts
+                        .push(Draft::new(Source::Agent, USAGE).payload(payload.to_string()));
+                    batch.input_tokens = Some(usage.input_tokens.unwrap_or(0));
+                }
+                Effect::Compacted {
+                    summary,
+                    keep_from,
+                    by,
+                } => {
+                    let payload =
+                        json!({"summary": summary, "keep_from": keep_from.get(), "by": by});
+                    batch
+                        .compactions
+                        .push((batch.drafts.len(), summary, keep_from));
+                    batch.drafts.push(
+                        Draft::new(Source::Host, COMPACTION)
+                            .payload(payload.to_string())
+                            .cause(keep_from),
+                    );
+                }
+                Effect::Gated { call, decision } => {
+                    let (draft, tool) = self.about_call(&call, Source::Host, GATE_DECISION);
+                    let payload = json!({
+                        "point": TOOL_CALL,
+                        "id": call,
+                        "tool": tool,
+                        "verdict": decision.verdict.kind(),
+                        "reason": decision.verdict.reason(),
+                        "gate": decision.gate,
+                        "caller": "agent",
+                    });
+                    batch.drafts.push(draft.payload(payload.to_string()));
+                    let gated = Gated {
+                        verdict: decision.verdict,
+                        gate: decision.gate,
+                        answer: None,
+                    };
+                    batch.gated.push((call, gated));
+                }
+            }
+        }
+        if !batch.drafts.is_empty() {
+            self.commit(batch)?;
+        }
+        Ok(())
+    }
+
+    /// Add `message` to `batch`, with an event for each tool call and tool result it carries.
+    /// Returns the position of the `message` event in the batch.
+    fn draft_message(&self, batch: &mut Batch, message: &Message) -> usize {
+        let source = match message.role {
+            Role::Assistant => Source::Agent,
+            Role::User if message.is_tool_results() => Source::Environment,
+            Role::User => Source::User,
+        };
+        let recorded = batch.drafts.len();
+        batch
+            .drafts
+            .push(Draft::new(source, MESSAGE).payload(encode(message).to_string()));
+        batch.messages.push((recorded, message.clone()));
+        for part in &message.parts {
+            match part {
+                Part::ToolCall(call) => batch.call(call, recorded),
+                Part::ToolResult(result) => {
+                    let open = self.state().calls.get(&result.id).cloned();
+                    batch.result(result, open, recorded);
+                }
+                _ => {}
+            }
+        }
+        recorded
+    }
+
+    /// What a compaction could summarise now: the messages the model sees from before the
+    /// current turn began. `None` if there is nothing but an earlier summary, or no turn yet.
+    pub(crate) fn compactable(&self) -> Option<Compactable> {
+        let state = self.state();
+        let view = state.model_view();
+        // The turn began with the last message a person wrote that the model still sees.
+        let kickoff = view.iter().rposition(|(id, message)| {
+            id.is_some() && message.role == Role::User && !message.is_tool_results()
+        })?;
+        let earlier = view.get(..kickoff)?;
+        // With nothing but an earlier summary before the turn, there is nothing new.
+        if !earlier.iter().any(|(id, _)| id.is_some()) {
+            return None;
+        }
+        Some(Compactable {
+            keep_from: view.get(kickoff)?.0?,
+            input_tokens: state.input_tokens,
+            messages: earlier.len(),
+        })
+    }
+
+    /// The messages the model sees from before `keep_from`, as text for a summariser: who
+    /// said what, and which tools were called. Built only once a compaction is due.
+    pub(crate) fn transcript_before(&self, keep_from: EventId) -> String {
+        let view = self.state().model_view();
+        let earlier: Vec<&Message> = view
+            .iter()
+            .take_while(|(id, _)| *id != Some(keep_from))
+            .map(|(_, message)| message)
+            .collect();
+        transcript(&earlier)
+    }
+
     /// Whether a run of this session began and has not reached its `turn/end`: it is still
     /// going, or it was interrupted.
     #[must_use]
     pub fn unfinished(&self) -> bool {
         self.state().unfinished
+    }
+
+    /// How the last run ended, if it recorded that.
+    pub(crate) fn ended(&self) -> Option<End> {
+        self.state().ended.clone()
     }
 
     /// How far the log says the unanswered tool call `call` got.
@@ -1040,12 +1221,15 @@ impl Journal {
 
     /// Record what the tool behind `call` returned, as soon as it has. This is its own
     /// commit, so a result is not lost with whatever else the step was still doing.
-    pub(crate) fn finish_call(&self, call: &str, ok: bool, output: &str) -> Result<()> {
+    ///
+    /// `output` is what the tool returned, or the text of its error. It is stored whole,
+    /// images included, so a run picked up later hands the model the same result.
+    pub(crate) fn finish_call(&self, call: &str, ok: bool, output: &ToolOutput) -> Result<()> {
         let (draft, tool) = self.about_call(call, Source::Environment, "tool/result");
-        let payload = json!({"id": call, "tool": tool, "ok": ok, "output": output});
+        let payload = result_payload(call, &tool, ok, output);
         self.events.emit(draft.payload(payload.to_string()))?;
         if let Some(open) = self.state().calls.get_mut(call) {
-            open.result = Some((ok, output.to_owned()));
+            open.result = Some((ok, output.clone()));
         }
         Ok(())
     }
@@ -1105,12 +1289,24 @@ impl Journal {
         }
     }
 
-    /// Record that the run is over.
-    pub(crate) fn end_turn(&self) -> Result<()> {
-        self.events
-            .emit(Draft::new(Source::Host, TURN_END).session(self.id.clone()))?;
+    /// Record that a person asked the run to stop.
+    pub(crate) fn stop_asked(&self) -> Result<()> {
+        let draft = Draft::new(Source::User, STOP)
+            .session(self.id.clone())
+            .payload("{}");
+        self.events.emit(draft)?;
+        Ok(())
+    }
+
+    /// Record that the run is over, and how it ended.
+    pub(crate) fn end_turn(&self, end: &End) -> Result<()> {
+        let draft = Draft::new(Source::Host, TURN_END)
+            .session(self.id.clone())
+            .payload(end.payload().to_string());
+        self.events.emit(draft)?;
         let mut state = self.state();
         (state.unfinished, state.restarts) = (false, 0);
+        state.ended = Some(end.clone());
         drop(state);
         Ok(())
     }
@@ -1136,17 +1332,14 @@ impl Journal {
         let ids = self.events.commit(drafts)?;
         let mut state = self.state();
         for (position, message) in batch.messages {
-            let Some(id) = ids.get(position).copied() else {
-                continue;
-            };
-            let message = state.resolved(message);
-            state.conversation.push(message);
-            state.message_ids.push(id);
-            state.unfinished = true;
+            if let Some(id) = ids.get(position).copied() {
+                state.push(id, message);
+            }
         }
         for (position, summary, keep_from) in batch.compactions {
-            if let Some(id) = ids.get(position).copied() {
-                state.compact(id, &summary, keep_from);
+            if ids.get(position).is_some() {
+                state.compaction = Some((summary, keep_from));
+                state.input_tokens = 0;
             }
         }
         for (call, (position, tool, input)) in batch.opened {
@@ -1202,17 +1395,25 @@ fn transcript(messages: &[&Message]) -> String {
     let mut lines = Vec::new();
     for message in messages {
         let role = match message.role {
-            Role::User if message.is_tool_response() => "tool",
+            Role::User if message.is_tool_results() => "tool",
             Role::User => "user",
             Role::Assistant => "assistant",
         };
-        for content in &message.content {
-            let part = content.to_string();
-            if part.trim().is_empty() {
+        for part in &message.parts {
+            let text = match part {
+                Part::Text(text) => text.clone(),
+                Part::ToolCall(call) => format!("called {} with {}", call.name, call.input),
+                Part::ToolResult(result) => result.output.to_text(),
+                Part::Image { mime_type, data } => {
+                    format!("[image: {mime_type}, {} bytes]", data.len())
+                }
+                _ => continue,
+            };
+            if text.trim().is_empty() {
                 continue;
             }
-            let mut shown: String = part.chars().take(TRANSCRIPT_PART).collect();
-            if shown.len() < part.len() {
+            let mut shown: String = text.chars().take(TRANSCRIPT_PART).collect();
+            if shown.len() < text.len() {
                 shown.push_str(" [cut]");
             }
             lines.push(format!("{role}: {shown}"));
@@ -1221,83 +1422,172 @@ fn transcript(messages: &[&Message]) -> String {
     lines.join("\n")
 }
 
-/// The text blocks of a tool result, joined.
-fn text_of(result: &CallToolResult) -> String {
-    result
-        .content
-        .iter()
-        .filter_map(|block| block.as_text().map(|text| text.text.as_str()))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-#[async_trait]
-impl SessionLoader<Session> for Journal {
-    async fn load(&self, _session_id: &str) -> Result<Session> {
-        Ok(self.session())
-    }
-}
-
-#[async_trait]
-impl EffectHandler<Session, Effect> for Journal {
-    async fn apply_effects(
-        &self,
-        _session: &Session,
-        effects: &mut [Effect],
-        _emit: &Emitter,
-    ) -> Result<()> {
-        let mut batch = Batch::default();
-        for effect in effects {
-            match effect {
-                Effect::Message(message) => {
-                    self.draft_message(&mut batch, message)?;
-                }
-                Effect::Usage(usage) => {
-                    let payload = serde_json::to_string(usage).context("usage is not JSON")?;
-                    batch
-                        .drafts
-                        .push(Draft::new(Source::Agent, USAGE).payload(payload));
-                    let tokens = usage.usage.input_tokens.unwrap_or(0);
-                    batch.input_tokens = Some(u64::try_from(tokens).unwrap_or(0));
-                }
-                Effect::Compacted {
-                    summary,
-                    keep_from,
-                    by,
-                } => {
-                    let payload =
-                        json!({"summary": summary, "keep_from": keep_from.get(), "by": by});
-                    batch
-                        .compactions
-                        .push((batch.drafts.len(), summary.clone(), *keep_from));
-                    batch.drafts.push(
-                        Draft::new(Source::Host, COMPACTION)
-                            .payload(payload.to_string())
-                            .cause(*keep_from),
-                    );
-                }
-                Effect::Gated { call, decision } => {
-                    let (draft, tool) = self.about_call(call, Source::Host, GATE_DECISION);
-                    let payload = json!({
-                        "point": TOOL_CALL,
-                        "id": call,
-                        "tool": tool,
-                        "verdict": decision.verdict.kind(),
-                        "reason": decision.verdict.reason(),
-                        "gate": decision.gate,
-                        "caller": "agent",
-                    });
-                    batch.drafts.push(draft.payload(payload.to_string()));
-                    let gated = Gated {
-                        verdict: decision.verdict.clone(),
-                        gate: decision.gate.clone(),
-                        answer: None,
-                    };
-                    batch.gated.push((call.clone(), gated));
-                }
-            }
+/// The payload of a `usage` event: the model, and each count the provider gave.
+fn usage_payload(model: &str, usage: Usage) -> Value {
+    let mut payload = serde_json::Map::new();
+    payload.insert("model".to_owned(), json!(model));
+    let counts = [
+        ("input_tokens", usage.input_tokens),
+        ("output_tokens", usage.output_tokens),
+    ];
+    for (name, count) in counts {
+        if let Some(count) = count {
+            payload.insert(name.to_owned(), json!(count));
         }
-        self.commit(batch)?;
-        Ok(())
+    }
+    Value::Object(payload)
+}
+
+/// The payload of the `tool/result` event for the call `id`: the result's text as `output`,
+/// and its blocks as `content` unless the result is one block of text, which `output`
+/// already is. [`recorded_output`] reads it back.
+fn result_payload(id: &str, tool: &str, ok: bool, output: &ToolOutput) -> Value {
+    let mut payload = json!({"id": id, "tool": tool, "ok": ok, "output": output.to_text()});
+    if !matches!(output.content(), [corduroy_core::Content::Text(_)])
+        && let Some(fields) = payload.as_object_mut()
+    {
+        fields.insert("content".to_owned(), encode_content(output));
+    }
+    payload
+}
+
+/// What the `tool/result` event `id`, with `payload`, says the tool returned: its `content`
+/// blocks if it has them, or else its `output` as one block of text.
+fn recorded_output(id: EventId, payload: &Value) -> Result<ToolOutput> {
+    let Some(blocks) = payload.get("content").and_then(Value::as_array) else {
+        let output = payload.get("output").and_then(Value::as_str);
+        return Ok(ToolOutput::text(output.unwrap_or_default()));
+    };
+    decode_content(blocks).with_context(|| format!("event {id} has an image that is not base64"))
+}
+
+#[cfg(test)]
+mod tests {
+    use corduroy_core::Content;
+
+    use super::*;
+
+    const PNG: [u8; 8] = [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
+
+    /// `output` written as a `tool/result` and read back.
+    fn round_trip(output: &ToolOutput) -> ToolOutput {
+        let payload = result_payload("c1", "snap", true, output);
+        recorded_output(EventId::new(1), &payload).unwrap()
+    }
+
+    #[test]
+    fn a_recorded_result_reads_back_as_the_tool_returned_it() {
+        let outputs = [
+            ToolOutput::text("plain"),
+            ToolOutput::text(""),
+            ToolOutput::default(),
+            ToolOutput::new(vec![Content::text("one"), Content::text("two")]),
+            ToolOutput::from(Content::image("image/png", PNG)),
+            ToolOutput::new(vec![
+                Content::text("before"),
+                Content::image("image/png", PNG),
+                Content::image("image/jpeg", Vec::new()),
+                Content::text("after"),
+            ]),
+        ];
+        for output in outputs {
+            assert_eq!(round_trip(&output), output);
+        }
+    }
+
+    #[test]
+    fn one_block_of_text_is_recorded_as_output_alone() {
+        assert_eq!(
+            result_payload("c1", "label", true, &ToolOutput::text("a view")).to_string(),
+            r#"{"id":"c1","tool":"label","ok":true,"output":"a view"}"#
+        );
+        assert_eq!(
+            result_payload(
+                "c1",
+                "snap",
+                false,
+                &Content::image("image/png", PNG).into()
+            ),
+            json!({
+                "id": "c1",
+                "tool": "snap",
+                "ok": false,
+                "output": "[image: image/png, 8 bytes]",
+                "content": [{"type": "image", "mime_type": "image/png", "data": "iVBORw0KGgo="}],
+            })
+        );
+    }
+
+    #[test]
+    fn a_record_this_version_did_not_write_is_read_as_far_as_it_can_be() {
+        let read = |payload: Value| recorded_output(EventId::new(7), &payload);
+        // A log from before results had blocks: the output is the result.
+        assert_eq!(
+            read(json!({"id": "c1", "ok": true, "output": "old"})).unwrap(),
+            ToolOutput::text("old")
+        );
+        // A kind of block from a later version is noted, not dropped; the rest is kept.
+        let later =
+            json!({"content": [{"type": "audio", "data": "AAAA"}, {"type": "text", "text": "x"}]});
+        assert_eq!(
+            read(later).unwrap().content(),
+            [Content::text("[audio content]"), Content::text("x")]
+        );
+        // An image that cannot be decoded is not passed off as one.
+        let broken = json!({"content": [{"type": "image", "mime_type": "image/png", "data": "!"}]});
+        assert_eq!(
+            read(broken).unwrap_err().to_string(),
+            "event #7 has an image that is not base64"
+        );
+    }
+
+    #[test]
+    fn a_run_says_how_it_ended() {
+        for end in [
+            End::Finished,
+            End::TurnLimit,
+            End::Failed("the model is down".into()),
+            End::Stopped,
+            End::Yielded,
+        ] {
+            assert_eq!(End::read(&end.payload().to_string()), Some(end));
+        }
+        // A `turn/end` written before runs said how they ended.
+        assert_eq!(End::read(""), None);
+    }
+
+    #[test]
+    fn the_model_sees_a_summary_and_alternating_roles() {
+        let session = Session {
+            id: SessionId::new("main"),
+            messages: vec![
+                Message::user().text("old question"),
+                Message::assistant().text("old answer"),
+                Message::user().text("new question"),
+                Message::user().text("and another thing"),
+                Message::assistant().call(ToolCall::new("1", "read", "{}")),
+                Message::user().result(ToolResult::new("1", true, "text")),
+            ],
+            summary: Some(("they talked".into(), 2)),
+        };
+
+        let view = session.for_model();
+        let roles: Vec<Role> = view.iter().map(|message| message.role).collect();
+        assert_eq!(
+            roles,
+            [
+                Role::User,
+                Role::Assistant,
+                Role::User,
+                Role::Assistant,
+                Role::User
+            ]
+        );
+        assert!(view[0].text_content().contains("they talked"));
+        assert_eq!(view[2].text_content(), "new question\nand another thing");
+        assert_eq!(session.turn().len(), 3);
+        assert_eq!(session.model_turns(), 1);
+        assert_eq!(session.pending_calls(), Vec::<ToolCall>::new());
+        assert_eq!(session.answer(), None);
     }
 }

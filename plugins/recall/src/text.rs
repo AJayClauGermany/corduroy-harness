@@ -2,13 +2,16 @@
 
 use serde_json::Value;
 
-/// The text parts of an oi-kit message, as stored in a `message` event, joined by newlines.
+/// The text parts of a message, as stored in a `message` event, joined by newlines. A
+/// message has its parts under `parts`, or, in logs written before the harness had a
+/// message shape of its own, under `content`.
 pub(crate) fn of(payload: &str) -> String {
     let Ok(message) = serde_json::from_str::<Value>(payload) else {
         return String::new();
     };
     message
-        .get("content")
+        .get("parts")
+        .or_else(|| message.get("content"))
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
@@ -54,8 +57,10 @@ mod tests {
 
     #[test]
     fn the_text_of_a_message_is_its_text_parts() {
-        let payload = r#"{"role":"user","content":[{"type":"text","text":"fix the build"},{"type":"toolRequest","id":"1"},{"type":"text","text":"please"}]}"#;
+        let payload = r#"{"role":"user","parts":[{"type":"text","text":"fix the build"},{"type":"tool_call","id":"1"},{"type":"text","text":"please"}]}"#;
         assert_eq!(of(payload), "fix the build\nplease");
+        let older = r#"{"role":"user","content":[{"type":"text","text":"fix it"},{"type":"toolRequest","id":"1"}]}"#;
+        assert_eq!(of(older), "fix it");
         assert_eq!(of("not json"), "");
     }
 
