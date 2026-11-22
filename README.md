@@ -2,22 +2,24 @@
 
 A plugin-first agent harness in Rust. A small core provides a plugin tree, an event stream and
 a programmable loop; **everything else is a plugin**: the tools a model can call, the text in
-its system prompt, the kernels it computes in, and the reactions to what happens.
+its system prompt, the kernels it computes in, and the reactions to what happens. A plugin
+is anything you plug into the core and can unplug again, and comes in two kinds:
+extensions and add-ons.
 
 There are three tiers, from what changes least to what changes most:
 
-| Tier | What | Trust |
-| --- | --- | --- |
-| **Core** | The plugin tree, capabilities, the event log, the registries, the loop and the [plugin world](wit/corduroy.wit). The contract everything else is written against. | the trusted base |
-| **Extensions** | Native plugins: a kernel, an HTTP client, a model provider, MCP, a step of the loop, a decision point, a service for plugins to call. What the core deliberately does not own. | trusted; compiled into the command |
-| **Plugins** | WebAssembly components: tools, prompt text, gates, automations. | none beyond what they are granted |
+| Tier | What | Gets in by | Trust |
+| --- | --- | --- | --- |
+| **Core** | The plugin tree, capabilities, the event log, the registries, the loop and the [plugin world](wit/corduroy.wit). The contract everything else is written against. | always there | the trusted base |
+| **Extensions** | Native plugins that extend what the core can do: a kernel, an HTTP client, a model provider, MCP, a step of the loop, a decision point, a service for add-ons to call. | compiled into the command; a new one needs it rebuilt | the host's authority |
+| **Add-ons** | WebAssembly plugins that add onto what is there: tools, prompt text, gates, automations. | a `.wasm` file, plugged in at start or while the agent runs; no rebuild | none beyond what they are granted |
 
-Plugins are native Rust or **WebAssembly components** typed with [WIT](wit/corduroy.wit), so
-they can be written in Rust, JavaScript/TypeScript or Python, each with an SDK
+Add-ons are **WebAssembly components** typed with [WIT](wit/corduroy.wit), so they can be
+written in Rust, JavaScript/TypeScript or Python, each with an SDK
 ([`plugins/guest`](plugins/guest), [`sdk/js`](sdk/js), [`sdk/python`](sdk/python)), or any
-other language that compiles to a component. A WebAssembly plugin starts
-with no authority at all and is granted scoped **capabilities**, in the spirit of Deno's
-permissions and Tauri's capabilities:
+other language that compiles to a component. An add-on starts with no authority at all and
+is granted scoped **capabilities**, in the spirit of Deno's permissions and Tauri's
+capabilities:
 
 ```rust
 let runtime = WasmRuntime::new()?.with_root(&workspace);
@@ -30,7 +32,7 @@ harness.plugin(
 );
 ```
 
-A plugin that imports an interface it was not granted is never instantiated; a call outside a
+An add-on that imports an interface it was not granted is never instantiated; a call outside a
 grant's scope is refused and recorded on the event stream.
 
 Runs are **durable**. Each step of the loop is one atomic commit to a log, stored before
@@ -46,7 +48,7 @@ Each tool call is logged when it starts and when it returns, so after a crash a 
 call's result is reused, a call that never started simply runs, and the one that was running
 is repeated only if its tool says that is safe; otherwise the model is told and decides.
 
-**Gates** decide whether a tool call may run. Any plugin can be one, WebAssembly included;
+**Gates** decide whether a tool call may run. Any plugin can be one, add-ons included;
 the strictest answer wins, and an "ask" makes the run wait, across restarts, for a person:
 
 ```rust
@@ -63,7 +65,7 @@ result. Any tool call can wait this way, for a signal brought by `Harness::signa
 ## Try it
 
 ```bash
-cargo plugins                                   # build the WebAssembly plugins
+cargo plugins                                   # build the add-ons (WebAssembly plugins)
 ```
 
 ```bash
@@ -77,17 +79,19 @@ cargo corduroy --workspace ~/some/project      # talk to the agent; /help for co
 Without an agent file it runs the default agent: the Pi tools on a shell in the workspace,
 skills, and an approval gate that asks before anything that writes. `cargo corduroy init`
 writes that agent to `corduroy.toml` so you can change it: the providers, the kernels, each
-plugin and exactly what it is granted. `corduroy run <prompt>` runs one prompt; `corduroy
+add-on and exactly what it is granted. `corduroy run <prompt>` runs one prompt; `corduroy
 check` says what the agent has without calling a model; `corduroy log` prints the event
 log, with the time of each event, which is kept in `.corduroy/log.jsonl`. Ctrl-C stops a run (the running tool is told, the rest of its calls do not run); kill
 the process instead and `corduroy continue` picks the run up, or `corduroy stop` ends it; leave a question unanswered and the run waits, in the log, until you do.
 
 ## Extending it
 
-Write a **plugin** when the code should be sandboxed: anything from a third party, anything
+Write an **add-on** when the code should be sandboxed: anything from a third party, anything
 the agent writes for itself, anything that only needs the capabilities in
 [`wit/corduroy.wit`](wit/corduroy.wit). Use `plugins/guest` (Rust), `sdk/js` or
-`sdk/python`, and list it under `[[plugins]]` in the agent file with its grants.
+`sdk/python`, build it to a `.wasm` file, and list it under `[[plugins]]` in the agent file
+with its grants; the agent can also load one while it runs (`plugin-manager`). Nothing but
+the add-on is rebuilt.
 
 Write an **extension** when the code needs the host's authority or a native library: a
 kernel that runs in a container, a database behind a service, a step of the loop. An
@@ -100,8 +104,8 @@ kind = "shell-kernel"            # a kind this command was built with
 dir = "{workspace}/scratch"      # the rest is the extension's own configuration
 ```
 
-Kinds are compiled in, and the command is a library, so a command of your own is the
-shipped one with more kinds:
+Kinds are compiled in, so a new kind means rebuilding the command. The command is a
+library, so a command of your own is the shipped one with more kinds:
 
 ```rust
 fn main() -> std::process::ExitCode {
@@ -118,10 +122,10 @@ fn main() -> std::process::ExitCode {
 ```
 
 An extension can register kernels, HTTP clients, models and secrets (the things
-capabilities reach), services that WebAssembly plugins call through the `service`
+capabilities reach), services that add-ons call through the `service`
 capability, decision points for gates, and steps of the loop
-(`corduroy_harness::Operations`). It cannot add a capability: the plugin boundary is the
-core's. [`docs/design.md`](docs/design.md#three-tiers-core-extensions-plugins) has the
+(`corduroy_harness::Operations`). It cannot add a capability: the add-on boundary is the
+core's. [`docs/design.md`](docs/design.md#three-tiers-core-extensions-add-ons) has the
 reasoning, and [what is meant to stay stable](docs/design.md#what-is-stable).
 
 ## Where the ideas come from

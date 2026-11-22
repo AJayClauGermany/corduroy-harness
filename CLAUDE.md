@@ -8,8 +8,13 @@ the provider boundary, in `corduroy-providers`. `docs/design.md` explains where 
 comes from and why.
 
 Three tiers: the **core** (the contract; changes rarely), **extensions** (native plugins:
-trusted, compiled in, for what the core should not own) and **plugins** (WebAssembly,
-granted capabilities). `docs/design.md` says what goes where ("Three tiers") and which
+trusted, compiled in, extending what the core can do) and **add-ons** (WebAssembly plugins:
+granted capabilities, plugged in without a rebuild). **Plugin** covers both of the last two:
+anything plugged in through `corduroy_core::Plugin` and unplugged again. The line between
+them is how they get in, not what they contribute: an extension needs the command rebuilt,
+an add-on is a `.wasm` file. Identifiers that predate these terms (`[[plugins]]`, the
+`plugins` capability, `plugin/load`, `plugins/`, `WasmPlugin`) say *plugin* and reach
+add-ons only; keep them. `docs/design.md` says what goes where ("Three tiers") and which
 contracts must not break ("What is stable").
 
 ## Layout
@@ -26,7 +31,7 @@ contracts must not break ("What is stable").
 | `crates/corduroy-wasm` | wasmtime host. Loads components built against `wit/corduroy.wit` as `Plugin`s; links only granted interfaces. |
 | `src/` (`corduroy-harness`) | The loop and its parts: `Harness` (sessions, `run_in`, `continue_run`, `answer`, `signal`, `stop`, `step`, and the loop itself), `Operation` (`src/operation.rs`), `Journal` (one step's effects to one commit), `message` (the `message` event's JSON, and the oi-kit shape old logs hold), `GateOperation`, `CompactOperation`, the `sessions` service for child sessions (`src/children.rs`), `PluginTools`, the `Providers` registry and `provider` plugin (`src/provider.rs`), `ScriptedProvider`. Async (tokio). |
 | `wit/corduroy.wit` | The typed plugin boundary. Each imported interface is one capability. |
-| `plugins/` | **Separate workspace**, built for `wasm32-unknown-unknown`: `guest` (the `corduroy-guest` crate every Rust plugin builds on: bindings generated once, a `Plugin` trait with default exports, `export!`), `pi-tools` (read, write, edit, bash, tree), `skills`, `approval` (a gate: permission modes), the Goose-baseline plugins `hints`, `todo`, `memory`, `recall`, `summarize`, `compact` (the `compaction` service), `subagents` (`delegate`), `inspect` (a gate) and `plugin-manager`, and `testbed` (for the host's tests only: host calls, loads, echoes and traps on demand). |
+| `plugins/` | The add-ons. **Separate workspace**, built for `wasm32-unknown-unknown`: `guest` (the `corduroy-guest` crate every Rust plugin builds on: bindings generated once, a `Plugin` trait with default exports, `export!`), `pi-tools` (read, write, edit, bash, tree), `skills`, `approval` (a gate: permission modes), the Goose-baseline plugins `hints`, `todo`, `memory`, `recall`, `summarize`, `compact` (the `compaction` service), `subagents` (`delegate`), `inspect` (a gate) and `plugin-manager`, and `testbed` (for the host's tests only: host calls, loads, echoes and traps on demand). |
 | `sdk/js`, `sdk/python` | Guest SDKs: write a plugin in JavaScript/TypeScript or Python; `corduroy-js build` / `corduroy-py build` make a component importing only the listed capabilities. `sdk/js/script-host` is the script host (automations as scripts). |
 | `examples/` | The same `notes` plugin in each guest language, built by `scripts/guests.sh`; `local-model/corduroy.toml`, the default agent with its model served on this machine (the agent `cargo eval` runs). |
 | `crates/corduroy-test-support` | Test-only helpers: finds built plugins, makes scratch directories. |
@@ -35,7 +40,7 @@ contracts must not break ("What is stable").
 
 | Command | What it does |
 | --- | --- |
-| `cargo plugins` | Build the guest plugins to WebAssembly. **Run after changing `plugins/` or `wit/`**; host tests and the demo load the result. |
+| `cargo plugins` | Build the add-ons (`plugins/`) to WebAssembly. **Run after changing `plugins/` or `wit/`**; host tests and the demo load the result. |
 | `scripts/guests.sh` | Build the JavaScript and Python plugins (needs Node.js 20+ and Python 3.11+; installs the toolchains on first use). **Run after changing `sdk/`, `examples/` or `wit/`**; their tests skip when they are not built, unless `CORDUROY_REQUIRE_GUESTS` is set (CI). |
 | `cargo t` | Fast tests for the whole host workspace (`cargo nextest run --all-features`). **Does not run doctests.** Fails with instructions if the plugins are missing or stale. |
 | `cargo test --doc` | Doctests (nextest skips them) |

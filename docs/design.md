@@ -14,10 +14,11 @@ itself, without the core moving. The aim is that whatever the plugins become, th
 is underneath and still enforcing the same rules.
 
 The harness has three tiers, from what changes least to what changes most: the **core**,
-**extensions** (native plugins, trusted, which give the harness what the core deliberately
-lacks) and **plugins** (WebAssembly, granted capabilities). [Three tiers](#three-tiers-core-extensions-plugins)
-says what goes where, and [What is stable](#what-is-stable) which contracts are meant to
-hold from here on.
+**extensions** (native plugins: trusted, compiled into the command, extending what the core
+can do) and **add-ons** (WebAssembly plugins: granted capabilities, plugged in without a
+rebuild). *Plugin* is the word for both of the last two. [Three
+tiers](#three-tiers-core-extensions-add-ons) says what goes where, and [What is
+stable](#what-is-stable) which contracts are meant to hold from here on.
 
 The second half records where the design is going. Sections and table rows marked *planned*
 describe that target, not the code as it is.
@@ -313,13 +314,62 @@ runs the child to its end and signals the parent, and `continue_run` picks the c
 after a crash wherever it stopped. A gate asking in a child surfaces on the parent's
 outcome, with the child's session on the ask.
 
-## Three tiers: core, extensions, plugins
+## Three tiers: core, extensions, add-ons
 
-| Tier | What it is | Trust | Changes |
+A **plugin** is anything plugged into the core through `corduroy_core::Plugin` and
+unplugged again: everything it registers is an effect, reverted when it is unloaded. There
+are two kinds of plugin, extensions and add-ons, told apart by how they get in and what they
+are trusted with, not by what they contribute. Underneath both is the core.
+
+| Tier | What it is | Gets in by | Trust |
 | --- | --- | --- | --- |
-| **Core** | `corduroy-core` (the plugin tree, capabilities, the event stream, the registries), the WIT world and the WebAssembly host that enforces it, and the loop with its journal | is the trusted base | rarely: it is the contract the other two are written against |
-| **Extension** | a native plugin: Rust compiled into the command, loaded into the same tree through the same `Plugin` trait | trusted, with the host's authority | when a new kind of thing is needed that the core should not own |
-| **Plugin** | a WebAssembly component | none beyond its grants | freely: people and the agent itself add, rewrite and remove them |
+| **Core** | `corduroy-core` (the plugin tree, capabilities, the event stream, the registries); the WIT world (`wit/corduroy.wit`) and the WebAssembly host that enforces it (`corduroy-wasm`); and the loop (`corduroy-harness`: `Harness`, `Journal`, the built-in steps, `PluginTools`, the `Providers` and `Operations` registries, the `sessions` service) | is always there, and cannot be unloaded | the trusted base; changes rarely, as the contract the other two are written against |
+| **Extension** | a native plugin: Rust compiled into the command | rebuilding the command with it; the agent file then turns it on | the host's authority |
+| **Add-on** | a WebAssembly plugin: a component built against the WIT world | a `.wasm` file, plugged in at start or while the agent runs; nothing is rebuilt but the add-on | none beyond its grants |
+
+The names say what each is usually for. An extension *extends what the core can do*: a new
+kind of ability, such as a kernel, an HTTP client, a model, a decision point or a step of
+the loop. An add-on *adds onto what is already there*, using only the abilities the core
+and the extensions offer. That is the usual case, not the definition: `corduroy-mcp`
+contributes nothing but tools and is still an extension, because it starts processes. The
+definition is how a plugin gets in: **an extension needs the command rebuilt; an add-on is
+dropped in.** Trust follows from it: whatever can be added without a rebuild is sandboxed,
+and whatever holds the host's authority was compiled in by whoever built the binary.
+
+- **Turning on an extension the command already has is configuration.** The shipped
+  command has the providers, the kernels, MCP, secrets, the HTTP client and the
+  `shell-kernel` kind; the agent file picks which are loaded (`[providers.*]`,
+  `[kernels.*]`, `[mcp.*]`, `[secrets.*]`, `[extensions.<name>]`). A new *kind* of
+  extension is Rust in a command of one's own (see [In the `corduroy`
+  command](#in-the-corduroy-command) below). Native code is never loaded at run time.
+- **An add-on is built on its own** (`cargo plugins`, `corduroy-js build`, `corduroy-py
+  build`) and plugged in either at start, under `[[plugins]]` in the agent file with its
+  grants, or while the agent runs, through the `plugins` capability (`plugin-manager` gives
+  the model tools for it). A load while running is asked of the gates at `plugin/load`, is
+  granted at most what its loader holds, and starts before the model's next step.
+
+**Names older than these terms.** Several identifiers say *plugin* and reach add-ons only:
+the `[[plugins]]` key of the agent file, the WIT package and world (`corduroy:plugin`,
+`world plugin`), the `plugins` capability, the `plugin/load` decision point, the
+`plugin/trapped`, `plugin/restarted` and `plugin/stopped` events, `WasmPlugin`, the
+`plugins/` workspace and `plugin-manager`. They stay as they are: an add-on is a plugin, so
+each is still true, and most are [stable contracts](#what-is-stable). Read them as
+"plugins, of which only add-ons get here". Likewise "WebAssembly plugin" in this document
+means an add-on, and "native plugin" an extension.
+
+**Neither.** Some of what a running agent is made of is not a plugin at all:
+
+- *Host configuration*: what the host hands the core while putting it together, rather than
+  plugging in. The log's store (`corduroy-jsonl`'s `JsonlLog`, given to the `EventStream`),
+  steps added with `Harness::with_operation`, protected paths (`WasmRuntime::protect`).
+  None of it is an effect, and none of it is unloaded.
+- *Implementations*: libraries that implement a core trait, such as `ShellKernel`,
+  `UreqClient` and the providers `corduroy-providers` builds. The extension is the plugin
+  that registers one (`shell_kernel`, `http_client`, `provider`).
+- *The host*: `corduroy-cli`, which puts the core, its extensions and its add-ons together
+  from an agent file.
+- *What a plugin manages*: skills, scripts, memories, hint files. Data, not plugins.
+- *What an extension reaches*: an MCP server's process, a model's API. Outside the harness.
 
 An extension is not a second mechanism. It is a plugin (its registrations are effects, it
 is unloaded like any other, it follows the services it injects) that happens to be native,
@@ -327,49 +377,52 @@ and so may do the things only native code can:
 
 | An extension contributes | Through | Example |
 | --- | --- | --- |
-| An implementation of a core trait | the core's registries | `corduroy-shell` (a kernel), `corduroy-http` (the client behind `http`), `provider` (a model), a secret source, `corduroy-jsonl` (a log store) |
-| A service WebAssembly plugins call | `Services`, reached with the `service` capability | the harness's own `sessions`; an MCP plugin accepting server definitions |
+| An implementation of a core trait | the core's registries | `corduroy-shell` (a kernel), `corduroy-http` (the client behind `http`), `provider` (a model), a secret source |
+| A service add-ons call | `Services`, reached with the `service` capability | an MCP extension accepting server definitions (the core's `sessions` service has the same shape) |
 | A typed service or registry for other extensions | `ctx.provide`, `inject` | `Providers` |
 | A decision point of its own | `Gates::declare`, then `Gates::decide` | asking the gates before a request leaves the machine |
 | A step of the loop | the harness's `Operations` registry | a policy that answers a call before it runs; a compaction strategy |
 | Tools, prompt parts, gates, event listeners | as any plugin does | `corduroy-mcp` |
 
-That table is also the answer to *how extensions make plugins easier to write*: a plugin
-never gains authority from an extension, it gains something to ask. A WebAssembly plugin
-that needs what no capability gives (a database, a browser, a queue) calls a service an
-extension provides, and its grant names that service; a plugin that wants to veto something
-the core knows nothing about gates a point an extension declared. Neither needs a change to
+That table is also the answer to *how extensions make add-ons easier to write*: an add-on
+never gains authority from an extension, it gains something to ask. An add-on that needs
+what no capability gives (a database, a browser, a queue) calls a service an extension
+provides, and its grant names that service; an add-on that wants to veto something the core
+knows nothing about gates a point an extension declared. Neither needs a change to
 the core or to the WIT world.
 
-What an extension cannot do is widen the plugin boundary. The capabilities are the imports
+What an extension cannot do is widen the add-on boundary. The capabilities are the imports
 of the WIT world, and a new one is a change to the core (see
 [Capabilities](#capabilities)), because the boundary is what the sandbox is made of: if
-extensions could link host functions of their own, "what can a plugin do" would no longer
+extensions could link host functions of their own, "what can an add-on do" would no longer
 have one answer in one file. A service is the pressure valve: text in, text out, scoped by
 name, with the caller's name attached.
 
 **Where something goes.** The core if every effect passes through it, if plugins contribute
 to it, or if plugins must agree on it ([The core boundary](#the-core-boundary)). An
 extension if it needs the host's authority or a native library (a process, a socket, a
-database, the loop itself) and the core can stay ignorant of it. A plugin otherwise, and
+database, the loop itself) and the core can stay ignorant of it. An add-on otherwise, and
 always if a third party or the agent wrote it.
 
-**In the `corduroy` command.** The kernels, providers, MCP servers and secrets of an agent
-file are extensions with sections of their own. Any other goes under
-`[extensions.<name>]`, where `kind` names one of the kinds the command was built with and
-the remaining keys are its configuration. Kinds are compiled in, so a command of one's own
-is the shipped one with more kinds (`corduroy_cli::command::main_with` and
-`extension::Extensions`); the agent file still decides which are loaded.
+### In the `corduroy` command
+
+The kernels, providers, MCP servers and secrets of an agent file are extensions with
+sections of their own. Any other goes under `[extensions.<name>]`, where `kind` names one of
+the kinds the command was built with and the remaining keys are its configuration. Kinds
+are compiled in, so a new kind means a command of one's own: the shipped one with more
+kinds (`corduroy_cli::command::main_with` and `extension::Extensions`), rebuilt. The agent
+file still decides which are loaded. Add-ons are listed under `[[plugins]]`, each with its
+grants.
 
 ## What is stable
 
-Four contracts are meant to hold, so that plugins and extensions written against them keep
+Four contracts are meant to hold, so that extensions and add-ons written against them keep
 working. Everything else may move.
 
 | Contract | Where | Rule for change |
 | --- | --- | --- |
 | The plugin world | `wit/corduroy.wit` | Adding an import interface (a capability) breaks nobody: a plugin that does not import it is unaffected, and a host without it refuses, at load, a plugin that does. Changing an export, or a type a guest sees, changes the package version, and guests are rebuilt against it; so exports and shared types change only together, rarely, and never to add what an import could add. |
-| The core's traits and registries | `corduroy-core` | New trait methods come with defaults (as `Kernel::spawn` did). Types that grow are `#[non_exhaustive]` with constructors (`ToolSpec`, tool results), so a new field breaks no extension. |
+| The core's traits and registries | `corduroy-core`, and the loop's own that extensions implement or register in: `Operation`, `Operations`, `Provider`, `Providers` (`corduroy-harness`) | New trait methods come with defaults (as `Kernel::spawn` did). Types that grow are `#[non_exhaustive]` with constructors (`ToolSpec`, tool results), so a new field breaks no extension. |
 | The log | `corduroy-jsonl`, the topic table in `src/session.rs` | The header's schema version changes when a line's shape does, and older versions stay readable. Events gain fields; they do not lose or repurpose them. Readers ignore topics and fields they do not know. |
 | The agent file | `crates/corduroy-cli` | Keys are added, not renamed; an unknown key is an error, so a typo is never a silently ignored grant. |
 
@@ -791,7 +844,7 @@ the step it waits on is done.
     were a closed list in the core; loop steps could be added only by the host, not by a
     plugin that can be unloaded; tool results were one string. With it, the extension
     tier: `[extensions]` in the agent file, and the command as a library so a binary can
-    add kinds. See [Three tiers](#three-tiers-core-extensions-plugins) and
+    add kinds. See [Three tiers](#three-tiers-core-extensions-add-ons) and
     [What is stable](#what-is-stable).
 11. *Done.* Three things the review left open. The conversation's shape is the core's
     `Message`, and the loop is the harness's own, with oi-kit kept behind the provider
