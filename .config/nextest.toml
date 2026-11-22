@@ -20,3 +20,13 @@ slow-timeout = { period = "5s", terminate-after = 3 }
 
 [profile.ci.junit]
 path = "junit.xml"
+
+# A JavaScript or Python plugin is a 12 to 18 MB engine that takes several seconds to compile
+# the first time a machine sees it (later loads come from the disk cache in well under one).
+[[profile.default.overrides]]
+filter = 'binary(guest_languages)'
+slow-timeout = { period = "30s", terminate-after = 3 }
+
+[[profile.ci.overrides]]
+filter = 'binary(guest_languages)'
+slow-timeout = { period = "30s", terminate-after = 3 }

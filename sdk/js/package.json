@@ -1,0 +1,31 @@
+{
+  "name": "corduroy-plugin",
+  "version": "0.1.0",
+  "description": "Write corduroy plugins in JavaScript or TypeScript: a plugin object in, a capability-gated WebAssembly component out.",
+  "license": "BSL-1.0",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
+    },
+    "./runtime": "./src/runtime.js",
+    "./world": "./src/world.js"
+  },
+  "bin": {
+    "corduroy-js": "bin/corduroy-js.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@bytecodealliance/componentize-js": "0.23.0",
+    "esbuild": "0.28.2"
+  },
+  "types": "src/index.d.ts",
+  "files": [
+    "bin",
+    "src"
+  ]
+}

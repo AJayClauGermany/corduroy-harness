@@ -137,6 +137,7 @@ async fn a_task_runs_across_both_plugins_within_their_grants() {
             "skill_manage",
             "skill_view",
             "skills_list",
+            "tree",
             "write"
         ]
     );
@@ -366,7 +367,7 @@ async fn the_approval_gate_lets_reads_through_and_holds_writes_for_a_person() {
 
     let first = agent.harness.run("rewrite notes.txt").await.unwrap();
 
-    let Status::Waiting { asks } = first.status else {
+    let Status::Waiting { asks, .. } = first.status else {
         panic!("expected to wait for the write, got {:?}", first.status);
     };
     assert_eq!(asks[0].tool, "write");

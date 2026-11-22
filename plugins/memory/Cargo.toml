@@ -1,0 +1,20 @@
+[package]
+name = "memory"
+description = "Memories the agent saves by category, as files, after Goose."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+corduroy-guest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

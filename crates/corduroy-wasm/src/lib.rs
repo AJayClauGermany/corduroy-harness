@@ -3,15 +3,15 @@
 //! A plugin is a WebAssembly component built against the `corduroy:plugin/plugin` world in
 //! `wit/corduroy.wit`. Any language that compiles to a component can implement one. This crate
 //! turns such a component into a [`corduroy_core::Plugin`], so it joins the same context tree
-//! as native plugins: its tools, listeners, prompt part and gate are effects that vanish when
-//! it is unloaded.
+//! as native plugins: its tools, listeners, prompt part, gate and services are effects that
+//! vanish when it is unloaded.
 //!
 //! # Capabilities
 //!
 //! A component can only reach the outside world through its imports, and it has no imports
 //! but the host interfaces of the plugin world. Each of those interfaces is one *capability*:
 //! `fs-read`, `fs-write`, `kernel`, `events`, `log`, `clock`, `random`, `tools`, `state`,
-//! `service`, `plugins`. There is no WASI, so there is no ambient authority to fall back on.
+//! `service`, `plugins`, `llm`, `secret`, `http`, `log-read`. There is no WASI, so there is no ambient authority to fall back on.
 //!
 //! * **At load time** the host links only the interfaces the plugin was granted. A component
 //!   that imports an interface it was not granted is never instantiated.
@@ -47,5 +47,5 @@
 pub mod plugin;
 pub mod runtime;
 
-pub use plugin::WasmPlugin;
+pub use plugin::{CAPABILITIES, WasmPlugin};
 pub use runtime::{Limits, WasmError, WasmRuntime};

@@ -23,6 +23,15 @@ cargo clippy "${plugins[@]}" "${wasm[@]}" -- -D warnings
 step "plugins (wasm32)"
 cargo plugins
 
+# JavaScript and Python plugins, if Node.js and Python are here; their tests skip otherwise.
+if command -v node >/dev/null && command -v python3 >/dev/null; then
+  step "guest-language plugins"
+  scripts/guests.sh
+  export CORDUROY_REQUIRE_GUESTS=1
+else
+  step "guest-language plugins: skipped (needs node and python3; their tests will skip)"
+fi
+
 step "tests (nextest)"
 cargo nextest run --all-features
 

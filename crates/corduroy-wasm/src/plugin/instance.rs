@@ -290,6 +290,13 @@ impl Instance {
         if let Some(cause) = cause {
             raised = raised.into_iter().map(|draft| draft.cause(cause)).collect();
         }
+        // What a plugin raises while serving a tool call belongs to that call's session.
+        if let Some(scope) = corduroy_core::call::current() {
+            raised = raised
+                .into_iter()
+                .map(|draft| draft.session(scope.session.clone()))
+                .collect();
+        }
         // The plugin's call has returned, so there is nobody to hand a refused commit to. The
         // stream is closed by then and the next commit of the run reports it.
         drop(self.events.commit(raised));

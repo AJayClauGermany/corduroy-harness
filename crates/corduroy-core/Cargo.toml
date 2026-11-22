@@ -1,6 +1,6 @@
 [package]
 name = "corduroy-core"
-description = "Dependency-free core of the corduroy harness: plugin contexts, capabilities, the event stream, tools and kernels."
+description = "Dependency-free core of the corduroy harness: plugin contexts, capabilities, the event stream and the registries plugins contribute to."
 publish = false
 version.workspace = true
 edition.workspace = true

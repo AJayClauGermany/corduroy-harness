@@ -6,6 +6,14 @@ answers can shape steps 4 to 7. One JavaScript and one Python plugin were built 
 through `Tools`, `Prompts` and the event stream. Nothing from the spike is in the build; the
 sources that matter are reproduced at the end.
 
+**Read as a record.** The first three sections describe the host and the world as they were
+at the time, with four capabilities, no compiled-code cache and no `parallel-compilation`:
+"today" means then. Later sections record each export and import as it was checked. The
+cache and parallel compilation landed in step 6 ([Loading plugins](#loading-plugins)), the
+world now has fifteen imports and six exports, and the script-host sources at the end
+predate `gate`, `handle-call`, `read-only`, `gates` and `provides`, so they no longer build
+as they stand.
+
 | | JavaScript | Python |
 | --- | --- | --- |
 | Toolchain | `@bytecodealliance/componentize-js` 0.23.0 (StarlingMonkey) | `componentize-py` 0.25.1 (CPython 3.14) |
@@ -255,126 +263,53 @@ A guest must keep the credential alive until the request that borrows it is sent
 dropped handle is refused with `failed`. `llm.complete` and `http.send` block the plugin's
 call until the answer comes back, up to `Limits::outbound_wait` (two minutes by default).
 
+## The SDKs (step 8)
+
+Built in November 2026, after steps 4 to 7, as [What follows](#what-follows) asked:
+`sdk/js` and `sdk/python`, with `examples/notes-js` and `examples/notes-py` (the same plugin
+in each language) and the script host, built by `scripts/guests.sh` and loaded by the host's
+`guest_languages` tests in CI.
+
+| | JavaScript (`corduroy-js`) | Python (`corduroy-py`) |
+| --- | --- | --- |
+| A plugin is | a default-exported object (`tools`, `onEvent`, `prompt`, `gates`, `services`) | a `Plugin` and decorators |
+| Build | esbuild bundle (so TypeScript too), then componentize-js with WASI disabled | componentize-py `--stub-wasi` |
+| Logging | `console.*` to `log` | `print`, `sys.stdout`, `sys.stderr` to `log` |
+| Time | `Date`, `performance.now()` to `clock` | `time.*` and `datetime` to `clock` |
+| Randomness | `Math.random`, `crypto.getRandomValues` to `random` | `random`, `os.urandom` (so `secrets`, `uuid4`) to `random` |
+| Without the capability | the global throws, naming what to grant | the same |
+| Refused outright | `fetch` | `open()`, `time.sleep()` |
+| Errors | `ToolError`/`CallError` choose the kind; a host `denied` keeps it; anything else is `failed` | the same |
+| Defaults | every export but the plugin's name; a gate asked anyway denies | the same |
+| Notes plugin | 12 MB, built in 6 s | 18.7 MB, built in 4 s |
+
+What came up building them:
+
+- **The world is the declaration.** Each SDK takes `--capabilities` and adds a world with
+  exactly those imports to the package's WIT, so a plugin built with `state,log` requires
+  those two and nothing else, checked by `a_guest_plugin_imports_only_the_capabilities_it_was_built_with`.
+- **Routing happens at call time.** Both toolchains run a plugin's top level while building
+  it, when there is no host, so the SDKs patch the globals then but reach the host only when
+  one is called. A plugin that reads the clock at its top level gets the error, not a value.
+- **Python's `datetime` reads the clock in C**, where nothing can reach it. The runtime
+  blocks `_datetime` before anything imports `datetime`, so the pure-Python implementation
+  is used, and it asks `time.time()`.
+- **Compiling is still the cost.** The tests share wasmtime's disk cache, so each component
+  compiles once per change (about 6 seconds) and then loads in well under one.
+- **The script host is the JavaScript SDK's own plugin.** `sdk/js/script-host` imports every
+  capability; its configuration carries the automation's script, the body of a function
+  given `host` that returns a plugin object. The runtime reads the plugin's parts on every
+  call, so `activate` can fill them in.
+
 ## Not tested
 
 - Async exports, which both toolchains support and which gates, waits and plugin-contributed
   operations may want.
 - Third-party packages (npm modules, wheels with native code).
-- TypeScript, which is a bundling step in front of the same toolchain.
 - Fuel and memory for a realistic workload rather than a string operation.
 
 ## Reproducing it
 
-```bash
-npm install @bytecodealliance/componentize-js @bytecodealliance/jco
-```
-
-```bash
-pip install componentize-py
-```
-
-JavaScript is built through the API. `witPath` pointing at a directory failed in this
-environment, so the WIT is passed as text:
-
-```js
-import { componentize } from '@bytecodealliance/componentize-js';
-import { readFile, writeFile } from 'node:fs/promises';
-
-const { component } = await componentize(await readFile('plugin.js', 'utf8'), {
-  witWorld: await readFile('wit/corduroy.wit', 'utf8'),
-  worldName: 'plugin',
-  disableFeatures: ['stdio', 'random', 'clocks', 'http', 'fetch-event'],
-});
-await writeFile('plugin.wasm', component);
-```
-
-```bash
-componentize-py -d wit -w plugin componentize app --stub-wasi -o plugin.wasm
-```
-
-`npx jco wit plugin.wasm` prints a component's imports and exports.
-
-The JavaScript script host, complete:
-
-```js
-import { read, list } from 'corduroy:plugin/fs-read@0.1.0';
-import { write, remove } from 'corduroy:plugin/fs-write@0.1.0';
-import { exec } from 'corduroy:plugin/kernel@0.1.0';
-import { emit } from 'corduroy:plugin/events@0.1.0';
-
-const host = { read, list, write, remove, exec, emit };
-let script;
-
-export function activate(config) {
-  const cfg = JSON.parse(config);
-  script = new Function('host', cfg.script)(host);
-  return {
-    name: cfg.name,
-    version: '0.0.0',
-    tools: script.tools ?? [],
-    subscriptions: script.subscriptions ?? [],
-    prompt: !!script.prompt,
-  };
-}
-
-export function callTool(name, input) {
-  try {
-    return String(script.call(name, JSON.parse(input)));
-  } catch (e) {
-    const p = e.payload ?? e;
-    throw { tag: p.tag === 'denied' ? 'denied' : 'failed', val: String(p.val ?? e) };
-  }
-}
-
-export function onEvent(event) { script.onEvent?.(event); }
-export function promptPart() { return script.prompt?.(); }
-```
-
-The Python one, complete:
-
-```python
-import json
-import wit_world
-from wit_world.imports import types, fs_read, fs_write, kernel, events
-from componentize_py_types import Err
-
-script = {}
-
-class WitWorld(wit_world.WitWorld):
-    def activate(self, config):
-        cfg = json.loads(config)
-        host = {"fs_read": fs_read, "fs_write": fs_write, "kernel": kernel, "events": events}
-        exec(cfg["script"], host, script)
-        tools = [
-            types.ToolSpec(name=n, description=d, input_schema='{"type":"object"}', replay_safe=False)
-            for n, d in script.get("TOOLS", {}).items()
-        ]
-        return types.PluginInfo(
-            name=cfg["name"], version="0.0.0", tools=tools,
-            subscriptions=script.get("SUBSCRIPTIONS", []), prompt="prompt" in script,
-        )
-
-    def call_tool(self, name, input):
-        try:
-            return str(script["call"](name, json.loads(input)))
-        except Err as e:
-            v = e.value
-            if isinstance(v, types.HostError_Denied):
-                raise Err(types.ToolError_Denied(v.value))
-            raise Err(types.ToolError_Failed(str(v)))
-        except Exception as e:
-            raise Err(types.ToolError_Failed(f"{type(e).__name__}: {e}"))
-
-    def on_event(self, event):
-        if "on_event" in script:
-            script["on_event"](event)
-
-    def prompt_part(self):
-        return script["prompt"]() if "prompt" in script else None
-```
-
-An automation is then a plugin whose `config` is, for instance:
-
-```json
-{"name": "count", "script": "return { tools: [{ name: 'count', description: 'Length of a file', inputSchema: '{}', replaySafe: true }], call: (name, args) => host.read(args.path).length }"}
-```
+The spike's own sources predated half the world and are superseded by the SDKs: see
+`sdk/js/README.md`, `sdk/python/README.md`, and `scripts/guests.sh`, which installs both
+toolchains on first use and builds every guest plugin in the repository.

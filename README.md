@@ -5,8 +5,9 @@ a programmable loop; **everything else is a plugin**: the tools a model can call
 its system prompt, the kernels it computes in, and the reactions to what happens.
 
 Plugins are native Rust or **WebAssembly components** typed with [WIT](wit/corduroy.wit), so
-they can be written in any language that compiles to a component (Rust today; JavaScript and
-Python have been [tried](docs/guest-languages.md)). A WebAssembly plugin starts
+they can be written in Rust, JavaScript/TypeScript or Python, each with an SDK
+([`plugins/guest`](plugins/guest), [`sdk/js`](sdk/js), [`sdk/python`](sdk/python)), or any
+other language that compiles to a component. A WebAssembly plugin starts
 with no authority at all and is granted scoped **capabilities**, in the spirit of Deno's
 permissions and Tauri's capabilities:
 
@@ -42,10 +43,36 @@ the strictest answer wins, and an "ask" makes the run wait, across restarts, for
 
 ```rust
 harness.plugin(runtime.load("plugins/…/approval.wasm")?.config(r#"{"mode":"smart"}"#));
-if let Status::Waiting { asks } = harness.run("tidy the repo").await?.status {
-    harness.answer(&MAIN.into(), &asks[0].call, Answer::Allow).await?;   // run the write
+if let Status::Waiting { asks, .. } = harness.run("tidy the repo").await?.status {
+    harness.answer(&asks[0].session, &asks[0].call, Answer::Allow).await?;   // run the write
 }
 ```
+
+**Sub-agents** wait in the log too: `delegate` starts a child session with the same tools,
+the parent's run stops until the child ends, and the child's answer becomes the call's
+result. Any tool call can wait this way, for a signal brought by `Harness::signal`.
+
+## Try it
+
+```bash
+cargo plugins                                   # build the WebAssembly plugins
+```
+
+```bash
+export ANTHROPIC_API_KEY=...                    # or OPENAI_API_KEY; without either, a local Ollama
+```
+
+```bash
+cargo corduroy --workspace ~/some/project      # talk to the agent; /help for commands
+```
+
+Without an agent file it runs the default agent: the Pi tools on a shell in the workspace,
+skills, and an approval gate that asks before anything that writes. `cargo corduroy init`
+writes that agent to `corduroy.toml` so you can change it: the providers, the kernels, each
+plugin and exactly what it is granted. `corduroy run <prompt>` runs one prompt; `corduroy
+check` says what the agent has without calling a model; `corduroy log` prints the event
+log, which is kept in `.corduroy/log.jsonl`. Kill it mid-run and `corduroy continue` picks
+the run up; leave a question unanswered and the run waits, in the log, until you do.
 
 ## Where the ideas come from
 
@@ -72,6 +99,10 @@ cargo demo        # a scripted model works through both plugins; prints the even
 ```
 
 ```bash
+scripts/guests.sh # build the JavaScript and Python plugins (needs node and python3)
+```
+
+```bash
 cargo t           # fast tests via cargo-nextest
 ```
 
@@ -89,15 +120,24 @@ demo drive the loop with a scripted provider.
 | Path | Purpose |
 | --- | --- |
 | `crates/corduroy-core` | Dependency-free core: plugin contexts, capabilities, event stream with sessions and a `Log` trait, the registries plugins contribute to (tools, prompts, kernels, gates, services, models, secrets, HTTP clients) |
+| `crates/corduroy-cli` | The `corduroy` command: an agent file (providers, kernels, secrets, plugins and their grants) run in a terminal |
+| `crates/corduroy-mcp` | MCP servers (stdio, through a kernel, or streamable HTTP) as plugins |
+| `crates/corduroy-providers` | Model providers from `oi-kit-providers`: Anthropic, OpenAI, Ollama and the providers Goose knows |
+| `crates/corduroy-http` | The HTTP client behind the `http` capability, which never follows a redirect |
 | `crates/corduroy-shell` | A persistent POSIX shell as a kernel |
 | `crates/corduroy-jsonl` | A JSON Lines file as the durable log behind an event stream |
 | `crates/corduroy-wasm` | wasmtime host that loads components as capability-gated plugins |
 | `src/` | `corduroy-harness`: the agent loop assembled from oi-kit, journaled to the event stream one commit per step; sessions, continuing an interrupted run, waiting for a person, and the model as a service |
 | `wit/corduroy.wit` | The plugin world: host capabilities in, tools / event handlers / prompt text out |
-| `plugins/pi-tools` | read, write, edit, and bash on a persistent kernel |
+| `sdk/js`, `sdk/python` | SDKs for plugins in JavaScript/TypeScript and Python, and the script host for automations written as scripts |
+| `examples/` | The same `notes` plugin in JavaScript and Python |
+| `plugins/guest` | `corduroy-guest`: write a plugin in Rust by implementing one trait |
+| `plugins/pi-tools` | read, write, edit, bash on a persistent kernel, and tree |
 | `plugins/skills` | Agent-written `SKILL.md` files with a prompt index and a review nudge |
 | `plugins/approval` | A gate: permission modes with allow and deny lists |
-| `plugins/testbed` | For the host's own tests: exercises every host call |
+| `plugins/{hints,todo,memory,recall,summarize,compact,subagents,inspect,plugin-manager}` | The rest of the Goose baseline: context files, a todo list, memories, searching earlier sessions, summaries by a second model, auto-compaction, sub-agents, a gate inspecting calls, loading plugins at run time |
+| `plugins/testbed` | For the host's own tests: makes host calls, loads plugins, echoes events and traps on demand |
+| `crates/corduroy-test-support` | Test-only helpers: finds the built plugins, makes scratch directories |
 | `tests/`, `crates/*/tests/` | Integration tests through the public API |
 
 See [`CLAUDE.md`](CLAUDE.md) for contributor and agent guidelines.

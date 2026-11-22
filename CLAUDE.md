@@ -9,13 +9,19 @@ oi-kit's state machine. `docs/design.md` explains where each idea comes from and
 
 | Path | What it is |
 | --- | --- |
-| `crates/corduroy-core` | **Zero dependencies, synchronous.** Plugin contexts (`App`, `Context`, `Plugin`), capabilities (`Grants`, `Scope`), the `EventStream` (commits, `SessionId`, the `Log` trait), and the `Tools` / `Prompts` / `Kernels` / `Gates` / `Services` / `Models` / `Secrets` / `HttpClients` registries. Traits only: implementations live elsewhere. |
+| `crates/corduroy-core` | **Zero dependencies, synchronous.** Plugin contexts (`App`, `Context`, `Plugin`), capabilities (`Grants`, `Scope`), the call scope (`call`: which session and tool call a thread serves, and waiting for a signal), the `EventStream` (commits, `SessionId`, the `Log` trait), and the `Tools` / `Prompts` / `Kernels` / `Gates` / `Services` / `Models` / `Secrets` / `HttpClients` registries. The registries hold traits only: kernels, stores, models and clients are implemented elsewhere. |
 | `crates/corduroy-jsonl` | A store for the event stream: `JsonlLog`, one line per commit under a versioned header. Stores implement `corduroy_core::Log` and live outside the core. |
-| `crates/corduroy-shell` | `ShellKernel`, a persistent POSIX shell as a `Kernel`, and the `shell_kernel` plugin. |
+| `crates/corduroy-cli` | The `corduroy` binary (`cargo corduroy`): `agent` reads the agent file (TOML: providers, kernels, secrets, WebAssembly plugins with grants) and assembles the harness, protecting the log and the agent file; `terminal` shows events as they commit and answers gate asks. End-to-end tests drive the binary against a fake OpenAI-compatible server on loopback. |
+| `crates/corduroy-mcp` | `mcp_server`: one MCP server as a native plugin, its tools as `<server>__<tool>`. A stdio server is started through `Kernel::spawn`, never directly. Tests use a Python fixture server (`tests/fixtures/server.py`). |
+| `crates/corduroy-providers` | Real model providers built from `oi-kit-providers` (`ProviderSpec` → `Arc<dyn Provider>`). Kept out of the harness library. |
+| `crates/corduroy-http` | `UreqClient`, the `HttpClient` behind the `http` capability (no redirects), and the `http_client` plugin. |
+| `crates/corduroy-shell` | `ShellKernel`, a persistent POSIX shell as a `Kernel` that can also `spawn` processes, and the `shell_kernel` plugin. |
 | `crates/corduroy-wasm` | wasmtime host. Loads components built against `wit/corduroy.wit` as `Plugin`s; links only granted interfaces. |
-| `src/` (`corduroy-harness`) | Assembles the loop from oi-kit: `Harness` (sessions, `run_in`, `continue_run`, `answer`), `Journal` (one step's effects to one commit), `GateOperation`, `PluginTools`, the `Providers` registry and `provider` plugin (`src/provider.rs`), `ScriptedProvider`. Async (tokio). |
+| `src/` (`corduroy-harness`) | Assembles the loop from oi-kit: `Harness` (sessions, `run_in`, `continue_run`, `answer`, `signal`), `Journal` (one step's effects to one commit), `GateOperation`, `WaitOperation`, `CompactOperation`, the `sessions` service for child sessions (`src/children.rs`), `PluginTools`, the `Providers` registry and `provider` plugin (`src/provider.rs`), `ScriptedProvider`. Async (tokio). |
 | `wit/corduroy.wit` | The typed plugin boundary. Each imported interface is one capability. |
-| `plugins/` | **Separate workspace**, built for `wasm32-unknown-unknown`: `pi-tools` (read, write, edit, bash), `skills`, `approval` (a gate: permission modes) and `testbed` (for the host's tests only: host calls, loads, echoes and traps on demand). |
+| `plugins/` | **Separate workspace**, built for `wasm32-unknown-unknown`: `guest` (the `corduroy-guest` crate every Rust plugin builds on: bindings generated once, a `Plugin` trait with default exports, `export!`), `pi-tools` (read, write, edit, bash, tree), `skills`, `approval` (a gate: permission modes), the Goose-baseline plugins `hints`, `todo`, `memory`, `recall`, `summarize`, `compact` (the `compaction` service), `subagents` (`delegate`), `inspect` (a gate) and `plugin-manager`, and `testbed` (for the host's tests only: host calls, loads, echoes and traps on demand). |
+| `sdk/js`, `sdk/python` | Guest SDKs: write a plugin in JavaScript/TypeScript or Python; `corduroy-js build` / `corduroy-py build` make a component importing only the listed capabilities. `sdk/js/script-host` is the script host (automations as scripts). |
+| `examples/` | The same `notes` plugin in each guest language, built by `scripts/guests.sh`. |
 | `crates/corduroy-test-support` | Test-only helpers: finds built plugins, makes scratch directories. |
 
 ## Commands
@@ -23,11 +29,13 @@ oi-kit's state machine. `docs/design.md` explains where each idea comes from and
 | Command | What it does |
 | --- | --- |
 | `cargo plugins` | Build the guest plugins to WebAssembly. **Run after changing `plugins/` or `wit/`**; host tests and the demo load the result. |
+| `scripts/guests.sh` | Build the JavaScript and Python plugins (needs Node.js 20+ and Python 3.11+; installs the toolchains on first use). **Run after changing `sdk/`, `examples/` or `wit/`**; their tests skip when they are not built, unless `CORDUROY_REQUIRE_GUESTS` is set (CI). |
 | `cargo t` | Fast tests for the whole host workspace (`cargo nextest run --all-features`). **Does not run doctests.** Fails with instructions if the plugins are missing or stale. |
 | `cargo test --doc` | Doctests (nextest skips them) |
 | `cargo test --manifest-path plugins/Cargo.toml` | Unit tests of the plugins' pure logic, run natively |
 | `cargo lint` | Strictest clippy on the host workspace, `-D warnings`. Must be clean before finishing. |
 | `cargo fmt --all` | Format. `cargo fmtc` checks without writing. |
+| `cargo corduroy` | Run the `corduroy` command from this tree (`cargo corduroy -- check`, `-- run <prompt>`). Needs `cargo plugins` first. |
 | `cargo demo` | Run a scripted agent through both plugins and print the event stream |
 | `scripts/check.sh` | fmt + clippy + plugins + nextest + doctests + docs, host and plugins: exactly what CI runs |
 
@@ -61,9 +69,9 @@ as design guidance, not noise.
   get green.
 - If one exception is genuinely right, use `#[expect(lint, reason = "...")]` on the narrowest
   item. `allow_attributes` is on, so plain `#[allow]` is flagged; `expect` self-removes when stale.
-- The one standing exception: crates that depend on wasmtime or oi-kit carry
-  `#![expect(clippy::multiple_crate_versions)]`, because the duplicates are in those
-  dependencies' own trees. `corduroy-core` has no such exception and must stay dependency-free.
+- The one standing exception: crates that depend on wasmtime, oi-kit or rmcp (whose version
+  oi-kit fixes) carry `#![expect(clippy::multiple_crate_versions)]`, because the duplicates
+  are in those dependencies' own trees. `corduroy-core` has no such exception and must stay dependency-free.
 - `unwrap`, `expect`, `panic!`, `todo!`, indexing and slicing are denied in non-test code. Return
   errors instead. They are permitted inside `#[cfg(test)]` and `#[test]` functions, but **not in
   helper functions of integration tests**: make those return `Result` and unwrap in the test.
@@ -74,8 +82,10 @@ as design guidance, not noise.
   Keep crate-internal items either in a public module as `pub(crate)`, or in a private child
   module as `pub(super)` (see `crates/corduroy-wasm/src/plugin/`).
 - `plugins/` has its own, lighter lint table: the bindings `wit-bindgen` generates need
-  `unsafe` and are confined to a `mod bindings` with a documented `#[allow]`. Plugin code must
-  not panic: a panic is a trap that takes the instance down.
+  `unsafe` and are confined to `corduroy-guest`'s `mod bindings` with a documented `#[allow]`.
+  A Rust plugin implements `corduroy_guest::Plugin` and calls `corduroy_guest::export!`; it
+  does not generate bindings of its own. Plugin code must not panic: a panic is a trap that
+  takes the instance down.
 
 ## Architecture rules
 
@@ -124,7 +134,9 @@ as design guidance, not noise.
   events from the plugin, kept only if the call returns; the store is rebuilt from them, so
   `events.emit` refuses `state/*` topics.
 - **The event stream is the record.** The conversation is a projection of `message` events
-  (`src/session.rs`); do not keep conversation state that cannot be rebuilt from the stream.
+  (`src/session.rs`), and of `compaction` events, which hide what they summarise from the
+  model without removing it; do not keep conversation state that cannot be rebuilt from the
+  stream.
   The same goes for sessions (`session/start`) and for whether a run is unfinished.
 - **Commit, then deliver.** A step's events go to the stream as one `EventStream::commit`,
   which stores the batch in the `Log` before any listener or the next step sees it. Events of
@@ -140,8 +152,11 @@ as design guidance, not noise.
   before something happens asks the `Gates` registry at a decision point in
   `corduroy_core::POINTS`; the strictest verdict wins and is recorded before the thing
   happens. A gate that cannot answer denies. Do not give events return values.
-- **Waiting is in the log.** A run waiting for a person (a gate asked) has no `turn/end`;
-  `Harness::answer` resumes it and `continue_run` must not count it as a restart.
+- **Waiting is in the log.** A run waiting for a person (a gate asked) or for a signal (a
+  tool call that waits, such as one that started a child session) has no `turn/end`;
+  `Harness::answer` and `Harness::signal` resume it and `continue_run` must not count it as a
+  restart. A tool waits only through `corduroy_core::call::wait_for`, inside the call scope
+  `PluginTools` sets; never block a tool call on another run.
 - **Every world export is mandatory for every guest.** Adding one means a stub in each
   plugin under `plugins/`, and a check that JavaScript and Python can implement it.
 - **Tool failures are data, not control flow.** A `ToolError` becomes an error tool result and

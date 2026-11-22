@@ -325,10 +325,12 @@ async fn sessions_keep_separate_conversations_on_one_stream() {
             SessionInfo {
                 id: child.clone(),
                 parent: Some(main.clone()),
+                task: None,
             },
             SessionInfo {
                 id: main,
                 parent: None,
+                task: None,
             },
         ]
     );

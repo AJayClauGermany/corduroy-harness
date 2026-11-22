@@ -4,6 +4,10 @@
 //! the results through [`plugin`], which refuses to hand out an artifact that is missing or
 //! older than its sources, so a test never silently runs against a stale plugin.
 //!
+//! Plugins written in JavaScript and Python are built with `scripts/guests.sh`, which needs
+//! Node.js and Python; tests find them through [`guest`], and skip when they are not built
+//! unless `CORDUROY_REQUIRE_GUESTS` is set, as it is in CI.
+//!
 //! This crate is test-only: its functions panic on failure rather than return errors.
 
 use std::fs;
@@ -20,6 +24,9 @@ fn root() -> PathBuf {
         .to_owned()
 }
 
+/// Directories of installed packages and caches, which are not sources.
+const NOT_SOURCES: [&str; 4] = ["node_modules", ".venv", "__pycache__", "target"];
+
 /// The most recent modification time of any file below `dir`.
 fn newest(dir: &Path) -> SystemTime {
     let Ok(entries) = fs::read_dir(dir) else {
@@ -27,6 +34,11 @@ fn newest(dir: &Path) -> SystemTime {
     };
     entries
         .filter_map(Result::ok)
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            !NOT_SOURCES.contains(&name.as_ref()) && !name.ends_with(".egg-info")
+        })
         .map(|entry| entry.path())
         .map(|path| {
             if path.is_dir() {
@@ -50,7 +62,7 @@ fn modified(path: &Path) -> Option<SystemTime> {
 /// # Panics
 ///
 /// Panics with instructions if the plugin has not been built, or was built before its
-/// sources or the WIT world last changed.
+/// crate, the guest crate or the WIT world last changed.
 #[must_use]
 pub fn plugin(name: &str) -> PathBuf {
     let root = root();
@@ -63,13 +75,68 @@ pub fn plugin(name: &str) -> PathBuf {
         built.is_some(),
         "plugin `{name}` is not built: run `cargo plugins` first"
     );
-    let sources =
-        newest(&root.join("plugins").join(name).join("src")).max(newest(&root.join("wit")));
+    // The plugin's own crate, the guest crate every plugin builds on, and the world.
+    let plugins = root.join("plugins");
+    let sources = [plugins.join(name), plugins.join("guest"), root.join("wit")]
+        .iter()
+        .map(|path| newest(path))
+        .max()
+        .unwrap_or(SystemTime::UNIX_EPOCH);
     assert!(
         built >= Some(sources),
         "plugin `{name}` is older than its sources: run `cargo plugins` again"
     );
     artifact
+}
+
+/// Path to the built guest-language plugin `name`, or `None` if it is not built, so the test
+/// can skip.
+///
+/// `scripts/guests.sh` builds `notes_js` from `examples/notes-js` with `sdk/js`, and
+/// `notes_py` from `examples/notes-py` with `sdk/python`.
+///
+/// # Panics
+///
+/// Panics with instructions if it is older than the SDKs, the examples or the WIT world, or
+/// if it is missing while `CORDUROY_REQUIRE_GUESTS` is set.
+#[must_use]
+pub fn guest(name: &str) -> Option<PathBuf> {
+    let root = root();
+    let artifact = root.join(format!("plugins/target/guests/{name}.wasm"));
+    let Some(built) = modified(&artifact) else {
+        assert!(
+            std::env::var_os("CORDUROY_REQUIRE_GUESTS").is_none(),
+            "guest plugin `{name}` is not built: run `scripts/guests.sh` first"
+        );
+        return None;
+    };
+    // `notes_js` is built from `examples/notes-js` with `sdk/js`.
+    let language = match name.rsplit_once('_') {
+        Some((_, "py")) => "python",
+        Some((_, language)) => language,
+        None => "",
+    };
+    let sources = [
+        root.join("wit"),
+        root.join("sdk").join(language),
+        root.join("examples").join(name.replace('_', "-")),
+    ]
+    .iter()
+    .map(|dir| newest(dir))
+    .max()
+    .unwrap_or(SystemTime::UNIX_EPOCH);
+    assert!(
+        built >= sources,
+        "guest plugin `{name}` is older than its sources: run `scripts/guests.sh` again"
+    );
+    Some(artifact)
+}
+
+/// A directory for wasmtime's compiled-code cache shared by every test process, so a large
+/// component is compiled once per change rather than once per test.
+#[must_use]
+pub fn compile_cache() -> PathBuf {
+    root().join("target/wasm-cache-tests")
 }
 
 /// A fresh, empty directory for the test called `test`, with symbolic links resolved so its

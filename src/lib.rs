@@ -1,9 +1,9 @@
 //! A plugin-first agent harness.
 //!
 //! Almost everything here is a plugin. The harness provides a small frame (a plugin tree, an
-//! event stream, three registries and a loop) and plugins fill it in: the tools a model can
-//! call, the text in its system prompt, the kernels it computes in, and the reactions to
-//! what happens. Plugins can be native Rust or WebAssembly components, and WebAssembly
+//! event stream, the registries plugins contribute to and a loop) and plugins fill it in: the
+//! model, the tools it can call, the text in its system prompt, the kernels it computes in,
+//! and the reactions to what happens. Plugins can be native Rust or WebAssembly components, and WebAssembly
 //! plugins hold only the capabilities they were granted.
 //!
 //! The design borrows one idea from each of six harnesses:
@@ -70,6 +70,8 @@
     reason = "the wasmtime and oi-kit dependency trees each pull several versions of shared crates"
 )]
 
+pub mod children;
+pub mod compact;
 pub mod gates;
 pub mod harness;
 pub mod provider;
@@ -77,13 +79,17 @@ pub mod scripted;
 pub mod session;
 pub mod tools;
 
+pub use children::SESSIONS;
+pub use compact::CompactOperation;
 pub use corduroy_core as core;
 pub use corduroy_jsonl as jsonl;
 pub use corduroy_shell as shell;
 pub use corduroy_shell::shell_kernel;
 pub use corduroy_wasm as wasm;
-pub use gates::GateOperation;
+pub use gates::{GateOperation, WaitOperation};
 pub use harness::{Harness, HarnessError, Outcome, Status};
 pub use provider::{DEFAULT_PROVIDER, PROVIDERS, ProviderPlugin, Providers, provider};
-pub use session::{Answer, Ask, Effect, Journal, MAIN, Session, SessionInfo, Sessions};
+pub use session::{
+    Answer, Ask, COMPACTION, Effect, Journal, MAIN, SIGNAL, Session, SessionInfo, Sessions, Wait,
+};
 pub use {oi_kit_agent, oi_kit_provider_types};

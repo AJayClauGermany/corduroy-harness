@@ -30,8 +30,9 @@ use instance::{Blueprint, Instance};
 /// The package every host interface belongs to.
 const PACKAGE: &str = "corduroy:plugin/";
 
-/// The host interfaces that are capabilities, by the name they are granted under.
-const CAPABILITIES: [&str; 15] = [
+/// The host interfaces that are capabilities, by the name they are granted under, in the
+/// order the WIT world imports them.
+pub const CAPABILITIES: [&str; 15] = [
     "fs-read", "fs-write", "kernel", "events", "log", "clock", "random", "tools", "state",
     "service", "plugins", "llm", "secret", "http", "log-read",
 ];
