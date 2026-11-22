@@ -12,12 +12,12 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use corduroy_core::{
-    App, EventStream, FiberState, GATES, Gates, HTTP, HttpClients, KERNELS, Kernels, MODELS,
-    Models, PROMPTS, Pattern, Prompts, SECRETS, SERVICES, Scope, Secrets, Services, TOOLS,
+    App, Draft, EventStream, FiberState, GATES, Gates, HTTP, HttpClients, KERNELS, Kernels, MODELS,
+    Models, PROMPTS, Pattern, Prompts, SECRETS, SERVICES, Scope, Secrets, Services, Source, TOOLS,
     ToolError, Tools,
 };
 use corduroy_test_support::{compile_cache, guest, scratch};
-use corduroy_wasm::{WasmPlugin, WasmRuntime};
+use corduroy_wasm::{CAPABILITIES, WasmPlugin, WasmRuntime};
 use serde_json::{Value, json};
 
 struct Host {
@@ -179,4 +179,95 @@ fn a_guest_plugin_imports_only_the_capabilities_it_was_built_with() {
             "{name}"
         );
     }
+}
+
+/// The script host as the automation `name` running `script`, linked to every capability
+/// with an empty scope except those in `grants`.
+fn automation(
+    dir: &Path,
+    name: &str,
+    script: &str,
+    grants: &[(&str, Scope)],
+) -> Result<Option<WasmPlugin>, Box<dyn Error>> {
+    let Some(component) = guest("script_host_js") else {
+        return Ok(None);
+    };
+    let mut plugin = WasmRuntime::cached(compile_cache())?
+        .with_root(dir)
+        .load(component)?
+        .named(name)
+        .config(json!({"name": name, "script": script}).to_string());
+    for capability in CAPABILITIES {
+        plugin = plugin.grant(capability, Scope::none());
+    }
+    for (capability, scope) in grants {
+        plugin = plugin.grant(*capability, scope.clone());
+    }
+    Ok(Some(plugin))
+}
+
+const SAVE: &str = r"
+return {
+  tools: {
+    save: {
+      description: 'Write a file',
+      run({ path, text }) { host.fsWrite.write(path, text); return 'saved'; },
+    },
+  },
+};";
+
+/// One script-host component runs any number of automations, each with its own script and
+/// its own grants, and nothing is compiled per automation.
+#[test]
+fn the_script_host_runs_automations_each_within_its_own_grants() {
+    let dir = scratch("script-host");
+    let mut host = host(Arc::new(EventStream::new())).unwrap();
+    let allowed = [("fs-write", Scope::subtree(&dir.to_string_lossy()))];
+    let Some(writer) = automation(&dir, "writer", SAVE, &allowed).unwrap() else {
+        return;
+    };
+    let unwritten = SAVE.replace("save:", "keep:");
+    let reader = automation(&dir, "reader", &unwritten, &[])
+        .unwrap()
+        .unwrap();
+    let writer = host.app.plugin(writer);
+    let reader = host.app.plugin(reader);
+    assert_eq!(host.app.state(writer), Some(&FiberState::Active));
+    assert_eq!(host.app.state(reader), Some(&FiberState::Active));
+
+    let path = dir.join("out.txt").to_string_lossy().into_owned();
+    let input = json!({"path": path, "text": "hi"});
+    assert_eq!(call(&host, "save", &input).unwrap(), "saved");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "hi");
+    // The same script, granted nothing: the host refuses the write.
+    assert!(matches!(
+        call(&host, "keep", &input),
+        Err(ToolError::Denied(_))
+    ));
+}
+
+/// An automation's trigger is an event subscription and its action a host call: here it
+/// answers every `ping` with a `pong`, with no model involved.
+#[test]
+fn a_scripted_automation_reacts_to_events() {
+    let dir = scratch("script-host-events");
+    let events = Arc::new(EventStream::new());
+    let mut host = host(Arc::clone(&events)).unwrap();
+    let script = r"
+return {
+  subscriptions: ['ping'],
+  onEvent(event) { host.events.emit('pong', event.payload); },
+};";
+    let grants = [("events", Scope::none().allow("pong"))];
+    let Some(echo) = automation(&dir, "echo", script, &grants).unwrap() else {
+        return;
+    };
+    host.app.plugin(echo);
+    events
+        .emit(Draft::new(Source::User, "ping").payload(r#"{"n":1}"#))
+        .unwrap();
+    let pongs = events.matching(&Pattern::new("pong"));
+    assert_eq!(pongs.len(), 1);
+    assert_eq!(pongs[0].payload, r#"{"n":1}"#);
+    assert_eq!(pongs[0].source.to_string(), "plugin:echo");
 }

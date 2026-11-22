@@ -47,5 +47,5 @@
 pub mod plugin;
 pub mod runtime;
 
-pub use plugin::WasmPlugin;
+pub use plugin::{CAPABILITIES, WasmPlugin};
 pub use runtime::{Limits, WasmError, WasmRuntime};

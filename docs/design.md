@@ -524,8 +524,8 @@ What the core must guarantee, because the author is now the agent (built):
   loader that wants it back after a restart loads it again (from its `state`, say).
 
 **Guest languages.** JavaScript/TypeScript and Python come first, since those are what other
-harnesses' extensions are written in; the two existing Rust plugins are the reference, not
-the expected norm. There are two ways to run them, and they suit different authors:
+harnesses' extensions are written in; the Rust plugins are the reference, not the expected
+norm. Each has an SDK (`sdk/js`, `sdk/python`); see [Guest languages](guest-languages.md#the-sdks-step-8). There are two ways to run them, and they suit different authors:
 
 - *Compiled components* (`componentize-js`, `componentize-py`): each plugin is its own
   component. Best for plugins people write and ship.
@@ -645,15 +645,14 @@ the step it waits on is done.
    `Secrets` and `HttpClients` registries behind them. Checked from JavaScript and Python,
    see [Guest languages](guest-languages.md#reaching-out-llm-secret-http-and-log-read).
    *Still to do:* `session`, after general waits and signals; an HTTP client plugin.
-8. Guest languages. *Spike done early:* one JavaScript and one Python plugin ran against the
-   world, which settled the WASI question (build without it) and showed the script host
-   works in both; see [Guest languages](guest-languages.md). *Still to do,* once steps 5 and
-   6 have landed: an SDK per language (bindings, `print` and clocks routed to host calls,
-   exceptions as tool errors, a world generated from a capability list, the build flags),
-   the script host as a shipped component, and one example plugin per language built in CI.
-   *Phase three, first part,* in this order: a shared Rust guest crate (*done:*
-   `plugins/guest`, which every Rust plugin now builds on); the JavaScript SDK; the Python SDK; the script
-   host; then CI builds the examples and the host loads them in its tests.
+8. *Done.* Guest languages. The spike ran early and settled the WASI question (build
+   without it); then, as phase three's first part: `corduroy-guest`, the crate every Rust
+   plugin builds on; an SDK for JavaScript and TypeScript (`sdk/js`) and for Python
+   (`sdk/python`), each generating a world from a capability list, routing logging, clocks
+   and randomness to host calls and mapping exceptions to tool errors; the script host as a
+   shipped component (`sdk/js/script-host`); and the same example plugin in both languages,
+   built in CI and loaded by the host's tests. See
+   [Guest languages](guest-languages.md#the-sdks-step-8).
 9. Shipped plugins. *Phase three, second part,* aiming at a version that can be tried out
    with a real model:
    - A `corduroy` command and an agent file (the plugins of an agent and each one's grants,

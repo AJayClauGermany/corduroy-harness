@@ -5,8 +5,9 @@ a programmable loop; **everything else is a plugin**: the tools a model can call
 its system prompt, the kernels it computes in, and the reactions to what happens.
 
 Plugins are native Rust or **WebAssembly components** typed with [WIT](wit/corduroy.wit), so
-they can be written in any language that compiles to a component (Rust today; JavaScript and
-Python have been [tried](docs/guest-languages.md)). A WebAssembly plugin starts
+they can be written in Rust, JavaScript/TypeScript or Python, each with an SDK
+([`plugins/guest`](plugins/guest), [`sdk/js`](sdk/js), [`sdk/python`](sdk/python)), or any
+other language that compiles to a component. A WebAssembly plugin starts
 with no authority at all and is granted scoped **capabilities**, in the spirit of Deno's
 permissions and Tauri's capabilities:
 
@@ -72,6 +73,10 @@ cargo demo        # a scripted model works through both plugins; prints the even
 ```
 
 ```bash
+scripts/guests.sh # build the JavaScript and Python plugins (needs node and python3)
+```
+
+```bash
 cargo t           # fast tests via cargo-nextest
 ```
 
@@ -94,6 +99,8 @@ demo drive the loop with a scripted provider.
 | `crates/corduroy-wasm` | wasmtime host that loads components as capability-gated plugins |
 | `src/` | `corduroy-harness`: the agent loop assembled from oi-kit, journaled to the event stream one commit per step; sessions, continuing an interrupted run, waiting for a person, and the model as a service |
 | `wit/corduroy.wit` | The plugin world: host capabilities in, tools / event handlers / prompt text out |
+| `sdk/js`, `sdk/python` | SDKs for plugins in JavaScript/TypeScript and Python, and the script host for automations written as scripts |
+| `examples/` | The same `notes` plugin in JavaScript and Python |
 | `plugins/guest` | `corduroy-guest`: write a plugin in Rust by implementing one trait |
 | `plugins/pi-tools` | read, write, edit, and bash on a persistent kernel |
 | `plugins/skills` | Agent-written `SKILL.md` files with a prompt index and a review nudge |

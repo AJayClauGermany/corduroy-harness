@@ -25,3 +25,7 @@ if [ ! -x sdk/python/.venv/bin/corduroy-py ]; then
 fi
 sdk/python/.venv/bin/corduroy-py build examples/notes-py/notes.py \
   --out "$out/notes_py.wasm" --capabilities state,log,clock,random
+
+step "Script host"
+node sdk/js/bin/corduroy-js.js build sdk/js/script-host/host.js --out "$out/script_host_js.wasm" \
+  --capabilities fs-read,fs-write,kernel,events,log,clock,random,tools,state,service,plugins,llm,secret,http,log-read

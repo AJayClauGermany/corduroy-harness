@@ -268,9 +268,10 @@ function verdict(answer) {
  * ```
  */
 export function exportsFor(plugin) {
-  const tools = plugin.tools ?? {};
-  const gates = plugin.gates ?? {};
-  const services = plugin.services ?? {};
+  // Read on every call, so that `activate` may fill the plugin in (the script host does).
+  const tools = () => plugin.tools ?? {};
+  const gates = () => plugin.gates ?? {};
+  const services = () => plugin.services ?? {};
   return {
     activate(config) {
       const parsed = parse(config, (message) => `bad config: ${message}`);
@@ -282,7 +283,7 @@ export function exportsFor(plugin) {
       return {
         name: plugin.name,
         version: plugin.version ?? '0.0.0',
-        tools: Object.entries(tools).map(([name, tool]) => ({
+        tools: Object.entries(tools()).map(([name, tool]) => ({
           name,
           description: tool.description ?? '',
           inputSchema: JSON.stringify(tool.input ?? { type: 'object' }),
@@ -291,13 +292,13 @@ export function exportsFor(plugin) {
         })),
         subscriptions: plugin.subscriptions ?? [],
         prompt: typeof plugin.prompt === 'function',
-        gates: Object.keys(gates),
-        provides: Object.keys(services),
+        gates: Object.keys(gates()),
+        provides: Object.keys(services()),
       };
     },
 
     callTool(name, input) {
-      const tool = tools[name];
+      const tool = tools()[name];
       if (!tool) {
         throw { tag: 'unknown-tool', val: name };
       }
@@ -329,7 +330,7 @@ export function exportsFor(plugin) {
     },
 
     gate(point, request) {
-      const decide = gates[point];
+      const decide = gates()[point];
       if (typeof decide !== 'function') {
         return { tag: 'deny', val: `this plugin does not guard \`${point}\`` };
       }
@@ -342,7 +343,7 @@ export function exportsFor(plugin) {
     },
 
     handleCall(call) {
-      const service = services[call.service];
+      const service = services()[call.service];
       const method = service?.[call.method];
       if (typeof method !== 'function') {
         throw { tag: 'unknown', val: `${call.service}.${call.method}` };

@@ -39,3 +39,10 @@ fi
 
 # Build the guest plugins so the tests that load them pass straight away (~30s cold).
 cargo plugins >&2
+
+# The JavaScript and Python plugins, so their tests run instead of skipping (~40s the first
+# time: installs componentize-js and componentize-py). A failure here does not block the
+# session; those tests then skip.
+if command -v node >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+  scripts/guests.sh >&2 || echo "scripts/guests.sh failed; the guest-language tests will skip" >&2
+fi

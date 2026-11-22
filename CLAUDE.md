@@ -16,6 +16,8 @@ oi-kit's state machine. `docs/design.md` explains where each idea comes from and
 | `src/` (`corduroy-harness`) | Assembles the loop from oi-kit: `Harness` (sessions, `run_in`, `continue_run`, `answer`), `Journal` (one step's effects to one commit), `GateOperation`, `PluginTools`, the `Providers` registry and `provider` plugin (`src/provider.rs`), `ScriptedProvider`. Async (tokio). |
 | `wit/corduroy.wit` | The typed plugin boundary. Each imported interface is one capability. |
 | `plugins/` | **Separate workspace**, built for `wasm32-unknown-unknown`: `guest` (the `corduroy-guest` crate every Rust plugin builds on: bindings generated once, a `Plugin` trait with default exports, `export!`), `pi-tools` (read, write, edit, bash), `skills`, `approval` (a gate: permission modes) and `testbed` (for the host's tests only: host calls, loads, echoes and traps on demand). |
+| `sdk/js`, `sdk/python` | Guest SDKs: write a plugin in JavaScript/TypeScript or Python; `corduroy-js build` / `corduroy-py build` make a component importing only the listed capabilities. `sdk/js/script-host` is the script host (automations as scripts). |
+| `examples/` | The same `notes` plugin in each guest language, built by `scripts/guests.sh`. |
 | `crates/corduroy-test-support` | Test-only helpers: finds built plugins, makes scratch directories. |
 
 ## Commands
@@ -23,6 +25,7 @@ oi-kit's state machine. `docs/design.md` explains where each idea comes from and
 | Command | What it does |
 | --- | --- |
 | `cargo plugins` | Build the guest plugins to WebAssembly. **Run after changing `plugins/` or `wit/`**; host tests and the demo load the result. |
+| `scripts/guests.sh` | Build the JavaScript and Python plugins (needs Node.js 20+ and Python 3.11+; installs the toolchains on first use). **Run after changing `sdk/`, `examples/` or `wit/`**; their tests skip when they are not built, unless `CORDUROY_REQUIRE_GUESTS` is set (CI). |
 | `cargo t` | Fast tests for the whole host workspace (`cargo nextest run --all-features`). **Does not run doctests.** Fails with instructions if the plugins are missing or stale. |
 | `cargo test --doc` | Doctests (nextest skips them) |
 | `cargo test --manifest-path plugins/Cargo.toml` | Unit tests of the plugins' pure logic, run natively |

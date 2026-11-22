@@ -28,13 +28,24 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: nextest
+      # The JavaScript and Python SDKs build the guest-language plugins the host tests load.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
       - run: cargo fmt --all -- --check
       - run: cargo fmt --manifest-path plugins/Cargo.toml --all -- --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo clippy --manifest-path plugins/Cargo.toml --target wasm32-unknown-unknown -- -D warnings
       # The host tests load the plugins, so they are built first.
       - run: cargo plugins
+      - run: scripts/guests.sh
+      # Fail rather than skip when a guest-language plugin is missing.
       - run: cargo nextest run --all-features --profile ci
+        env:
+          CORDUROY_REQUIRE_GUESTS: "1"
       - run: cargo test --manifest-path plugins/Cargo.toml
       # nextest does not run doctests.
       - run: cargo test --doc --all-features
