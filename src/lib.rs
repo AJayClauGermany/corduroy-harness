@@ -88,6 +88,7 @@ pub mod children;
 pub mod compact;
 pub mod gates;
 pub mod harness;
+pub mod loops;
 pub mod message;
 pub mod operation;
 pub mod provider;
@@ -109,11 +110,13 @@ pub use corduroy_shell::shell_kernel;
 pub use corduroy_wasm as wasm;
 pub use gates::GateOperation;
 pub use harness::{Harness, HarnessError, OPERATIONS, Operations, Outcome, Status, Stepped};
+pub use loops::{DEFAULT_LOOP, LOOPS, Loop, Loops, Run, StandardLoop, Step};
 pub use operation::{Next, Operation};
 pub use provider::{
     DEFAULT_PROVIDER, ModelReply, ModelRequest, PROVIDERS, Provider, ProviderError, ProviderPlugin,
     Providers, Usage, provider,
 };
 pub use session::{
-    Answer, Ask, COMPACTION, Effect, Journal, MAIN, SIGNAL, Session, SessionInfo, Sessions, Wait,
+    Answer, Ask, COMPACTION, Effect, End, Journal, MAIN, SIGNAL, Session, SessionInfo, Sessions,
+    Wait,
 };

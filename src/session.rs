@@ -503,9 +503,11 @@ pub struct Wait {
     pub signal: String,
 }
 
-/// How a run ended, as its `turn/end` records it.
+/// How a run ended, as its `turn/end` records it. A [`Loop`](crate::Loop) ends a run with
+/// one.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum End {
+#[non_exhaustive]
+pub enum End {
     /// The model answered.
     Finished,
     /// The model was still working when it ran out of turns.
@@ -519,6 +521,17 @@ pub(crate) enum End {
 }
 
 impl End {
+    /// How a run with nothing left to do ends: finished if the model has answered `session`,
+    /// yielded if not.
+    #[must_use]
+    pub fn settled(session: &Session) -> Self {
+        if session.answer().is_some() {
+            Self::Finished
+        } else {
+            Self::Yielded
+        }
+    }
+
     fn payload(&self) -> Value {
         match self {
             Self::Finished => json!({"status": "finished"}),
