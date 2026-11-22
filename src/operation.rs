@@ -7,6 +7,8 @@
 //! An operation looks at the session as it stands and says what to record; it never changes
 //! the conversation itself, so everything it does is in the log.
 
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 use anyhow::Result;
 use async_trait::async_trait;
 

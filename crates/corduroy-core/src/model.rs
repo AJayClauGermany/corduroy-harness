@@ -6,9 +6,12 @@
 //! [`MODELS`]. The core only says what a request and its answer are; whatever registers a
 //! model (in `corduroy-harness`, a provider plugin) does the talking.
 
-use std::error::Error;
-use std::fmt;
-use std::time::Duration;
+use alloc::borrow::ToOwned;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::error::Error;
+use core::fmt;
+use core::time::Duration;
 
 use crate::registry::Registry;
 
@@ -112,7 +115,10 @@ impl Registry<dyn Model> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use alloc::format;
+    use alloc::string::ToString;
+    use alloc::sync::Arc;
+    use alloc::vec;
 
     use super::*;
 

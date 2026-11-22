@@ -1,9 +1,13 @@
 //! A model that replays a script, for tests and demos. No network, no LLM.
 
-use std::collections::VecDeque;
-use std::sync::{Mutex, PoisonError};
+use alloc::boxed::Box;
+use alloc::collections::VecDeque;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::vec::Vec;
 
 use async_trait::async_trait;
+use corduroy_core::sync::Lock;
 use corduroy_core::{Message, ToolCall};
 use serde_json::Value;
 
@@ -25,8 +29,8 @@ pub struct Request {
 /// A [`Provider`] that returns prepared replies in order and records what it was asked.
 #[derive(Debug, Default)]
 pub struct ScriptedProvider {
-    replies: Mutex<VecDeque<Message>>,
-    requests: Mutex<Vec<Request>>,
+    replies: Lock<VecDeque<Message>>,
+    requests: Lock<Vec<Request>>,
 }
 
 impl ScriptedProvider {
@@ -34,18 +38,15 @@ impl ScriptedProvider {
     #[must_use]
     pub fn new(replies: impl IntoIterator<Item = Message>) -> Self {
         Self {
-            replies: Mutex::new(replies.into_iter().collect()),
-            requests: Mutex::new(Vec::new()),
+            replies: Lock::new(replies.into_iter().collect()),
+            requests: Lock::new(Vec::new()),
         }
     }
 
     /// Every request received so far.
     #[must_use]
     pub fn requests(&self) -> Vec<Request> {
-        self.requests
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.requests.with(|requests| requests.clone())
     }
 }
 
@@ -64,20 +65,16 @@ pub fn call(id: &str, tool: &str, input: &Value) -> Message {
 #[async_trait]
 impl Provider for ScriptedProvider {
     async fn complete(&self, request: &ModelRequest) -> Result<ModelReply, ProviderError> {
-        self.requests
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(Request {
-                system: request.system.clone(),
-                tools: request.tools.iter().map(|tool| tool.name.clone()).collect(),
-                messages: request.messages.len(),
-                conversation: request.messages.clone(),
-            });
+        let asked = Request {
+            system: request.system.clone(),
+            tools: request.tools.iter().map(|tool| tool.name.clone()).collect(),
+            messages: request.messages.len(),
+            conversation: request.messages.clone(),
+        };
+        self.requests.with(|requests| requests.push(asked));
         let reply = self
             .replies
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .pop_front()
+            .with(VecDeque::pop_front)
             .ok_or_else(|| ProviderError::new("the script ran out"))?;
         Ok(ModelReply::new(reply, Usage::default()))
     }

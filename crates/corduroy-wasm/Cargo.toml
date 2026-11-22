@@ -15,15 +15,15 @@ categories.workspace = true
 workspace = true
 
 [dependencies]
-corduroy-core = { workspace = true }
+corduroy-core = { workspace = true, features = ["std"] }
 wasmtime = { workspace = true }
 wit-component = { workspace = true }
 getrandom = { workspace = true }
 sha2 = { workspace = true }
-base64 = { workspace = true }
-serde_json = { workspace = true }
+base64 = { workspace = true, features = ["std"] }
+serde_json = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
 corduroy-shell = { workspace = true }
 corduroy-test-support = { workspace = true }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["std"] }

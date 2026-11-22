@@ -14,4 +14,15 @@ categories.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["std"]
+# The standard library: OS locks, a call scope per thread, the system clock, kernels and the
+# processes they start. Without it the core is `no_std` and needs only an allocator, and its
+# lock comes from `critical-section`.
+std = []
+# The lock of a core built without `std`, from whatever implementation the device provides.
+critical-section = ["dep:critical-section"]
+
 [dependencies]
+# Only for builds without `std`. With `std` (the default) the core has no dependencies.
+critical-section = { workspace = true, optional = true }

@@ -25,8 +25,13 @@
 //! # Ok::<(), ToolError>(())
 //! ```
 
-use std::error::Error;
-use std::fmt;
+use alloc::borrow::ToOwned;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::error::Error;
+use core::fmt;
 
 use crate::registry::Registry;
 
@@ -333,7 +338,7 @@ impl Registry<dyn Tool> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use alloc::sync::Arc;
 
     use super::*;
 

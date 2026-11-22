@@ -23,11 +23,15 @@ if command -v rustup >/dev/null 2>&1; then
   done
 fi
 
-# The WebAssembly target the guest plugins in plugins/ are built for.
+# The WebAssembly target the guest plugins in plugins/ are built for, and the microcontroller
+# target scripts/check.sh lints the core for without the standard library.
 if command -v rustup >/dev/null 2>&1; then
-  if ! rustup target list --installed | grep -q '^wasm32-unknown-unknown$'; then
-    rustup target add wasm32-unknown-unknown >&2
-  fi
+  installed_targets=$(rustup target list --installed)
+  for target in wasm32-unknown-unknown thumbv7em-none-eabihf; do
+    if ! grep -q "^${target}\$" <<<"$installed_targets"; then
+      rustup target add "$target" >&2
+    fi
+  done
 fi
 
 # cargo-nextest, used by `cargo t`. The prebuilt binaries at get.nexte.st are blocked by

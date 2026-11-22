@@ -23,6 +23,17 @@
 //! * [`call`]: the tool call a thread is serving, so that what it calls in turn knows the
 //!   session, and can say the call waits for a signal.
 //!
+//! # Without the standard library
+//!
+//! The core is `no_std` and needs only an allocator (`alloc`), so it can be built for a
+//! microcontroller. The `std` feature, on by default, adds what needs an operating system:
+//! the standard library's locks, a call scope per thread, the system clock, and [`kernel`]s
+//! with the processes they start. Built without it, the core takes its lock from the
+//! `critical-section` feature, whose implementation the device provides; the [`call`] scope
+//! is one for the whole program, which suits a single-threaded executor; and the stream reads
+//! time only from a clock it is given ([`EventStream::with_clock`]). The target needs atomic
+//! compare-and-swap, which `Arc` requires.
+//!
 //! Nothing here knows about WebAssembly or about any particular model. `corduroy-wasm` loads
 //! WebAssembly components as [`Plugin`]s, and `corduroy-harness` assembles an agent loop.
 //!
@@ -45,6 +56,17 @@
 //! # Ok::<(), corduroy_core::ContextError>(())
 //! ```
 
+#![no_std]
+
+extern crate alloc;
+#[cfg(any(feature = "std", test))]
+extern crate std;
+
+#[cfg(not(any(feature = "std", feature = "critical-section")))]
+compile_error!(
+    "corduroy-core needs a lock: enable the `std` feature, or `critical-section` without it"
+);
+
 pub mod call;
 pub mod capability;
 pub mod context;
@@ -52,6 +74,7 @@ pub mod event;
 pub mod gate;
 pub mod http;
 pub mod json;
+#[cfg(feature = "std")]
 pub mod kernel;
 pub mod message;
 pub mod model;
@@ -60,6 +83,7 @@ pub mod prompt;
 pub mod registry;
 pub mod secret;
 pub mod service;
+pub mod sync;
 pub mod tool;
 
 pub use capability::{Denied, Grants, Scope};
@@ -70,6 +94,7 @@ pub use context::{
 pub use event::{Draft, Event, EventId, EventStream, ListenerId, Log, LogError, SessionId, Source};
 pub use gate::{Decision, GATES, Gate, Gates, PLUGIN_LOAD, POINTS, TOOL_CALL, UNDECLARED, Verdict};
 pub use http::{HTTP, HttpClient, HttpClients, HttpRequest, HttpResponse};
+#[cfg(feature = "std")]
 pub use kernel::{Cell, KERNELS, Kernel, KernelError, Kernels, MAX_OUTPUT, Process, Spawn};
 pub use message::{Message, Part, ToolCall, ToolResult};
 pub use model::{Completion, MODELS, Model, ModelError, Models, Role, Turn};

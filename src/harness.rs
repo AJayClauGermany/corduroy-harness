@@ -1,20 +1,33 @@
 //! Assembling the pieces into an agent, and the loop that runs it.
 
-use std::collections::BTreeMap;
-use std::error::Error;
-use std::fmt;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use alloc::borrow::ToOwned;
+use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::error::Error;
+use core::fmt;
+#[cfg(feature = "std")]
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use corduroy_core::call::Serve;
+use corduroy_core::sync::Lock;
 use corduroy_core::{
-    App, ContextError, EventStream, FiberId, GATES, Gates, HTTP, HttpClients, KERNELS, Kernels,
-    LogError, MODELS, Message, Models, PROMPTS, Plugin, Prompts, Registry, Role, SECRETS, SERVICES,
-    Secrets, Services, SessionId, TOOLS, ToolResult, Tools,
+    App, ContextError, EventStream, FiberId, GATES, Gates, HTTP, HttpClients, LogError, MODELS,
+    Message, Models, PROMPTS, Plugin, Prompts, Registry, Role, SECRETS, SERVICES, Secrets,
+    Services, SessionId, TOOLS, ToolCall, ToolResult, Tools,
 };
+#[cfg(feature = "std")]
+use corduroy_core::{KERNELS, Kernels};
 
 use crate::children::{SESSIONS, SessionsService};
 use crate::compact::CompactOperation;
 use crate::gates::GateOperation;
+use crate::loops::{DEFAULT_LOOP, LOOPS, Loops, Run, StandardLoop, Step};
 use crate::operation::{Next, Operation};
 use crate::provider::{DEFAULT_PROVIDER, ModelRequest, PROVIDERS, Provider, Providers};
 use crate::session::{
@@ -187,32 +200,29 @@ pub enum Stepped {
     Stopped,
 }
 
-/// What a step of the loop came to, inside the harness.
-enum Turn {
-    /// The step of this name did something.
-    Applied(String),
-    /// The run waits, in the log, for a person or a signal.
-    Wait,
-    /// The run is over.
-    End(End),
-}
-
 /// An agent: a plugin tree, an event stream and a programmable loop around a model.
 ///
 /// A harness holds any number of sessions, each a conversation of its own on the one stream.
 /// It starts with the session [`MAIN`], which [`run`](Self::run) uses.
 ///
 /// The harness itself does very little. It provides the registries plugins contribute to
-/// ([`Tools`], [`Prompts`], [`Kernels`], [`Gates`], [`Services`], [`Providers`], [`Models`],
-/// [`Secrets`], [`HttpClients`], [`Operations`]), journals the conversation to the event
-/// stream, and runs the loop: the operations, compaction, the gates, the tools, the turn
-/// limit and the model, in that order, at every step.
+/// ([`Tools`], [`Prompts`], the kernels (with `std`), [`Gates`],
+/// [`Services`], [`Providers`], [`Models`], [`Secrets`], [`HttpClients`], [`Operations`],
+/// [`Loops`]), journals the conversation to the event stream, and drives a run step by step
+/// until it ends or waits. What each step does is the [`Loop`](crate::Loop)'s, looked up in
+/// [`Loops`] on every step: the [`StandardLoop`] unless [`with_loop`](Self::with_loop) names
+/// another. It tries the operations, compaction, the gates, the tools, the turn limit and the
+/// model, in that order.
 pub struct Harness {
     /// Shared with the step that applies changes plugins asked for while the loop runs.
+    #[cfg(feature = "std")]
     app: Arc<Mutex<App>>,
+    #[cfg(not(feature = "std"))]
+    app: Arc<Lock<App>>,
     events: Arc<EventStream>,
     tools: Arc<Tools>,
     prompts: Arc<Prompts>,
+    #[cfg(feature = "std")]
     kernels: Arc<Kernels>,
     gates: Arc<Gates>,
     services: Arc<Services>,
@@ -227,18 +237,21 @@ pub struct Harness {
     system: String,
     max_turns: u32,
     restart_limit: u32,
+    /// The name of the loop that takes each step, looked up in `loops` on every step.
+    looping: String,
+    /// The loops a harness can run, by name.
+    loops: Arc<Loops>,
     /// Steps the host added, tried first and in the order given.
     operations: Vec<Arc<dyn Operation>>,
     /// Steps plugins registered, tried next and in name order.
     contributed: Arc<Operations>,
     /// The sessions being run now, each with what stops it.
-    running: Mutex<BTreeMap<SessionId, Stop>>,
+    running: Lock<BTreeMap<SessionId, Stop>>,
 }
 
 impl fmt::Debug for Harness {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Harness")
-            .field("app", &self.app)
             .field("tools", &self.tools)
             .field("provider", &self.provider)
             .field("model", &self.model)
@@ -249,16 +262,14 @@ impl fmt::Debug for Harness {
 
 /// While alive, the session it names is being run, and [`Harness::stop`] reaches it.
 struct Running<'harness> {
-    running: &'harness Mutex<BTreeMap<SessionId, Stop>>,
+    running: &'harness Lock<BTreeMap<SessionId, Stop>>,
     session: SessionId,
 }
 
 impl Drop for Running<'_> {
     fn drop(&mut self) {
-        self.running
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&self.session);
+        let stop = self.running.with(|running| running.remove(&self.session));
+        drop(stop);
     }
 }
 
@@ -309,6 +320,7 @@ impl Harness {
         let sessions = Arc::new(Sessions::load(Arc::clone(&events))?);
         let tools = Arc::new(Tools::new());
         let prompts = Arc::new(Prompts::new());
+        #[cfg(feature = "std")]
         let kernels = Arc::new(Kernels::new());
         let gates = Arc::new(Gates::new());
         let services = Arc::new(Services::new());
@@ -317,9 +329,12 @@ impl Harness {
         let secrets = Arc::new(Secrets::new());
         let http = Arc::new(HttpClients::new());
         let contributed = Arc::new(Operations::new());
+        let loops = Arc::new(Loops::new());
+        Self::register_own(&loops, &services, &sessions)?;
         let mut app = App::with_events(Arc::clone(&events));
         app.provide(TOOLS, Arc::clone(&tools))?;
         app.provide(PROMPTS, Arc::clone(&prompts))?;
+        #[cfg(feature = "std")]
         app.provide(KERNELS, Arc::clone(&kernels))?;
         app.provide(GATES, Arc::clone(&gates))?;
         app.provide(SERVICES, Arc::clone(&services))?;
@@ -328,17 +343,16 @@ impl Harness {
         app.provide(SECRETS, Arc::clone(&secrets))?;
         app.provide(HTTP, Arc::clone(&http))?;
         app.provide(OPERATIONS, Arc::clone(&contributed))?;
-        let children: Arc<dyn corduroy_core::Service> = Arc::new(SessionsService {
-            sessions: Arc::clone(&sessions),
-        });
-        services
-            .insert(SESSIONS, children)
-            .map_err(|duplicate| HarnessError::Run(duplicate.to_string()))?;
+        app.provide(LOOPS, Arc::clone(&loops))?;
         Ok(Self {
+            #[cfg(feature = "std")]
             app: Arc::new(Mutex::new(app)),
+            #[cfg(not(feature = "std"))]
+            app: Arc::new(Lock::new(app)),
             events,
             tools,
             prompts,
+            #[cfg(feature = "std")]
             kernels,
             gates,
             services,
@@ -351,11 +365,31 @@ impl Harness {
             model: "default".to_owned(),
             system: String::new(),
             max_turns: 25,
+            looping: DEFAULT_LOOP.to_owned(),
+            loops,
             restart_limit: 5,
             operations: Vec::new(),
             contributed,
-            running: Mutex::new(BTreeMap::new()),
+            running: Lock::new(BTreeMap::new()),
         })
+    }
+
+    /// What the harness registers itself, as the host rather than as a plugin: the
+    /// [`StandardLoop`] as [`DEFAULT_LOOP`], and the [`SESSIONS`] service.
+    fn register_own(
+        loops: &Loops,
+        services: &Services,
+        sessions: &Arc<Sessions>,
+    ) -> Result<(), HarnessError> {
+        let duplicate =
+            |duplicate: corduroy_core::Duplicate| HarnessError::Run(duplicate.to_string());
+        loops
+            .insert(DEFAULT_LOOP, Arc::new(StandardLoop))
+            .map_err(duplicate)?;
+        let children: Arc<dyn corduroy_core::Service> = Arc::new(SessionsService {
+            sessions: Arc::clone(sessions),
+        });
+        services.insert(SESSIONS, children).map_err(duplicate)
     }
 
     /// Ask the provider registered as `name` in [`Providers`], rather than
@@ -380,7 +414,18 @@ impl Harness {
         self
     }
 
-    /// Stop a run after this many model turns without an answer.
+    /// Take each step with the loop registered as `name` in [`Loops`], rather than
+    /// [`DEFAULT_LOOP`] (the [`StandardLoop`]). The loop is looked up on every step, so one a
+    /// plugin registers takes over from the next step on, and unloading it ends the run as
+    /// failed at its next step.
+    #[must_use]
+    pub fn with_loop(mut self, name: impl Into<String>) -> Self {
+        self.looping = name.into();
+        self
+    }
+
+    /// Stop a run after this many model turns without an answer. A loop reads it through
+    /// [`max_turns`](Self::max_turns); the [`StandardLoop`] ends the run there.
     #[must_use]
     pub const fn with_max_turns(mut self, max_turns: u32) -> Self {
         self.max_turns = max_turns;
@@ -410,14 +455,29 @@ impl Harness {
 
     /// Load a plugin.
     pub fn plugin(&self, plugin: impl Plugin + 'static) -> FiberId {
-        self.app().plugin(plugin)
+        self.with_app(|app| app.plugin(plugin))
     }
 
     /// The plugin tree, for unloading and reloading plugins. Changes plugins ask for through
     /// [`Requests`](corduroy_core::Requests) are applied before each step of the loop, and by
     /// any change made here.
+    #[cfg(feature = "std")]
     pub fn app(&self) -> MutexGuard<'_, App> {
         self.app.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Run `work` with the plugin tree, as [`app`](Self::app) does, in a build with or
+    /// without the standard library. Without it the tree is held in a critical section, so
+    /// keep `work` short.
+    pub fn with_app<R>(&self, work: impl FnOnce(&mut App) -> R) -> R {
+        #[cfg(feature = "std")]
+        {
+            work(&mut self.app())
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            self.app.with(work)
+        }
     }
 
     /// The stream every event of this harness is recorded on.
@@ -432,7 +492,8 @@ impl Harness {
         &self.tools
     }
 
-    /// The kernels plugins have registered.
+    /// The kernels plugins have registered. Kernels need the `std` feature.
+    #[cfg(feature = "std")]
     #[must_use]
     pub const fn kernels(&self) -> &Arc<Kernels> {
         &self.kernels
@@ -472,6 +533,18 @@ impl Harness {
     #[must_use]
     pub const fn http(&self) -> &Arc<HttpClients> {
         &self.http
+    }
+
+    /// The loops a run can take its steps with, by name. See [`with_loop`](Self::with_loop).
+    #[must_use]
+    pub const fn loops(&self) -> &Arc<Loops> {
+        &self.loops
+    }
+
+    /// How many model turns a run may take without an answer.
+    #[must_use]
+    pub const fn max_turns(&self) -> u32 {
+        self.max_turns
     }
 
     /// The steps of the loop plugins have registered.
@@ -566,7 +639,7 @@ impl Harness {
     /// [`HarnessError::Log`] if the stop could not be recorded.
     pub fn stop(&self, session: &SessionId) -> Result<bool, HarnessError> {
         let journal = self.journal(session)?;
-        let running = self.running_now().get(session).cloned();
+        let running = self.running.with(|running| running.get(session).cloned());
         if let Some(stop) = running {
             journal.stop_asked()?;
             stop.ask();
@@ -615,11 +688,14 @@ impl Harness {
     /// As [`run_in`](Self::run_in).
     pub async fn step(&self, session: &SessionId) -> Result<Stepped, HarnessError> {
         let journal = self.journal(session)?;
-        let stop = self.running_now().get(session).cloned().unwrap_or_default();
+        let stop = self
+            .running
+            .with(|running| running.get(session).cloned())
+            .unwrap_or_default();
         Ok(match self.step_once(&journal, &stop).await? {
-            Turn::Applied(name) => Stepped::Applied(name),
-            Turn::Wait => Stepped::Stopped,
-            Turn::End(end) => {
+            Step::Applied(name) => Stepped::Applied(name),
+            Step::Wait => Stepped::Stopped,
+            Step::End(end) => {
                 journal.end_turn(&end)?;
                 Stepped::Stopped
             }
@@ -810,13 +886,12 @@ impl Harness {
             .is_some_and(|tool| tool.spec().replay_safe)
     }
 
-    fn running_now(&self) -> MutexGuard<'_, BTreeMap<SessionId, Stop>> {
-        self.running.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
     /// Note that `session` is being run, stopped by `stop`, until the guard is dropped.
     fn running_as(&self, session: &SessionId, stop: &Stop) -> Running<'_> {
-        self.running_now().insert(session.clone(), stop.clone());
+        let earlier = self
+            .running
+            .with(|running| running.insert(session.clone(), stop.clone()));
+        drop(earlier);
         Running {
             running: &self.running,
             session: session.clone(),
@@ -829,9 +904,9 @@ impl Harness {
         let running = self.running_as(journal.id(), stop);
         loop {
             match self.step_once(journal, stop).await? {
-                Turn::Applied(_) => continue,
-                Turn::Wait => {}
-                Turn::End(end) => journal.end_turn(&end)?,
+                Step::Applied(_) => continue,
+                Step::Wait => {}
+                Step::End(end) => journal.end_turn(&end)?,
             }
             let awaiting = journal.awaiting();
             if awaiting.is_empty() || !self.run_children(journal, &awaiting, stop).await? {
@@ -843,17 +918,25 @@ impl Harness {
 
     /// One step of the loop over `journal`'s session.
     ///
-    /// The steps are tried in order, and the first that does something is the step:
-    /// stopping, if the run was asked to; the host's operations, then those plugins
-    /// registered; compaction; the gates; the tools; waiting for a signal; noticing that
-    /// the model has answered; the turn limit; and the model.
-    async fn step_once(&self, journal: &Arc<Journal>, stop: &Stop) -> Result<Turn, HarnessError> {
+    /// What every loop gets, whichever it is: the changes plugins asked for are applied, and
+    /// a run asked to stop ends as stopped. Then the loop registered under the harness's
+    /// loop name in [`Loops`] takes the step.
+    async fn step_once(&self, journal: &Arc<Journal>, stop: &Stop) -> Result<Step, HarnessError> {
         // Plugins loaded or unloaded while the loop ran take effect before the next step.
-        self.app().apply_requests();
-        let session = journal.session();
+        self.with_app(App::apply_requests);
         if stop.asked() {
             return self.stopped(journal);
         }
+        let Some(chosen) = self.loops.get(&self.looping) else {
+            let reason = format!("no loop is registered as `{}`", self.looping);
+            return Ok(Step::End(End::Failed(reason)));
+        };
+        chosen.step(&Run::new(self, journal, stop)).await
+    }
+
+    /// The operations of the standard order: the host's, then those plugins registered, then
+    /// compaction and the gates.
+    pub(crate) fn standard_operations(&self) -> Vec<Arc<dyn Operation>> {
         let builtin: [Arc<dyn Operation>; 2] = [
             Arc::new(CompactOperation::new(
                 Arc::clone(&self.services),
@@ -865,113 +948,108 @@ impl Harness {
                 Arc::clone(&self.sessions),
             )),
         ];
-        let operations = self
-            .operations
+        self.operations
             .iter()
             .cloned()
             .chain(self.contributed.entries())
-            .chain(builtin);
+            .chain(builtin)
+            .collect()
+    }
+
+    /// Try `operations` in order on `session`; the first that does something is the step,
+    /// and its effects are stored. `None` if every one passed.
+    pub(crate) async fn operate(
+        journal: &Journal,
+        session: &Session,
+        operations: Vec<Arc<dyn Operation>>,
+    ) -> Result<Option<Step>, HarnessError> {
         for operation in operations {
-            match operation.run(&session).await? {
+            match operation.run(session).await? {
                 Next::Pass => {}
                 Next::Continue(effects) => {
                     journal.apply(effects)?;
-                    return Ok(Turn::Applied(operation.name().to_owned()));
+                    return Ok(Some(Step::Applied(operation.name().to_owned())));
                 }
                 Next::Stop(effects) => {
                     journal.apply(effects)?;
-                    return Ok(Self::halted(journal));
+                    return Ok(Some(Self::halted(journal)));
                 }
             }
         }
-        let pending = session.pending_calls();
-        if !pending.is_empty() {
-            let tools = PluginTools::new(Arc::clone(&self.tools));
-            let results = tools.run(journal, pending, stop).await?;
-            journal.apply(vec![Effect::from(results)])?;
-            return Ok(Turn::Applied("tools".to_owned()));
-        }
-        if !journal.awaiting().is_empty() {
-            return Ok(Turn::Wait);
-        }
-        let answered = session
-            .conversation()
-            .last()
-            .is_none_or(|last| last.role == Role::Assistant);
-        if answered {
-            return Ok(Turn::End(Self::ending(&session)));
-        }
-        let limit = usize::try_from(self.max_turns).unwrap_or(usize::MAX);
-        if session.model_turns() >= limit {
-            return Ok(Turn::End(End::TurnLimit));
-        }
-        self.infer(journal, &session, stop).await
+        Ok(None)
+    }
+
+    /// Run `calls` from the [`Tools`] registry, each with its trail in the log, and store
+    /// their results as one commit.
+    pub(crate) async fn call_tools(
+        &self,
+        journal: &Arc<Journal>,
+        calls: Vec<ToolCall>,
+        stop: &Stop,
+    ) -> Result<Step, HarnessError> {
+        let tools = PluginTools::new(Arc::clone(&self.tools));
+        let results = tools.run(journal, calls, stop).await?;
+        journal.apply(vec![Effect::from(results)])?;
+        Ok(Step::Applied("tools".to_owned()))
     }
 
     /// How a run whose last step stopped it stands: waiting, if a call waits for a person
     /// or a signal, and otherwise at its end.
-    fn halted(journal: &Journal) -> Turn {
+    fn halted(journal: &Journal) -> Step {
         if journal.waiting().is_empty() && journal.awaiting().is_empty() {
-            Turn::End(Self::ending(&journal.session()))
+            Step::End(End::settled(&journal.session()))
         } else {
-            Turn::Wait
-        }
-    }
-
-    /// The end of a run that stopped with nothing left to do: finished if the model has
-    /// answered, yielded if not.
-    fn ending(session: &Session) -> End {
-        if session.answer().is_some() {
-            End::Finished
-        } else {
-            End::Yielded
+            Step::Wait
         }
     }
 
     /// End a run that was asked to stop: the calls of its turn that have no result are
     /// answered (from the log if they finished, as not run if they did not begin).
-    fn stopped(&self, journal: &Journal) -> Result<Turn, HarnessError> {
+    fn stopped(&self, journal: &Journal) -> Result<Step, HarnessError> {
         if let Some(results) = self.settled(journal, NOT_RUN) {
             journal.record(&results)?;
         }
-        Ok(Turn::End(End::Stopped))
+        Ok(Step::End(End::Stopped))
     }
 
-    /// Ask the model, and record its answer and what it cost.
-    async fn infer(
-        &self,
-        journal: &Arc<Journal>,
-        session: &Session,
-        stop: &Stop,
-    ) -> Result<Turn, HarnessError> {
-        let Some(provider) = self.providers.get(&self.provider) else {
-            let reason = format!("no model provider is registered as `{}`", self.provider);
-            return Ok(Turn::End(End::Failed(reason)));
-        };
-        let request = ModelRequest::new(
+    /// The request the harness makes of the model for `session`: its model, the system
+    /// prompt, the conversation as the model sees it, and every tool.
+    pub(crate) fn request_for(&self, session: &Session) -> ModelRequest {
+        ModelRequest::new(
             &self.model,
             self.system_prompt(session.id()),
             session.for_model(),
         )
-        .with_tools(self.tools.specs());
-        // A person stopping the run does not wait for the model to finish.
-        let reply = tokio::select! {
-            biased;
-            () = stop.asked_now() => return self.stopped(journal),
-            reply = provider.complete(&request) => reply,
+        .with_tools(self.tools.specs())
+    }
+
+    /// Ask the model `request`, and record its answer and what it cost. A person stopping
+    /// the run does not wait for the model to finish.
+    pub(crate) async fn ask_model(
+        &self,
+        journal: &Arc<Journal>,
+        request: &ModelRequest,
+        stop: &Stop,
+    ) -> Result<Step, HarnessError> {
+        let Some(provider) = self.providers.get(&self.provider) else {
+            let reason = format!("no model provider is registered as `{}`", self.provider);
+            return Ok(Step::End(End::Failed(reason)));
+        };
+        let Some(reply) = stop.unless_asked(provider.complete(request)).await else {
+            return self.stopped(journal);
         };
         match reply {
             Ok(reply) => {
                 let mut message = reply.message;
                 message.role = Role::Assistant;
                 let usage = Effect::Usage {
-                    model: self.model.clone(),
+                    model: request.model.clone(),
                     usage: reply.usage,
                 };
                 journal.apply(vec![Effect::from(message), usage])?;
-                Ok(Turn::Applied("model".to_owned()))
+                Ok(Step::Applied("model".to_owned()))
             }
-            Err(error) => Ok(Turn::End(End::Failed(error.to_string()))),
+            Err(error) => Ok(Step::End(End::Failed(error.to_string()))),
         }
     }
 

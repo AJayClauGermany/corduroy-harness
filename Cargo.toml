@@ -17,15 +17,20 @@ keywords = ["agent", "llm", "harness", "wasm", "plugins"]
 categories = ["development-tools"]
 
 [workspace.dependencies]
-corduroy-harness = { path = ".", version = "0.1.0" }
-corduroy-core = { path = "crates/corduroy-core", version = "0.1.0" }
+# Members pick the parts they use; the command takes them all.
+corduroy-harness = { path = ".", version = "0.1.0", default-features = false }
+# Without `std` unless a member asks for it, so the harness can be built for a device.
+corduroy-core = { path = "crates/corduroy-core", version = "0.1.0", default-features = false }
 corduroy-wasm = { path = "crates/corduroy-wasm", version = "0.1.0" }
 corduroy-jsonl = { path = "crates/corduroy-jsonl", version = "0.1.0" }
 corduroy-shell = { path = "crates/corduroy-shell", version = "0.1.0" }
 corduroy-http = { path = "crates/corduroy-http", version = "0.1.0" }
 corduroy-mcp = { path = "crates/corduroy-mcp", version = "0.1.0" }
 corduroy-providers = { path = "crates/corduroy-providers", version = "0.1.0" }
+corduroy-std = { path = "crates/corduroy-std", version = "0.1.0" }
 corduroy-test-support = { path = "crates/corduroy-test-support", version = "0.1.0" }
+# The core's lock when it is built without the standard library: the device supplies it.
+critical-section = "1.2.0"
 # Synchronous embedding: no async runtime, and no WASI, so plugins get no ambient authority.
 wasmtime = { version = "51.0.0", default-features = false, features = ["component-model", "cranelift", "runtime", "cache", "parallel-compilation"] }
 wit-component = "0.263.0"
@@ -42,14 +47,14 @@ oi-kit-providers = { version = "=0.1.0-alpha.15", default-features = false, feat
 rmcp = { version = "3.11.0", default-features = false }
 # Images in tool results are bytes inside the harness and base64 in the log, in MCP and in
 # what the model is sent. The version oi-kit and rmcp already carry.
-base64 = "0.23.1"
-anyhow = "1"
+base64 = { version = "0.23.1", default-features = false, features = ["alloc"] }
+anyhow = { version = "1", default-features = false }
 # The HTTP client behind the `http` capability: blocking, so it fits a plugin's blocking call.
 ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 # Keys in the order they were written, so log payloads read naturally (`id` first).
-serde_json = { version = "1", features = ["preserve_order"] }
+serde_json = { version = "1", default-features = false, features = ["alloc", "preserve_order"] }
 # The agent file of the `corduroy` command.
 toml = { version = "1.1.8", default-features = false, features = ["parse", "serde", "std"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
@@ -70,19 +75,78 @@ categories.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["tokio", "wasm", "shell", "jsonl"]
+# The standard library. Without it the harness, like the core, needs only an allocator and
+# runs on a microcontroller, with `critical-section` for its locks.
+std = ["corduroy-core/std", "anyhow/std", "base64/std", "serde_json/std"]
+# Tool calls run on tokio's blocking pool when the loop runs on a tokio runtime, so a long
+# tool does not hold up the runtime's other tasks. Without it they run where the loop runs.
+# The loop itself needs no particular executor.
+tokio = ["std", "dep:tokio"]
+# The lock of a harness built without `std`, from whatever implementation the device provides.
+critical-section = ["corduroy-core/critical-section"]
+# Add-ons: WebAssembly plugins, through wasmtime (`corduroy_harness::wasm`). Without it the
+# harness runs extensions only and carries no WebAssembly runtime.
+wasm = ["std", "dep:corduroy-wasm"]
+# The persistent POSIX shell kernel (`corduroy_harness::shell`).
+shell = ["std", "dep:corduroy-shell"]
+# The event log in a JSON Lines file (`corduroy_harness::jsonl`).
+jsonl = ["std", "dep:corduroy-jsonl"]
+
 [dependencies]
 corduroy-core = { workspace = true }
-corduroy-wasm = { workspace = true }
-corduroy-jsonl = { workspace = true }
-corduroy-shell = { workspace = true }
+corduroy-wasm = { workspace = true, optional = true }
+corduroy-jsonl = { workspace = true, optional = true }
+corduroy-shell = { workspace = true, optional = true }
 base64 = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, optional = true }
 
 [dev-dependencies]
 corduroy-test-support = { workspace = true }
+tokio = { workspace = true }
+
+# The demo and the tests that load add-ons, run the shell or keep a log in a file.
+[[bin]]
+name = "corduroy-harness"
+path = "src/main.rs"
+required-features = ["wasm", "shell"]
+
+[[test]]
+name = "baseline"
+required-features = ["wasm"]
+
+[[test]]
+name = "compaction"
+required-features = ["wasm"]
+
+[[test]]
+name = "durable"
+required-features = ["jsonl"]
+
+[[test]]
+name = "gates"
+required-features = ["jsonl"]
+
+[[test]]
+name = "plugins"
+required-features = ["wasm", "shell"]
+
+[[test]]
+name = "providers"
+required-features = ["wasm"]
+
+[[test]]
+name = "subagents"
+required-features = ["wasm"]
+
+# A tool that blocks until it is stopped needs another thread to stop it from.
+[[test]]
+name = "stop"
+required-features = ["tokio"]
 
 # Plugins are compiled to machine code when they are loaded. With the compiler itself
 # unoptimised that takes seconds per plugin and dominates test time, so the crates on that

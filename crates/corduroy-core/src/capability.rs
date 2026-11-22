@@ -8,9 +8,13 @@
 //! The model follows Deno's permissions and Tauri's capabilities: nothing is ambient, a grant
 //! names both the ability and its reach, and a `deny` entry always beats an `allow` entry.
 
-use std::collections::BTreeMap;
-use std::error::Error;
-use std::fmt;
+use alloc::borrow::ToOwned;
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::error::Error;
+use core::fmt;
 
 use crate::pattern::Pattern;
 
@@ -173,6 +177,7 @@ impl Error for Denied {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::string::ToString;
 
     #[test]
     fn nothing_is_granted_by_default() {

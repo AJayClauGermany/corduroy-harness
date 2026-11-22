@@ -3,7 +3,9 @@
 //! Event payloads are JSON by convention so they can cross the plugin boundary, but the core
 //! has no dependencies and never needs to parse them.
 
-use std::fmt::{self, Write as _};
+use alloc::string::String;
+use alloc::string::ToString;
+use core::fmt::{self, Write as _};
 
 /// Render `value` as a JSON string literal, quotes included.
 #[must_use]

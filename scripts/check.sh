@@ -17,6 +17,16 @@ cargo fmt "${plugins[@]}" --all -- --check
 
 step "clippy (warnings are errors)"
 cargo clippy --all-targets --all-features -- -D warnings
+# The core and the loop without the standard library, on a microcontroller, and the harness
+# with the standard library but without tokio, WebAssembly, the shell or a log file.
+cargo clippy -p corduroy-core --no-default-features --features critical-section \
+  --target thumbv7em-none-eabihf -- -D warnings
+cargo clippy -p corduroy-harness --no-default-features --features critical-section \
+  --target thumbv7em-none-eabihf -- -D warnings
+cargo clippy -p corduroy-harness --all-targets --no-default-features --features std -- -D warnings
+# The command on its own features: across the workspace, one member's features hide another's
+# missing ones.
+cargo check -p corduroy-cli
 cargo clippy "${plugins[@]}" "${wasm[@]}" -- -D warnings
 
 # The host tests load these, so they are built first.

@@ -254,9 +254,9 @@ name = "corduroy-cli"
 version = "0.1.0"
 dependencies = [
  "corduroy-harness",
- "corduroy-http",
  "corduroy-mcp",
  "corduroy-providers",
+ "corduroy-std",
  "corduroy-test-support",
  "serde",
  "serde_json",
@@ -267,6 +267,9 @@ dependencies = [
 [[package]]
 name = "corduroy-core"
 version = "0.1.0"
+dependencies = [
+ "critical-section",
+]
 
 [[package]]
 name = "corduroy-harness"
@@ -332,7 +335,20 @@ dependencies = [
 name = "corduroy-shell"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
  "corduroy-core",
+]
+
+[[package]]
+name = "corduroy-std"
+version = "0.1.0"
+dependencies = [
+ "corduroy-harness",
+ "corduroy-http",
+ "corduroy-mcp",
+ "corduroy-providers",
+ "corduroy-test-support",
+ "serde_json",
 ]
 
 [[package]]
@@ -558,6 +574,12 @@ checksum = "2b929dd2a135771f40afabd1073f85eed59c800b7c61901e5c254270497dad64"
 dependencies = [
  "cfg-if",
 ]
+
+[[package]]
+name = "critical-section"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
 
 [[package]]
 name = "crossbeam-deque"

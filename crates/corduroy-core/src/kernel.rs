@@ -12,12 +12,19 @@
 //! speaks over its standard input and output: [`Kernel::spawn`]. Whatever a kernel does to the
 //! cells it runs (a container, a sandbox, a timeout) it can do to its processes, so choosing
 //! a kernel stays the one security decision about running code.
+//!
+//! Kernels need the `std` feature: a core built without it has none.
 
-use std::error::Error;
-use std::fmt;
+use alloc::borrow::ToOwned;
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::error::Error;
+use core::fmt;
+use core::time::Duration;
 use std::io::{Read, Write};
 use std::sync::{Mutex, PoisonError};
-use std::time::Duration;
 
 use crate::registry::Registry;
 
@@ -182,7 +189,8 @@ impl Registry<Mutex<dyn Kernel>> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use alloc::format;
+    use alloc::sync::Arc;
 
     use super::*;
 
