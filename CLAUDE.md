@@ -5,13 +5,18 @@ the registries plugins contribute to; everything else (the model, tools, prompt 
 kernels, reactions to events) is a plugin, either native Rust or a capability-gated WebAssembly component. The agent loop is
 oi-kit's state machine. `docs/design.md` explains where each idea comes from and why.
 
+Three tiers: the **core** (the contract; changes rarely), **extensions** (native plugins:
+trusted, compiled in, for what the core should not own) and **plugins** (WebAssembly,
+granted capabilities). `docs/design.md` says what goes where ("Three tiers") and which
+contracts must not break ("What is stable").
+
 ## Layout
 
 | Path | What it is |
 | --- | --- |
 | `crates/corduroy-core` | **Zero dependencies, synchronous.** Plugin contexts (`App`, `Context`, `Plugin`), capabilities (`Grants`, `Scope`), the call scope (`call`: which session and tool call a thread serves, and waiting for a signal), the `EventStream` (commits, `SessionId`, the `Log` trait), and the `Tools` / `Prompts` / `Kernels` / `Gates` / `Services` / `Models` / `Secrets` / `HttpClients` registries. The registries hold traits only: kernels, stores, models and clients are implemented elsewhere. |
 | `crates/corduroy-jsonl` | A store for the event stream: `JsonlLog`, one line per commit under a versioned header. Stores implement `corduroy_core::Log` and live outside the core. |
-| `crates/corduroy-cli` | The `corduroy` binary (`cargo corduroy`): `agent` reads the agent file (TOML: providers, kernels, secrets, WebAssembly plugins with grants) and assembles the harness, protecting the log and the agent file; `terminal` shows events as they commit and answers gate asks. End-to-end tests drive the binary against a fake OpenAI-compatible server on loopback; `tests/local_model.rs` holds the evals (ignored by default), which drive it against a real small model. |
+| `crates/corduroy-cli` | The `corduroy` binary (`cargo corduroy`), a thin `main` over the library: `agent` reads the agent file (TOML: providers, kernels, secrets, extensions, WebAssembly plugins with grants) and assembles the harness, protecting the log and the agent file; `extension` holds the extension kinds a command was built with; `command` is the command line (`main_with`); `terminal` shows events as they commit and answers gate asks. End-to-end tests drive the binary against a fake OpenAI-compatible server on loopback; `tests/local_model.rs` holds the evals (ignored by default), which drive it against a real small model. |
 | `crates/corduroy-mcp` | `mcp_server`: one MCP server as a native plugin, its tools as `<server>__<tool>`. A stdio server is started through `Kernel::spawn`, never directly. Tests use a Python fixture server (`tests/fixtures/server.py`). |
 | `crates/corduroy-providers` | Real model providers built from `oi-kit-providers` (`ProviderSpec` → `Arc<dyn Provider>`). Kept out of the harness library. |
 | `crates/corduroy-http` | `UreqClient`, the `HttpClient` behind the `http` capability (no redirects), and the `http_client` plugin. |
@@ -35,7 +40,7 @@ oi-kit's state machine. `docs/design.md` explains where each idea comes from and
 | `cargo test --manifest-path plugins/Cargo.toml` | Unit tests of the plugins' pure logic, run natively |
 | `cargo lint` | Strictest clippy on the host workspace, `-D warnings`. Must be clean before finishing. |
 | `cargo fmt --all` | Format. `cargo fmtc` checks without writing. |
-| `cargo corduroy` | Run the `corduroy` command from this tree (`cargo corduroy -- check`, `-- run <prompt>`). Needs `cargo plugins` first. |
+| `cargo corduroy` | Run the `corduroy` command from this tree (`cargo corduroy check`, `cargo corduroy run <prompt>`; the alias already ends in `--`). Needs `cargo plugins` first. |
 | `scripts/local-model.sh start` | Serve a small model (LFM3 1.7B, 4-bit) on `127.0.0.1:8080` as an OpenAI-compatible endpoint: builds llama.cpp's `llama-server` and fetches the model on first use (~4 min), both pinned by SHA-256. `stop` stops it. |
 | `cargo eval` | The evals: the agent in `examples/local-model/` doing small real tasks against that model, checked by outcome. Minutes, not seconds; needs `cargo plugins` and the server. |
 | `cargo demo` | Run a scripted agent through both plugins and print the event stream |
@@ -94,6 +99,21 @@ as design guidance, not noise.
 - **Everything is a plugin.** The core and the harness provide registries and a loop, never a
   tool or a prompt of their own. New behaviour goes in a plugin unless it is a new *kind* of
   thing plugins contribute.
+- **The stable contracts change by adding.** The WIT world, the core's traits, the log and
+  the agent file (see "What is stable" in `docs/design.md`). A new host ability is a new
+  import interface, never a changed export; a new trait method has a default; a struct
+  that may grow is `#[non_exhaustive]` with a constructor; a log line gains fields and a
+  new schema version, and old versions stay readable.
+- **An extension is a native plugin, not a second mechanism.** It contributes through the
+  same `Context`: core-trait implementations, services, decision points (`Gates::declare`)
+  and loop steps (the harness's `Operations` registry). It never adds a host function to
+  the WebAssembly linker; what a plugin needs from it goes through a `Service`.
+- **A name belongs to one plugin.** Events, the `state` store and service calls identify a
+  plugin by name, so `App` does not apply a second plugin of a name already held, nor one
+  named `host`, `agent`, `user` or `environment`. Give native plugins names that cannot
+  collide with a plugin's (`kernel-<name>`).
+- **Decision points are declared.** Ask the gates only at a point declared in `Gates`
+  (the core's two, or one an extension declared); an undeclared point is denied.
 - **Every registration is an effect.** Plugins set things up only through their `Context`
   (`ctx.effect`, `ctx.provide`, `ctx.on`, `registry.register(ctx, ..)`), so unloading reverts
   it. Never reach around the context to mutate shared state from `apply`.
@@ -166,7 +186,8 @@ as design guidance, not noise.
   also recorded in the conversation. Only a broken pipeline returns `Err` from `Harness::run`.
 - Hitting the turn limit is a normal `Status::TurnLimitReached`, not an `Err`.
 - Keep the loop ignorant of any specific model, tool or plugin. Extend it with an oi-kit
-  `Operation` (`Harness::with_operation`), not with special cases.
+  `Operation` (`Harness::with_operation` for the host, the `Operations` registry for a
+  plugin), not with special cases.
 - Tests must not need network or an LLM. Drive the loop with `ScriptedProvider`. The one
   exception is the evals (`cargo eval`), which are `#[ignore]`d so `cargo t` and CI never run
   them, and which reach a model only on loopback through ordinary configuration. An eval checks

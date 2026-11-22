@@ -4,6 +4,14 @@ A plugin-first agent harness in Rust. A small core provides a plugin tree, an ev
 a programmable loop; **everything else is a plugin**: the tools a model can call, the text in
 its system prompt, the kernels it computes in, and the reactions to what happens.
 
+There are three tiers, from what changes least to what changes most:
+
+| Tier | What | Trust |
+| --- | --- | --- |
+| **Core** | The plugin tree, capabilities, the event log, the registries, the loop and the [plugin world](wit/corduroy.wit). The contract everything else is written against. | the trusted base |
+| **Extensions** | Native plugins: a kernel, an HTTP client, a model provider, MCP, a step of the loop, a decision point, a service for plugins to call. What the core deliberately does not own. | trusted; compiled into the command |
+| **Plugins** | WebAssembly components: tools, prompt text, gates, automations. | none beyond what they are granted |
+
 Plugins are native Rust or **WebAssembly components** typed with [WIT](wit/corduroy.wit), so
 they can be written in Rust, JavaScript/TypeScript or Python, each with an SDK
 ([`plugins/guest`](plugins/guest), [`sdk/js`](sdk/js), [`sdk/python`](sdk/python)), or any
@@ -71,8 +79,50 @@ skills, and an approval gate that asks before anything that writes. `cargo cordu
 writes that agent to `corduroy.toml` so you can change it: the providers, the kernels, each
 plugin and exactly what it is granted. `corduroy run <prompt>` runs one prompt; `corduroy
 check` says what the agent has without calling a model; `corduroy log` prints the event
-log, which is kept in `.corduroy/log.jsonl`. Kill it mid-run and `corduroy continue` picks
+log, with the time of each event, which is kept in `.corduroy/log.jsonl`. Kill it mid-run and `corduroy continue` picks
 the run up; leave a question unanswered and the run waits, in the log, until you do.
+
+## Extending it
+
+Write a **plugin** when the code should be sandboxed: anything from a third party, anything
+the agent writes for itself, anything that only needs the capabilities in
+[`wit/corduroy.wit`](wit/corduroy.wit). Use `plugins/guest` (Rust), `sdk/js` or
+`sdk/python`, and list it under `[[plugins]]` in the agent file with its grants.
+
+Write an **extension** when the code needs the host's authority or a native library: a
+kernel that runs in a container, a database behind a service, a step of the loop. An
+extension is an ordinary native plugin (`corduroy_core::Plugin`), so everything it
+registers goes away when it is unloaded. The agent file asks for one by kind:
+
+```toml
+[extensions.scratch]
+kind = "shell-kernel"            # a kind this command was built with
+dir = "{workspace}/scratch"      # the rest is the extension's own configuration
+```
+
+Kinds are compiled in, and the command is a library, so a command of your own is the
+shipped one with more kinds:
+
+```rust
+fn main() -> std::process::ExitCode {
+    let extensions = Extensions::builtin().kind("audit", |asked| {
+        let gates_point = asked.text("point").unwrap_or("audit/export").to_owned();
+        Ok(Box::new(plugin_fn(asked.name, &[GATES], move |ctx| {
+            // Declare a decision point of our own; WebAssembly gates may now guard it.
+            ctx.service::<Gates>(GATES)?.declare(ctx, gates_point.clone(), "before an export")?;
+            Ok(())
+        })))
+    });
+    corduroy_cli::command::main_with(&extensions)
+}
+```
+
+An extension can register kernels, HTTP clients, models and secrets (the things
+capabilities reach), services that WebAssembly plugins call through the `service`
+capability, decision points for gates, and steps of the loop
+(`corduroy_harness::Operations`). It cannot add a capability: the plugin boundary is the
+core's. [`docs/design.md`](docs/design.md#three-tiers-core-extensions-plugins) has the
+reasoning, and [what is meant to stay stable](docs/design.md#what-is-stable).
 
 ## Where the ideas come from
 
@@ -131,7 +181,7 @@ in [`examples/local-model/`](examples/local-model/corduroy.toml) against Liquid 
 | Path | Purpose |
 | --- | --- |
 | `crates/corduroy-core` | Dependency-free core: plugin contexts, capabilities, event stream with sessions and a `Log` trait, the registries plugins contribute to (tools, prompts, kernels, gates, services, models, secrets, HTTP clients) |
-| `crates/corduroy-cli` | The `corduroy` command: an agent file (providers, kernels, secrets, plugins and their grants) run in a terminal |
+| `crates/corduroy-cli` | The `corduroy` command: an agent file (providers, kernels, secrets, extensions, plugins and their grants) run in a terminal; a library, so a binary can add extension kinds |
 | `crates/corduroy-mcp` | MCP servers (stdio, through a kernel, or streamable HTTP) as plugins |
 | `crates/corduroy-providers` | Model providers from `oi-kit-providers`: Anthropic, OpenAI, Ollama and the providers Goose knows |
 | `crates/corduroy-http` | The HTTP client behind the `http` capability, which never follows a redirect |
