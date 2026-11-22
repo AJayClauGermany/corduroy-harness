@@ -1,0 +1,19 @@
+[package]
+name = "corduroy-shell"
+description = "A persistent POSIX shell as a corduroy kernel."
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+corduroy-core = { workspace = true }
+

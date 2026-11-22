@@ -6,7 +6,7 @@
 # This is a separate workspace from the host: it targets wasm32-unknown-unknown, and the
 # bindings `wit-bindgen` generates need `unsafe`, which the host workspace forbids.
 [workspace]
-members = ["pi-tools", "skills"]
+members = ["approval", "pi-tools", "skills", "testbed"]
 resolver = "3"
 
 [workspace.package]

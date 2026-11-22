@@ -19,6 +19,9 @@ interface types {
         /// Whether a call may simply be made again when the host cannot tell if it already
         /// ran, as after a crash. Say yes only if twice is the same as once.
         replay-safe: bool,
+        /// Whether the tool only looks and never changes anything. Gates may let such a
+        /// call through where they would ask about one that writes.
+        read-only: bool,
     }
 
     /// Why a tool call failed. Shown to the model so it can recover.
@@ -43,6 +46,49 @@ interface types {
         payload: string,
     }
 
+    /// A gate's answer at a decision point. Where several gates guard the same point the
+    /// strictest answer wins: deny over ask over allow.
+    variant verdict {
+        /// Let it happen.
+        allow,
+        /// Let it happen only once a person has agreed. The reason is shown to them.
+        ask(string),
+        /// Refuse it. The reason is shown to the model, so it can try something else.
+        deny(string),
+    }
+
+    /// Why a call to another plugin's service failed.
+    variant call-error {
+        /// No plugin provides the service, or the service has no such method.
+        unknown(string),
+        /// The service rejected the payload.
+        invalid-input(string),
+        /// The service accepted the call but could not complete it.
+        failed(string),
+        /// The caller may not make this call: its grant does not reach the service, or the
+        /// service refused this caller.
+        denied(string),
+    }
+
+    /// A call to a service, as its provider receives it.
+    record service-call {
+        /// The name of the calling plugin.
+        caller: string,
+        /// The service called, one of those the provider listed in `plugin-info.provides`.
+        service: string,
+        method: string,
+        /// JSON text by convention.
+        payload: string,
+    }
+
+    /// A credential the plugin may use without seeing it, from the `secret` capability. Host
+    /// functions that take one, such as `http.send`, write its value into what they send and
+    /// record only its name.
+    resource credential {
+        /// The name the credential was opened under.
+        name: func() -> string;
+    }
+
     /// What a plugin contributes, returned from `activate`.
     record plugin-info {
         name: string,
@@ -52,6 +98,11 @@ interface types {
         subscriptions: list<string>,
         /// Whether the host should call `prompt-part` for each model request.
         prompt: bool,
+        /// Decision points (such as `tool/call`) at which the host should call `gate`. A plugin
+        /// that gates `tool/call` may not import `tools`: it would be asked about its own calls.
+        gates: list<string>,
+        /// Services this plugin answers through `handle-call`, by name.
+        provides: list<string>,
     }
 }
 
@@ -96,18 +147,236 @@ interface events {
     use types.{host-error};
 
     /// Queue an event. It is delivered once the current call into the plugin returns.
+    /// `state/*` topics are refused: the `state` store is rebuilt from them.
     emit: func(topic: string, payload: string) -> result<_, host-error>;
+}
+
+/// Capability `log`: diagnostic output, recorded on the event stream as `plugin/log` under the
+/// plugin's name. Scoped by level: `debug`, `info`, `warn`, `error`. This is where a guest
+/// language's `print` and `console.log` belong.
+interface log {
+    use types.{host-error};
+
+    enum level {
+        debug,
+        info,
+        warn,
+        error,
+    }
+
+    /// Record `message` at `level`. Messages longer than 16 KiB are cut short. Delivered once
+    /// the current call into the plugin returns.
+    write: func(level: level, message: string) -> result<_, host-error>;
+}
+
+/// Capability `clock`: read the time. Scoped by clock: `wall` and `monotonic`.
+interface clock {
+    use types.{host-error};
+
+    /// A point in wall-clock time.
+    record datetime {
+        /// Whole seconds since 1970-01-01T00:00:00Z.
+        seconds: u64,
+        /// Nanoseconds past `seconds`, below one billion.
+        nanoseconds: u32,
+    }
+
+    /// The current wall-clock time. It can jump, backwards included.
+    now: func() -> result<datetime, host-error>;
+    /// Nanoseconds since an unspecified point fixed for the life of this instance. Never goes
+    /// backwards; use it to measure durations.
+    monotonic: func() -> result<u64, host-error>;
+}
+
+/// Capability `random`: random bytes from the host's cryptographically secure generator.
+/// Scoped by source: `secure`.
+interface random {
+    use types.{host-error};
+
+    /// `len` random bytes; at most 65536 per call.
+    get-bytes: func(len: u32) -> result<list<u8>, host-error>;
+}
+
+/// Capability `tools`: call tools other plugins registered, as the model does. Scoped by tool
+/// name. Each call passes the gates first, with the plugin as its caller.
+interface tools {
+    use types.{tool-spec, tool-error};
+
+    /// The tools the plugin's scope reaches, by name.
+    %list: func() -> list<tool-spec>;
+    /// Call `name` with `input`, a JSON object. A gate's deny, and a gate's ask (a plugin's
+    /// call cannot wait for a person), come back as `denied`.
+    call: func(name: string, input: string) -> result<string, tool-error>;
+}
+
+/// Capability `state`: a durable key-value store of the plugin's own. Scoped by key. Values
+/// survive restarts of the plugin and of the process, because they are kept on the event
+/// stream; writes made during a call are stored when the call returns, and dropped if it
+/// traps.
+interface state {
+    use types.{host-error};
+
+    /// The value under `key`, if there is one.
+    get: func(key: string) -> result<option<string>, host-error>;
+    /// Store `value` under `key`. Keys are at most 256 bytes and values at most 64 KiB.
+    set: func(key: string, value: string) -> result<_, host-error>;
+    /// Remove `key`, if it is there.
+    remove: func(key: string) -> result<_, host-error>;
+    /// Every key in the store that the scope reaches, sorted.
+    keys: func() -> result<list<string>, host-error>;
+}
+
+/// Capability `service`: call a service another plugin provides. Scoped by service name. The
+/// provider acts with its own grants and is told who is calling.
+interface service {
+    use types.{call-error};
+
+    /// Call `method` of `service` with `payload`, JSON text by convention.
+    call: func(service: string, method: string, payload: string) -> result<string, call-error>;
+}
+
+/// Capability `plugins`: load and unload WebAssembly plugins as children of this one. Scoped by
+/// the name a loaded plugin gets.
+///
+/// A plugin grants only what it holds: each requested scope is narrowed to the loader's own
+/// grant of that capability, and a capability the loader does not hold can be granted only
+/// with an empty scope. Every load is asked of the gates at `plugin/load` first; a gate's ask
+/// comes back as `denied`, since the call cannot wait for a person.
+interface plugins {
+    use types.{host-error};
+
+    /// One capability for the plugin being loaded, with the patterns of its scope.
+    record grant {
+        capability: string,
+        allow: list<string>,
+        deny: list<string>,
+    }
+
+    record load-request {
+        /// The name the plugin is loaded under. The loader's scope must reach it.
+        name: string,
+        /// Where the component (or a core module with component type information) is. The
+        /// loader's `fs-read` scope must reach it, so a plugin loads only what it could read.
+        path: string,
+        /// Passed to the plugin's `activate`, as JSON text.
+        config: string,
+        grants: list<grant>,
+    }
+
+    /// Load a plugin as a child of this one, unloaded with it. Returns the SHA-256 of the
+    /// component in hex. The plugin starts once the host next settles its plugins (before the
+    /// next step of the loop); `plugin/activated` or `plugin/failed` on the event stream says
+    /// how that went.
+    load: func(request: load-request) -> result<string, host-error>;
+    /// Unload a plugin this plugin loaded.
+    unload: func(name: string) -> result<_, host-error>;
+    /// The plugins this plugin has loaded and not unloaded, by name.
+    loaded: func() -> list<string>;
+}
+
+/// Capability `llm`: ask a model for one completion. Scoped by model name.
+interface llm {
+    use types.{host-error};
+
+    enum role {
+        user,
+        assistant,
+    }
+
+    record turn {
+        role: role,
+        text: string,
+    }
+
+    record completion {
+        system: string,
+        /// The conversation, oldest first, ending with the user.
+        messages: list<turn>,
+    }
+
+    /// The text of `model`'s answer to `request`. The call waits for it, up to a limit the
+    /// host sets; the request and the answer are recorded as `llm/request` and `llm/response`.
+    complete: func(model: string, request: completion) -> result<string, host-error>;
+}
+
+/// Capability `secret`: use named credentials without seeing them. Scoped by secret name.
+interface secret {
+    use types.{host-error, credential};
+
+    /// The credential registered as `name`. Its value stays in the host.
+    get: func(name: string) -> result<credential, host-error>;
+}
+
+/// Capability `http`: make HTTP requests. Scoped by host name, such as `api.example.com`.
+interface http {
+    use types.{host-error, credential};
+
+    variant header-value {
+        text(string),
+        /// The credential's value, written in by the host. Needs no `secret` grant beyond
+        /// the one the credential was opened with.
+        secret(borrow<credential>),
+    }
+
+    record header {
+        name: string,
+        value: header-value,
+    }
+
+    record request {
+        /// `GET`, `POST` and so on.
+        method: string,
+        /// An absolute `http` or `https` URL, with no user name or password, backslash,
+        /// whitespace or control character in it.
+        url: string,
+        headers: list<header>,
+        body: option<list<u8>>,
+    }
+
+    record response {
+        status: u16,
+        headers: list<tuple<string, string>>,
+        body: list<u8>,
+    }
+
+    /// Send `request` and wait for the whole response, up to a limit the host sets. A
+    /// response with an error status is a response. Recorded as `http/request` and
+    /// `http/response`, with secrets named and never shown, and bodies left out.
+    send: func(request: request) -> result<response, host-error>;
+}
+
+/// Capability `log-read`: read the event stream, other sessions' included. Scoped by
+/// `<session>:<topic>`, where the session is empty for events about the harness itself and
+/// has `%` and `:` percent-encoded (`a:b` is `a%3Ab`), so `a:*` reaches session `a` only.
+interface log-read {
+    use types.{event, host-error};
+
+    /// Events with an id above `after` whose topic matches `topic` (a glob, `*` for any),
+    /// in `session` if one is given, oldest first: at most `limit`, and never more than
+    /// 1000. Events the scope does not reach are left out.
+    read: func(session: option<string>, topic: string, after: u64, limit: u32) -> result<list<event>, host-error>;
 }
 
 /// A plugin. Every import is a capability the host must grant before the plugin is
 /// instantiated; a plugin that imports nothing can only compute.
 world plugin {
-    use types.{plugin-info, tool-error, event};
+    use types.{plugin-info, tool-error, event, verdict, call-error, service-call};
 
     import fs-read;
     import fs-write;
     import kernel;
     import events;
+    import log;
+    import clock;
+    import random;
+    import tools;
+    import state;
+    import service;
+    import plugins;
+    import llm;
+    import secret;
+    import http;
+    import log-read;
 
     /// Called once per instantiation with the plugin's configuration as JSON text.
     export activate: func(config: string) -> result<plugin-info, string>;
@@ -117,4 +386,11 @@ world plugin {
     export on-event: func(event: event);
     /// Text to add to the system prompt for the next model request.
     export prompt-part: func() -> option<string>;
+    /// Decide whether something may happen at `point`, one of the points listed in
+    /// `plugin-info.gates`. `request` is JSON text describing it; for `tool/call` it is
+    /// `{"session", "id", "tool", "input", "read-only", "caller"}`, where `caller` is `agent`
+    /// for the model and `plugin:<name>` for a plugin using `tools`.
+    export gate: func(point: string, request: string) -> verdict;
+    /// Answer a call to one of the services listed in `plugin-info.provides`.
+    export handle-call: func(call: service-call) -> result<string, call-error>;
 }

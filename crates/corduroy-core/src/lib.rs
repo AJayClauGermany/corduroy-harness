@@ -11,9 +11,13 @@
 //! * [`event`]: the append-only event stream that records a run and connects plugins. Events
 //!   are committed in batches to a [`Log`] before anyone sees them, and name the session
 //!   they belong to. The core defines what a log is; stores live in other crates.
-//! * [`registry`], [`tool`], [`prompt`], [`kernel`]: the well-known services plugins
-//!   contribute to: tools the model can call, text for the system prompt, and long-lived
-//!   kernels that keep state between calls.
+//! * [`registry`], [`tool`], [`prompt`], [`kernel`], [`gate`], [`service`], [`model`]: the
+//!   well-known services plugins contribute to: tools the model can call, text for the system
+//!   prompt, long-lived kernels that keep state between calls, gates that decide whether
+//!   something may happen, services that other plugins call across the WebAssembly boundary,
+//!   and models plugins may ask for a completion of their own.
+//! * [`secret`], [`http`]: credentials plugins use without seeing, and the clients the `http`
+//!   capability sends through. The core checks and records; native plugins do the work.
 //!
 //! Nothing here knows about WebAssembly or about any particular model. `corduroy-wasm` loads
 //! WebAssembly components as [`Plugin`]s, and `corduroy-harness` assembles an agent loop.
@@ -40,21 +44,31 @@
 pub mod capability;
 pub mod context;
 pub mod event;
+pub mod gate;
+pub mod http;
 pub mod json;
 pub mod kernel;
+pub mod model;
 pub mod pattern;
 pub mod prompt;
 pub mod registry;
+pub mod secret;
+pub mod service;
 pub mod tool;
 
 pub use capability::{Denied, Grants, Scope};
 pub use context::{
     App, Context, ContextError, FiberId, FiberInfo, FiberState, FnPlugin, Plugin, PluginError,
-    plugin_fn,
+    Requests, plugin_fn,
 };
 pub use event::{Draft, Event, EventId, EventStream, ListenerId, Log, LogError, SessionId, Source};
-pub use kernel::{Cell, KERNELS, Kernel, KernelError, Kernels, ShellKernel};
+pub use gate::{Decision, GATES, Gate, Gates, PLUGIN_LOAD, POINTS, TOOL_CALL, Verdict};
+pub use http::{HTTP, HttpClient, HttpClients, HttpRequest, HttpResponse};
+pub use kernel::{Cell, KERNELS, Kernel, KernelError, Kernels, MAX_OUTPUT};
+pub use model::{Completion, MODELS, Model, ModelError, Models, Role, Turn};
 pub use pattern::Pattern;
 pub use prompt::{PROMPTS, PromptPart, Prompts};
 pub use registry::{Duplicate, Registry};
+pub use secret::{SECRETS, Secret, Secrets};
+pub use service::{CallError, SERVICES, Service, Services};
 pub use tool::{FnTool, TOOLS, Tool, ToolError, ToolSpec, Tools, tool_fn};

@@ -11,13 +11,19 @@
 //!   [`Plugin::inject`]. It stays [`FiberState::Pending`] until all of them exist, is suspended
 //!   (effects reverted) when one disappears, and is applied again when it returns. Dependents
 //!   are always unloaded before the service they depend on.
+//!
+//! The tree is changed through `&mut App`. Code that cannot have that (another thread, or a
+//! plugin's call while the tree is busy elsewhere) asks for a change through [`Requests`]; it
+//! is applied the next time the tree settles, and in the meantime the new plugin already has
+//! its [`FiberId`].
 
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 use std::mem;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::event::{Draft, Event, EventId, EventStream, ListenerId, LogError, Source};
 use crate::json;
@@ -223,7 +229,81 @@ pub struct App {
     fibers: BTreeMap<FiberId, Fiber>,
     services: BTreeMap<String, AnyService>,
     events: Arc<EventStream>,
-    next_fiber: u64,
+    requests: Requests,
+}
+
+/// A change to the plugin tree, asked for through [`Requests`].
+enum Request {
+    Load {
+        id: FiberId,
+        parent: Option<FiberId>,
+        plugin: Box<dyn Plugin>,
+    },
+    Dispose(FiberId),
+}
+
+/// A handle for asking an [`App`] to change from anywhere.
+///
+/// Another thread, or a plugin that is running, cannot have `&mut App`. Cheap to clone.
+/// Changes are applied in the order asked, the next time the app settles (any call that
+/// changes it, or [`App::apply_requests`]).
+#[derive(Clone, Default)]
+pub struct Requests {
+    queue: Arc<Mutex<Vec<Request>>>,
+    /// Shared with the app, so that a plugin asked for has its id at once.
+    next_fiber: Arc<AtomicU64>,
+}
+
+impl fmt::Debug for Requests {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Requests")
+            .field("pending", &self.pending())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Requests {
+    /// Ask for `plugin` to be loaded, as a child of `parent` if given (disposed with it), and
+    /// return the id it will have. If `parent` is gone by the time the request is applied,
+    /// nothing is loaded and `plugin/dropped` is emitted.
+    pub fn load(&self, parent: Option<FiberId>, plugin: impl Plugin + 'static) -> FiberId {
+        let id = self.fiber_id();
+        self.push(Request::Load {
+            id,
+            parent,
+            plugin: Box::new(plugin),
+        });
+        id
+    }
+
+    /// Ask for the plugin `id` to be disposed. Unknown ids are ignored.
+    pub fn dispose(&self, id: FiberId) {
+        self.push(Request::Dispose(id));
+    }
+
+    /// How many requests wait to be applied.
+    #[must_use]
+    pub fn pending(&self) -> usize {
+        self.queue
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
+    }
+
+    fn fiber_id(&self) -> FiberId {
+        FiberId(self.next_fiber.fetch_add(1, Ordering::Relaxed) + 1)
+    }
+
+    fn push(&self, request: Request) {
+        self.queue
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(request);
+    }
+
+    fn take(&self) -> Vec<Request> {
+        mem::take(&mut *self.queue.lock().unwrap_or_else(PoisonError::into_inner))
+    }
 }
 
 impl Default for App {
@@ -250,13 +330,27 @@ impl App {
 
     /// An app that records to an existing event stream, for example a replayed one.
     #[must_use]
-    pub const fn with_events(events: Arc<EventStream>) -> Self {
+    pub fn with_events(events: Arc<EventStream>) -> Self {
         Self {
             fibers: BTreeMap::new(),
             services: BTreeMap::new(),
             events,
-            next_fiber: 0,
+            requests: Requests::default(),
         }
+    }
+
+    /// A handle for asking this app to change from where `&mut App` cannot be had.
+    #[must_use]
+    pub fn requests(&self) -> Requests {
+        self.requests.clone()
+    }
+
+    /// Apply the changes asked for through [`Requests`], and anything they make ready.
+    /// Returns whether there were any.
+    pub fn apply_requests(&mut self) -> bool {
+        let applied = self.requests.pending() > 0;
+        self.settle();
+        applied
     }
 
     /// The stream every plugin in this app emits to and listens on.
@@ -310,13 +404,8 @@ impl App {
     ///
     /// Returns [`ContextError::UnknownFiber`] if `id` is not loaded.
     pub fn dispose(&mut self, id: FiberId) -> Result<(), ContextError> {
-        let parent = self.fiber(id)?.parent;
-        self.unload(id, Unload::Dispose);
-        if let Some(parent) = parent.and_then(|parent| self.fibers.get_mut(&parent)) {
-            parent
-                .effects
-                .retain(|effect| !matches!(effect, Effect::Child(child) if *child == id));
-        }
+        self.fiber(id)?;
+        self.forget(id);
         self.settle();
         Ok(())
     }
@@ -362,8 +451,12 @@ impl App {
     }
 
     fn add_fiber(&mut self, parent: Option<FiberId>, plugin: Box<dyn Plugin>) -> FiberId {
-        self.next_fiber += 1;
-        let id = FiberId(self.next_fiber);
+        let id = self.requests.fiber_id();
+        self.insert_fiber(id, parent, plugin);
+        id
+    }
+
+    fn insert_fiber(&mut self, id: FiberId, parent: Option<FiberId>, plugin: Box<dyn Plugin>) {
         self.fibers.insert(
             id,
             Fiber {
@@ -375,7 +468,51 @@ impl App {
                 effects: Vec::new(),
             },
         );
-        id
+    }
+
+    /// Apply the requests waiting in the queue, in order.
+    fn take_requests(&mut self) {
+        for request in self.requests.take() {
+            match request {
+                Request::Load { id, parent, plugin } => self.adopt(id, parent, plugin),
+                Request::Dispose(id) => self.forget(id),
+            }
+        }
+    }
+
+    /// Add a requested plugin under `parent`, unless `parent` is gone.
+    fn adopt(&mut self, id: FiberId, parent: Option<FiberId>, plugin: Box<dyn Plugin>) {
+        let Some(parent) = parent else {
+            self.insert_fiber(id, None, plugin);
+            return;
+        };
+        let Some(owner) = self.fibers.get_mut(&parent) else {
+            let payload = format!(
+                "{{\"plugin\":{},\"reason\":\"its parent was unloaded first\"}}",
+                json::string(plugin.name())
+            );
+            drop(
+                self.events
+                    .emit(Draft::new(Source::Host, "plugin/dropped").payload(payload)),
+            );
+            return;
+        };
+        owner.effects.push(Effect::Child(id));
+        self.insert_fiber(id, Some(parent), plugin);
+    }
+
+    /// Unload `id` for good and remove it from its parent's effects. Unknown ids are ignored.
+    fn forget(&mut self, id: FiberId) {
+        let Some(fiber) = self.fibers.get(&id) else {
+            return;
+        };
+        let parent = fiber.parent;
+        self.unload(id, Unload::Dispose);
+        if let Some(parent) = parent.and_then(|parent| self.fibers.get_mut(&parent)) {
+            parent
+                .effects
+                .retain(|effect| !matches!(effect, Effect::Child(child) if *child == id));
+        }
     }
 
     fn insert_service(&mut self, name: String, service: AnyService) -> Result<(), ContextError> {
@@ -388,7 +525,11 @@ impl App {
 
     /// Apply every pending plugin whose requirements are now met, until none is left.
     fn settle(&mut self) {
-        while let Some(id) = self.next_ready() {
+        loop {
+            self.take_requests();
+            let Some(id) = self.next_ready() else {
+                break;
+            };
             self.activate(id);
         }
     }
@@ -651,6 +792,13 @@ impl Context<'_> {
         Arc::clone(&self.app.events)
     }
 
+    /// A handle for changing the plugin tree after `apply` has returned, for example to load
+    /// a child plugin from a later call. See [`Requests`].
+    #[must_use]
+    pub fn requests(&self) -> Requests {
+        self.app.requests()
+    }
+
     /// Load a child plugin. It is applied once this plugin is active and is disposed with it.
     pub fn plugin(&mut self, plugin: impl Plugin + 'static) -> FiberId {
         let child = self.app.add_fiber(Some(self.fiber), Box::new(plugin));
@@ -667,8 +815,6 @@ impl Context<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use super::*;
 
     type Journal = Arc<Mutex<Vec<String>>>;
@@ -874,5 +1020,46 @@ mod tests {
                 "plugin/disposed {\"plugin\":\"ears\"}",
             ]
         );
+    }
+
+    #[test]
+    fn requests_from_elsewhere_are_applied_when_the_tree_next_settles() {
+        let log = journal();
+        let mut app = App::new();
+        let parent = app.plugin(tracked("parent", &[], &log));
+        let requests = app.requests();
+
+        let child = requests.load(Some(parent), tracked("child", &[], &log));
+        assert_eq!(app.state(child), None);
+        assert_eq!(requests.pending(), 1);
+
+        assert!(app.apply_requests());
+        assert_eq!(app.state(child), Some(&FiberState::Active));
+        assert!(!app.apply_requests());
+
+        // A requested child goes with its parent, like any other.
+        app.dispose(parent).unwrap();
+        assert_eq!(app.state(child), None);
+        assert_eq!(entries(&log), ["+parent", "+child", "-child", "-parent"]);
+    }
+
+    #[test]
+    fn a_request_whose_parent_is_gone_is_dropped() {
+        let log = journal();
+        let mut app = App::new();
+        let parent = app.plugin(tracked("parent", &[], &log));
+        let requests = app.requests();
+        let child = requests.load(Some(parent), tracked("orphan", &[], &log));
+        let top = requests.load(None, tracked("top", &[], &log));
+        requests.dispose(top);
+
+        app.dispose(parent).unwrap();
+
+        assert_eq!(app.state(child), None);
+        assert_eq!(app.state(top), None);
+        // Loaded and disposed in one batch, `top` was never started.
+        assert_eq!(entries(&log), ["+parent", "-parent"]);
+        let dropped = app.events().matching(&Pattern::new("plugin/dropped"));
+        assert_eq!(dropped.len(), 1);
     }
 }

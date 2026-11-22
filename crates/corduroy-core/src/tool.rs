@@ -30,6 +30,9 @@ pub struct ToolSpec {
     /// doing it once (a read, a write of fixed contents). Otherwise the model is told the
     /// call was interrupted and decides for itself.
     pub replay_safe: bool,
+    /// Whether the tool only looks and never changes anything. Gates see this, so an
+    /// approval policy can let reads through and ask about writes.
+    pub read_only: bool,
 }
 
 /// Why a tool call failed. These are shown to the model, not treated as fatal.
@@ -139,6 +142,7 @@ mod tests {
             description: "Upper-cases its input.".into(),
             input_schema: "{}".into(),
             replay_safe: true,
+            read_only: true,
         };
         tool_fn(spec, |input| {
             if input.is_empty() {

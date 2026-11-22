@@ -34,9 +34,10 @@ mod bindings {
 use std::fmt::Write as _;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
+use bindings::corduroy::plugin::types::{CallError, ServiceCall};
 use bindings::corduroy::plugin::types::{HostError, ToolSpec};
 use bindings::corduroy::plugin::{events, fs_read, fs_write};
-use bindings::{Event, Guest, PluginInfo, ToolError};
+use bindings::{Event, Guest, PluginInfo, ToolError, Verdict};
 use serde::Deserialize;
 
 /// Plugin configuration, from the host.
@@ -115,6 +116,8 @@ impl Guest for Skills {
             tools: specs(),
             subscriptions: vec!["tool/result".to_owned(), "turn/end".to_owned()],
             prompt: true,
+            gates: Vec::new(),
+            provides: Vec::new(),
         })
     }
 
@@ -179,6 +182,16 @@ impl Guest for Skills {
             );
         }
         Some(part)
+    }
+
+    /// Never called: this plugin guards no decision point.
+    /// Never called: this plugin provides no service.
+    fn handle_call(call: ServiceCall) -> Result<String, CallError> {
+        Err(CallError::Unknown(format!("service `{}`", call.service)))
+    }
+
+    fn gate(_point: String, _request: String) -> Verdict {
+        Verdict::Allow
     }
 }
 
@@ -306,29 +319,34 @@ fn save(name: &str, content: &str) -> Result<(), ToolError> {
 }
 
 fn specs() -> Vec<ToolSpec> {
-    // Listing and viewing change nothing, so they may be repeated after a crash.
-    let spec = |name: &str, replay_safe: bool, description: &str, input_schema: &str| ToolSpec {
+    // `(replay_safe, read_only)`. Listing and viewing change nothing, so they may be repeated
+    // after a crash.
+    let spec = |name: &str,
+                (replay_safe, read_only): (bool, bool),
+                description: &str,
+                input_schema: &str| ToolSpec {
         name: name.to_owned(),
         description: description.to_owned(),
         input_schema: input_schema.to_owned(),
         replay_safe,
+        read_only,
     };
     vec![
         spec(
             "skills_list",
-            true,
+            (true, true),
             "List every saved skill with its description.",
             r#"{"type":"object","properties":{}}"#,
         ),
         spec(
             "skill_view",
-            true,
+            (true, true),
             "Load a skill's full instructions. Do this before following or patching a skill.",
             r#"{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}"#,
         ),
         spec(
             "skill_manage",
-            false,
+            (false, false),
             "Create, patch or delete a skill. A skill is Markdown that starts with front \
              matter:\n---\nname: <the skill's name>\ndescription: <when to use it>\n---\n\
              followed by the procedure (When to Use, Procedure, Pitfalls, Verification). \

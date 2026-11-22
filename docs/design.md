@@ -21,7 +21,7 @@ them. Sections and table rows marked *planned* describe that target, not the cod
 
 ```
                  ┌───────────────────────── corduroy-harness (src/) ─────────────────────────┐
-                 │  Harness: oi-kit StateMachine over [custom ops, prompt, tools, limit, LLM]  │
+                 │  Harness: oi-kit StateMachine over [ops, prompt, gates, tools, limit, LLM]  │
                  │  Journal: effects ──► events            PluginTools: registry ──► oi-kit   │
                  └───────────────┬───────────────────────────────────────┬───────────────────┘
                                  │                                       │
@@ -29,11 +29,11 @@ them. Sections and table rows marked *planned* describe that target, not the cod
         │ App / Context / Plugin   (fibers, effects)      │   │ WasmRuntime, WasmPlugin │
         │ Grants / Scope           (capabilities)         │◄──┤ linker = granted WIT    │
         │ EventStream, Log, SessionId (commits + pub/sub) │   │ interfaces only         │
-        │ Tools, Prompts, Kernels  (registries)           │   └───────────┬─────────────┘
+        │ Tools, Prompts, Kernels, Gates (registries)     │   └───────────┬─────────────┘
         └─────────────────────────────────────────────────┘               │ wit/corduroy.wit
                                                               ┌───────────┴─────────────┐
-                                                              │ plugins/pi-tools, skills │
-                                                              │ (wasm32, any language)   │
+                                                              │ plugins/: pi-tools,      │
+                                                              │ skills, approval (wasm32)│
                                                               └──────────────────────────┘
 ```
 
@@ -73,9 +73,9 @@ essentially one tool, `python_repl`. The kernel is a subprocess speaking newline
 one namespace persists across cells, with timeouts that interrupt and then kill, an output cap,
 snapshot and restore, and a bridge that lets code in the kernel call back into the host.
 
-**Here.** `corduroy_core::kernel`. `Kernel` is the trait (`exec(code, timeout) -> Cell`),
-`Kernels` the registry, and `ShellKernel` the reference implementation: a persistent POSIX
-shell whose variables and working directory survive between cells. A cell that times out or
+**Here.** `corduroy_core::kernel`. `Kernel` is the trait (`exec(code, timeout) -> Cell`) and
+`Kernels` the registry. Implementations live outside the core: `corduroy-shell` has
+`ShellKernel`, a persistent POSIX shell whose variables and working directory survive between cells. A cell that times out or
 calls `exit` costs the kernel its state, and the error says so, as Prime's reset notice does.
 WebAssembly plugins reach kernels through the `kernel` capability, scoped by kernel name; the
 `bash` tool in `pi-tools` is a thin layer over it. A WebAssembly plugin is also a small kernel
@@ -164,8 +164,11 @@ there is no crate named just `oi-kit`. `oi-kit-provider-types` has `Provider`, `
 effects for the host to persist; inference is the last step.
 
 **Here.** `src/harness.rs` uses those types directly. `Harness::steps` is the pipeline: custom
-operations, the prompt, plugin tools, an answer for calls nobody handled, the turn limit, and
-oi-kit's `InferenceRunner` over any `Provider`. `Harness::machine` hands the state machine to
+operations, the prompt, the gates, plugin tools, an answer for calls nobody handled, the turn
+limit, and oi-kit's `InferenceRunner`. The model is a service (`src/provider.rs`): the loop
+asks whichever `Provider` is registered under its provider name in the `Providers` registry,
+looked up on every request, so a `provider` plugin supplies it and swapping the plugin swaps
+the model. `Harness::machine` hands the state machine to
 callers who want to drive it step by step. This is also the programmable loop: an
 `Operation` placed ahead of the tools can approve, rewrite or refuse what the model asked for.
 
@@ -173,8 +176,8 @@ callers who want to drive it step by step. This is also the programmable loop: a
 pinned to an exact version. That weight is confined to the top crate; `corduroy-core` stays
 synchronous and dependency-free.
 
-**Left out.** Real providers (`oi-kit-providers`), MCP extensions, compaction, tool approval
-and sub-agents. All exist as oi-kit operations and slot into `Harness::with_operation`.
+**Left out.** Real providers (`oi-kit-providers`), MCP extensions, compaction and
+sub-agents. All exist as oi-kit operations and slot into `Harness::with_operation`.
 
 **The baseline.** Goose is also the measure for the plugins shipped with the harness: what a
 user gets from Goose out of the box should be reachable here with shipped plugins alone. See
@@ -182,8 +185,9 @@ user gets from Goose out of the box should be reachable here with shipped plugin
 
 ## Capabilities
 
-The plugin world in `wit/corduroy.wit` imports four host interfaces and nothing else. There is
-no WASI in the linker, so a plugin has no clock, environment, filesystem or network of its own.
+The plugin world in `wit/corduroy.wit` imports fifteen host interfaces and nothing else. There
+is no WASI in the linker, so a plugin has no clock, environment, filesystem or network of its
+own beyond what these give it.
 
 | Capability | Grants | Scoped by |
 | --- | --- | --- |
@@ -191,6 +195,29 @@ no WASI in the linker, so a plugin has no clock, environment, filesystem or netw
 | `fs-write` | create, replace and delete files | absolute path |
 | `kernel` | run code in a host kernel | kernel name |
 | `events` | publish to the event stream | topic |
+| `log` | diagnostic lines, recorded as `plugin/log` under the plugin's name (16 KiB each) | level: `debug`, `info`, `warn`, `error` |
+| `clock` | wall-clock time; a monotonic clock that starts with the instance | clock: `wall`, `monotonic` |
+| `random` | bytes from the host's secure generator (64 KiB per call) | source: `secure` |
+| `tools` | list and call tools other plugins registered, through the gates | tool name |
+| `state` | a durable key-value store of the plugin's own | key |
+| `service` | call a service another plugin provides | service name |
+| `plugins` | load and unload WebAssembly plugins as its children, granting no more than it holds | the loaded plugin's name |
+| `llm` | one completion from a model a provider serves, recorded as `llm/request` and `llm/response` | model name |
+| `secret` | an opaque handle to a named credential, never its value | secret name |
+| `http` | an HTTP request through the client registered for its scheme, with credentials written in by the host | host name |
+| `log-read` | events of any session, by topic, in pages | `<session>:<topic>`, the session with `%` and `:` percent-encoded (empty for harness events) |
+
+Two limits hold whatever a grant says. **Protected paths** (the host binary, the compiled-code
+cache and whatever the host adds with `WasmRuntime::protect`, such as the event log and grant
+files) are out of reach of `fs-read` and `fs-write`. A kernel runs code the core cannot see
+into, so protecting paths from a kernel is the kernel's job (a sandboxed kernel). And
+**cascades end**: a plugin is not called for an event more than `Limits::cascade` causes
+deep (16 by default); events a plugin raises while handling one name it as their cause, so
+plugins setting each other off are measured and stopped, with `plugin/cascade` recorded.
+
+Every capability is scoped, even where there is one obvious resource, so that `Scope::none()`
+keeps meaning "linked but lets nothing through", which is how a script-host automation is
+denied a capability its interpreter imports.
 
 - **Declared by imports.** A plugin's requirements are its component's imports;
   `WasmPlugin::requires` reports them, and there is no separate manifest to fall out of step.
@@ -222,44 +249,43 @@ if one of these holds:
    convention between plugins.
 
 Everything else is a plugin, and a plugin may itself offer primitives to other plugins (see
-[Plugins extending plugins](#plugins-extending-plugins-planned)).
+[Plugins extending plugins](#plugins-extending-plugins)).
 
 | Primitive | Status | Target |
 | --- | --- | --- |
-| Plugin tree (`App`, `Context`, effects, `inject`) | built | Add a restart limit so a plugin that keeps faulting is suspended, not retried forever. A trapped WebAssembly plugin is re-instantiated on its next use and counts against that limit; in Python a stray `print` is a trap, so this is not a rare path. |
+| Plugin tree (`App`, `Context`, effects, `inject`) | built | Built for WebAssembly: a call that traps kills the instance, and the next call makes a new one and activates it again, keeping the plugin's registrations; after `Limits::restarts` restarts (default 3) the next trap stops the plugin until it is reloaded (`plugin/trapped`, `plugin/restarted`, `plugin/stopped`). Still to do: the same limit in the plugin tree itself, so a stopped plugin shows as suspended in `App` rather than only refusing calls. |
 | Event log | built | A fallible `Log` trait. A step's events are one atomic commit, stored before any listener or the model sees them. The core has the trait and the in-memory stream; stores are separate crates. |
 | Sessions | built | Many sessions, each with an id and an optional parent. Every event of a run names its session; events about the plugin tree name none. Still to do: events a plugin emits while serving a tool call do not carry that call's session. |
-| Tool lifecycle | partly built | Built: `tool/call`, `tool/start` and `tool/result` are each committed as they happen, per call, and `ToolSpec::replay_safe` says whether a call that was running at a crash may be repeated. Still to do: `read-only` (wanted by gates), results as content blocks rather than one string, progress and cancellation. |
-| Gates | native `Operation` only | A fourth registry. A gate is asked at a named decision point before something happens and answers allow, deny or ask. Reachable from WebAssembly through a world export. See [Events, gates and hooks](#events-gates-and-hooks-planned). |
-| Waits and signals | none | A step can end by waiting for a named signal (a user's answer, a child session finishing). The wait is an event, so it survives a restart. |
-| Services | native only | Calls between plugins across the WebAssembly boundary, as a capability scoped by service name. |
-| Capabilities | four | The mechanism is settled; the set grows (below). |
-| Kernels | built | The trait and registry stay. `ShellKernel` is an implementation, not a primitive, and moves out to a plugin crate. |
+| Tool lifecycle | partly built | Built: `tool/call`, `tool/start` and `tool/result` are each committed as they happen, per call; `ToolSpec::replay_safe` says whether a call that was running at a crash may be repeated, and `read_only` whether it changes anything. Still to do: results as content blocks rather than one string, progress and cancellation. |
+| Gates | built for `tool/call` and `plugin/load` | A fourth registry. A gate is asked at a named decision point before something happens and answers allow, deny or ask; the strictest answer wins and is recorded. Reachable from WebAssembly through the `gate` export. Still to do: more decision points (the user's input, the model request), and letting a person answer an ask at `plugin/load`. See [Events, gates and hooks](#events-gates-and-hooks). |
+| Waits and signals | built for a gate's ask | A run whose tool call a gate asked about waits for `Harness::answer`; the ask and the answer are events, so the wait survives a restart. Still to do: the general form, a step that waits for any named signal (a child session finishing, a timer). |
+| Services | built | A fifth registry, `Services`: calls between plugins in JSON text, with the caller's name, across the WebAssembly boundary in both directions. See [Plugins extending plugins](#plugins-extending-plugins). |
+| Capabilities | fifteen | The mechanism is settled; the set grows (below). |
+| Kernels | built | The trait and registry. `ShellKernel` is an implementation, not a primitive, and lives in `corduroy-shell`. |
 | Conversation projection | messages only | Understands a `compaction` event (a summary and the first message kept). Producing the summary is a plugin's job. |
-| Model access | constructor argument | A `provider` service that a plugin supplies, so the model is swappable like everything else. |
+| Model access | built | The loop asks the provider registered under a name in `Providers`, on every request, so a plugin supplies the model and unloading it takes the model away. `Harness::new` registers its argument there for convenience. For plugins, the core's `Models` registry: one completion, synchronously, by model name; a `provider` plugin can serve its models there. |
+| Secrets and outbound requests | built | `Secrets` and `HttpClients` registries. The core checks and records; native plugins hold the values and send the requests, so an HTTP client is a plugin like a kernel is. |
 | Versioning | WIT package version, log schema version | Built: a schema version in each log's header. Still to do: a version on each plugin's stored state, and a rule for what a minor version of the world may change. |
 
-Capabilities to add, each a WIT interface with a scope:
+One capability is still to add:
 
 | Capability | Grants | Scoped by | Needed by |
 | --- | --- | --- | --- |
-| `llm` | one model request | model name | compaction, summaries, the skills reviewer |
 | `session` | start a child session and await it | recipe or agent name | sub-agents |
-| `service` | call another plugin's service | service name | plugins extending plugins |
-| `state` | a durable key-value store private to the plugin | (none: always its own) | todo, memory, any counter |
-| `log-read` | read events of other sessions | session and topic | chat recall |
-| `plugins` | load, unload and list plugins | plugin name | an extension manager |
-| `http` | make a request | host | web fetch, remote MCP |
-| `secret` | read a named credential | secret name | providers, MCP servers |
-| `clock` | read the time | (none) | schedulers, timestamps in output, every JavaScript and Python plugin |
-| `random` | random bytes | (none) | identifiers, tokens |
-| `log` | write a diagnostic line to the event stream under the plugin's name | (none) | every plugin; where a guest's `print` goes |
-| `tools` | call a registered tool, through the gates | tool name | automations, code mode |
 
-Two rules follow from adding these:
+It waits on the general form of waits and signals (step 4): a parent run awaiting a child
+session should wait in the log, as a run waiting for a person does, rather than block a
+plugin's call for as long as the child runs.
 
-- **Secrets never enter the log.** A secret is handed to a plugin as an opaque value, and host
-  functions that take one (an HTTP header, say) record that it was used, not what it was.
+Two rules came with the capabilities that reach outside:
+
+- **Secrets never enter the log.** A secret is handed to a plugin as an opaque handle (the
+  `credential` resource), and host functions that take one (an HTTP header) write its value
+  into what they send and record its name, not its value. Response bodies are not recorded
+  either, since they may echo what was sent. HTTP clients must not follow redirects: the
+  host checked one host against the grant, and a redirect elsewhere would go around it.
+  For the same reason the host refuses URLs a parser could read differently from its own
+  check: a backslash, whitespace, a control character, or a user name before the host.
 - **Time and randomness are host calls.** A WebAssembly plugin has no clock of its own, so
   given the same host-call results it computes the same thing. That is what makes
   [replaying a plugin](#durability) possible, and WASI stays out of the linker to
@@ -267,7 +293,7 @@ Two rules follow from adding these:
   catch: built without WASI their clocks trap or stand still and their random numbers repeat,
   so `clock`, `random` and `log` are needed as soon as either language is.
 
-## Events, gates and hooks (*planned*)
+## Events, gates and hooks
 
 What other harnesses call hooks are two different things here, and both are plugins.
 
@@ -280,14 +306,35 @@ What other harnesses call hooks are two different things here, and both are plug
   (deny over ask over allow). The outcome does not depend on which plugin loaded first. The
   decision itself is then recorded as an event.
 
-The core defines a small, fixed set of decision points, starting with `tool/call`. Likely
-additions are the user's input and the request about to be sent to the model, each added
-when a plugin needs it. A plugin that wants to ask other plugins a question of its own does
-so through a [service](#plugins-extending-plugins-planned), not through the event stream.
+The core defines a small, fixed set of decision points (`corduroy_core::POINTS`): `tool/call`
+and `plugin/load`. Likely additions are the user's input and the request about to be sent to
+the model, each added when a plugin needs it. A WebAssembly plugin that lists a point the
+core does not define is refused at activation. A plugin that wants to ask other plugins a
+question of its own does so through a [service](#plugins-extending-plugins), not through the
+event stream.
 
 A deny or an ask always carries a reason. A denied tool call becomes an error tool result
 holding that reason, so the model learns what was wrong and can try again, as with any other
 tool failure.
+
+**How `tool/call` is gated (built).** A loop step, `GateOperation`, sits between the prompt
+and the tools step. For each call of the model's message it asks the gates once, with
+`{"session", "id", "tool", "input", "read-only"}`, and stores the decision as `gate/decision`
+in that step's commit, so the decision is in the log before the tool can start. An allowed
+call goes on to the tools step; a denied one is answered with an error result. A call a gate
+asked about makes the whole message wait: none of its calls runs, the run stops with
+`Status::Waiting` and no `turn/end`, and the session refuses a new prompt.
+`Harness::answer(session, call, Answer)` stores a `gate/answer` and, once nothing else is
+waiting, takes the run on; a declined call goes to the model with the person's reason.
+`continue_run` leaves a waiting run alone and does not count it as a restart, so a run can
+wait across any number of process lifetimes. With no gate registered nothing is asked or
+recorded, and the loop is as it was.
+
+- A gate that cannot answer fails closed: a WebAssembly gate that traps denies.
+- Gates are asked in name order and only the first gate to give the strictest kind is
+  recorded, so the reason the model or the person sees comes from one gate.
+- Remembering an answer ("always allow this tool") is the gate plugin's business: it can
+  subscribe to `gate/answer`.
 
 **Decided against, for now:** gates that rewrite a call's input and let it run, as Pi's hooks
 can. A rewrite saves a model round trip and guarantees the outcome, but the model then
@@ -357,44 +404,72 @@ The first five points are built; the last two are *planned*.
 - **Crash loops.** Each `continue_run` of an unfinished run is a `run/restart` event; past
   `Harness::with_restart_limit` (default 5) the run ends as `Status::Failed`, recorded in the
   conversation, and the session takes prompts again.
-- **Plugin state** (*planned*). Replayed events are not delivered to listeners, so state a
-  plugin builds from events is lost today. A plugin keeps durable state through the `state`
-  capability, whose writes join the commit of the step that made them. State is explicit so
-  that it is visible in the log and bounded: restoring a plugin reads its current keys, not
-  its history. **Decided against, for now:** journaling every host-call result and rebuilding
-  a plugin by replaying them. It needs nothing from the plugin author, but the log grows with
-  every file read and recovery slows as a session ages. It can be added later without
-  changing `state`.
+- **Plugin state** (built). Replayed events are not delivered to listeners, so state a
+  plugin builds from events is lost on restart. A plugin keeps durable state through the
+  `state` capability instead: each write is a `state/set` or `state/remove` event from the
+  plugin, and the store is what those events add up to, read when the plugin is applied.
+  State is explicit so that it is visible in the log and bounded: restoring a plugin reads
+  its current keys, not its history. The writes of one call into the plugin are kept only if
+  the call returns (a trapped call's writes are dropped) and are committed with the call's
+  other events when it returns. *Changed from the plan:* writes were to join the commit of
+  the loop step that caused them; they are committed when the plugin's call returns instead,
+  which is the same commit whenever the plugin was called from outside the loop and, inside
+  it, at most one commit apart. Values survive a restart of the plugin (they are in the
+  host, not in its memory), a reload and a new process. **Decided against, for now:**
+  journaling every host-call result and rebuilding a plugin by replaying them. It needs
+  nothing from the plugin author, but the log grows with every file read and recovery slows
+  as a session ages. It can be added later without changing `state`.
 - **Kernel state** (*planned*). A kernel's processes do not survive a crash. The `Kernel`
   trait gains optional `snapshot` and `restore` (Prime Agent has both); a kernel without them
   reports on resume that its state was lost, as a timeout does today.
 
-## Plugins extending plugins (*planned*)
+## Plugins extending plugins
 
 Native plugins can already do this: one plugin calls `ctx.provide` with a service, which may
 be a `Registry` of its own, and others list it in `inject` and register into it. Unloading
 the provider suspends its dependents. Nothing in that path knows about tools or prompts, so a
 plugin-defined extension point is as good as a built-in one.
 
-WebAssembly plugins cannot, because the world only exports tools, an event handler and a
-prompt part. The target:
+Typed values cannot cross the WebAssembly boundary, so for WebAssembly plugins (built):
 
-- `plugin-info` gains `provides` and `inject`, each a list of service names, so the fiber
-  tree orders WebAssembly plugins the same way it orders native ones.
-- A `service` interface: `call(service, method, payload) -> result<string, host-error>`, and
-  a matching world export `handle-call`. Payloads are JSON text, like events.
-- The call is queued or refused if it would re-enter a plugin that is already running, in
-  keeping with the rule that a plugin is never called back while it runs.
+- A fifth registry, `Services`, of things called by name with a method and a payload, JSON
+  text by convention, and told the caller's name. Native and WebAssembly plugins both
+  provide and call them.
+- `plugin-info.provides` lists the services a WebAssembly plugin answers, through the
+  `handle-call` export (which receives a `service-call` record: caller, service, method,
+  payload). A `service` capability, scoped by service name, lets a plugin call them.
+- *Changed from the plan:* `plugin-info` was also to gain `inject`, so the plugin tree would
+  order WebAssembly plugins by the services they use. A plugin's info is only known once it
+  has been activated, which is after the tree has decided whether to activate it, so a call
+  to a service nobody provides fails at the time of the call instead (`unknown`).
+- **Never re-entered, never deadlocked.** A call that would enter a plugin already running
+  further up the same call (a plugin calling its own tool or service, or A calling B calling
+  A) is refused at once. A call from inside a plugin to one busy on another thread waits at
+  most `Limits::nested_wait` (30 s by default), so two chains that wait on each other give up
+  rather than hang. Only a call from outside every plugin waits for as long as it takes.
+- **A gate does not make tool calls.** A plugin's own tool calls pass the gates, so a plugin
+  that gated `tool/call` would be asked about its own call while making it. A plugin that
+  lists `tool/call` in `gates` and imports `tools` is refused at activation. The rule is
+  checked from the component's imports, so it holds without trusting the plugin.
 - **Authority does not travel.** A plugin handling a call acts with its own grants, so a
   service is a deliberate grant of some of its power to callers. The host passes the caller's
   name with every call, and the `service` scope decides who may call what. A plugin that
   re-exports the filesystem to all callers is a misconfigured grant, visible in one place.
 
+**Tools from plugins.** The `tools` capability lets a plugin list and call the tools the
+model can (scoped by tool name), which is what automations and code mode need. Each call is
+asked of the gates with `caller` set to `plugin:<name>`, so a policy can treat plugins
+differently from the model; a gate's ask becomes a denial, since a plugin's call cannot wait
+for a person. The call leaves `tool/call`, `gate/decision` and `tool/result` events with the
+plugin as their source, committed when the plugin's own call returns. These calls are not
+durable intent: they carry no session yet, and after a crash the plugin's own call is what
+is repeated or not.
+
 The built-in registries (`tools`, `prompts`, `kernels`, `gates`) are the cases where the loop
 itself is the consumer. A plugin that wants its own extension point (an MCP plugin accepting
 server definitions, a skills plugin accepting skill sources) provides a service.
 
-## Automations (*planned*)
+## Automations
 
 The purpose of the plugin system is that the agent can adapt the harness to its task: having
 done something by hand, it writes an automation that does it from then on without a model
@@ -407,21 +482,39 @@ the harness runs). An automation is a WebAssembly plugin with three parts:
 | An action | Host capabilities, and the `tools` capability to call other plugins' tools. Such calls pass through the gates and are logged like the model's, with the plugin as their source. |
 | Optionally, the model | The `llm` capability for one request, or `session` to start a run. |
 
-What the core must guarantee, because the author is now the agent:
+What the core must guarantee, because the author is now the agent (built):
 
-- **No amplification.** A plugin holding the `plugins` capability can grant a plugin it loads
-  only what it holds itself, narrowed or equal, never more.
-- **Loading is a decision point.** `plugin/load` is asked of the gates with the component's
-  hash and the capabilities it requests, so an approval plugin can ask the user. The answer
-  and the hash are in the log.
-- **The core's own files are out of reach.** The log, grant files, the plugin store, the
-  cache of compiled plugins (machine code the host runs) and the host binary are denied to every `fs-write` and kernel-independent path scope, whatever a
-  grant says. A plugin cannot edit its own grants.
-- **Cascades end.** An automation reacts to events and causes events. Each event already
-  records its cause; the stream refuses a chain deeper than a limit, and fuel bounds each
-  call.
+- **No amplification.** A plugin holding the `plugins` capability grants a plugin it loads
+  each requested scope *within* its own (`Scope::within`: a resource must be in both), so
+  never more than it holds. A capability it does not hold at all it can grant only with an
+  empty scope, which is how a child is linked to an import it may not use. The child's path
+  must be one the loader can read with `fs-read`, and its name one the loader's `plugins`
+  scope reaches.
+- **Loading is a decision point.** `plugin/load` is asked of the gates with the loader, the
+  child's name, the SHA-256 of its component, the capabilities it imports and the grants
+  requested; the decision is recorded as `gate/decision` and the load as `plugin/requested`,
+  both with the hash. A plugin that gates `plugin/load` may not import `plugins`, as with
+  `tool/call` and `tools`. *Not yet:* a gate's ask is a denial here, as for a plugin's tool
+  call, because the loader's call cannot wait for a person; approving a load waits on the
+  general form of waits and signals.
+- **The core's own files are out of reach.** The host binary and the compiled-code cache are
+  protected from the start; the host adds the log, grant files and the plugin store with
+  `WasmRuntime::protect`, and every plugin loaded through that runtime (children included) is
+  refused them by `fs-read` and `fs-write`, whatever its grant says. A plugin cannot edit its
+  own grants.
+- **Cascades end.** See [Capabilities](#capabilities): a plugin is not called for an event
+  more than `Limits::cascade` causes deep, and fuel bounds each call. *Changed from the
+  plan:* the stream was to refuse a deep chain; it is the plugin delivery that refuses, since
+  a refused commit closes the stream and native listeners are trusted.
 - **Agent-written code is never native.** Native plugins are trusted, so only WebAssembly
   can be loaded through the `plugins` capability.
+- **Loading from a running plugin.** A plugin's call cannot change the plugin tree, which it
+  is part of. A load is checked, gated and compiled during the call, then queued through
+  `App::requests` (`Requests`); the child already has its `FiberId`, is a child of the loader
+  (disposed with it) and starts when the tree next settles: the harness settles it before
+  every step of the loop, so a tool the child registers is offered to the model at the next
+  step. *Not yet durable:* a loaded plugin lasts as long as its loader in this process; a
+  loader that wants it back after a restart loads it again (from its `state`, say).
 
 **Guest languages.** JavaScript/TypeScript and Python come first, since those are what other
 harnesses' extensions are written in; the two existing Rust plugins are the reference, not
@@ -448,13 +541,13 @@ has the measurements. What it settled:
 - **These plugins import the whole world.** A plugin states what it needs by the world it is
   built against; the SDK generates that world from a list of capabilities. The script host
   imports everything and each automation is granted `Scope::none()` for what it may not use.
-- **Compiled code must be cached.** The components are 12 and 18 MB and take 25 to 30
-  seconds to compile at load (6 to 9 with parallel compilation), against milliseconds to
-  instantiate. A component is to be compiled once per process, and wasmtime's own cache,
-  which covers components, keeps the compiled code on disk: later loads took 0.6 to 0.7
-  seconds. Each instance holds 9 to 13 MB.
-- **The script host needs "compile once, instantiate many".** `WasmRuntime::load` compiles
-  on every call today.
+- **Compiled code is cached (built).** A runtime keeps each component it compiles by the
+  SHA-256 of its bytes, so a second load in the process takes milliseconds (the script host
+  for many automations compiles once). `WasmRuntime::cached(dir)` adds wasmtime's disk cache,
+  and `parallel-compilation` is on. Measured on four cores: the JavaScript and Python
+  components compile in 5.7 and 4.3 seconds (from 30 and 25), load again in the same process
+  in 11 to 17 ms, and in a new process from the disk cache in 0.14 seconds. Each instance
+  still holds 9 to 13 MB.
 
 ## Sandboxing
 
@@ -486,19 +579,19 @@ harness.
 | Goose feature | Plugin here | Kind | Waits on |
 | --- | --- | --- | --- |
 | Developer: `write`, `edit`, `shell`, `tree`, `read_image` | `pi-tools`, extended | WebAssembly | content blocks |
-| MCP extensions (stdio, streamable HTTP) | `mcp` | native (`rmcp`) | kernels for subprocesses, `secret` |
-| Providers | `providers` (`oi-kit-providers`) | native | `provider` service, `secret` |
-| Permission modes, per-tool permissions | `approval` | WebAssembly | gates, waits |
-| Tool inspection, prompt-injection scan | `inspect` | WebAssembly | gates |
-| Auto-compaction | `compact` | WebAssembly | `llm`, compaction event |
+| MCP extensions (stdio, streamable HTTP) | `mcp` | native (`rmcp`) | kernels for subprocesses |
+| Providers | `providers` (`oi-kit-providers`) | native | nothing (the `provider` service and `Secrets` are built) |
+| Permission modes, per-tool permissions | `approval` (exists: `auto`, `smart`, `approve`, `chat`, allow and deny lists) | WebAssembly | done |
+| Tool inspection, prompt-injection scan | `inspect` | WebAssembly | nothing (gates are built) |
+| Auto-compaction | `compact` | WebAssembly | compaction event (`llm` is built) |
 | Summon: `load`, `delegate` | `subagents` | WebAssembly | sessions, `session`, waits |
-| Skills | `skills` (exists) | WebAssembly | `llm` for the review fork |
+| Skills | `skills` (exists) | WebAssembly | nothing (`llm` for the review fork is built) |
 | Context files (`.goosehints`, `AGENTS.md`) | `hints` | WebAssembly | nothing |
-| Todo | `todo` | WebAssembly | `state` |
+| Todo | `todo` | WebAssembly | nothing (`state` is built) |
 | Memory | `memory` | WebAssembly | nothing (scoped files) |
-| Chat Recall | `recall` | WebAssembly | `log-read` |
-| Summarize | `summarize` | WebAssembly | `llm` |
-| Extension Manager | `plugin-manager` | WebAssembly | `plugins` |
+| Chat Recall | `recall` | WebAssembly | nothing (`log-read` is built) |
+| Summarize | `summarize` | WebAssembly | nothing (`llm` is built) |
+| Extension Manager | `plugin-manager` | WebAssembly | nothing (`plugins` is built) |
 | Code Mode | `code-mode` | WebAssembly + kernel | kernel-to-host bridge |
 | Recipes and sub-recipes | a declarative plugin tree with grants | host configuration | grant files |
 
@@ -521,15 +614,30 @@ the step it waits on is done.
 4. Gates, waits and signals; the rest of the tool lifecycle. Each export this adds to the
    world is one every guest language must implement, so check a new export against
    JavaScript and Python before it is fixed, async exports included (not yet tried).
+   *Done:* the `Gates` registry, the `tool/call` decision point, the `gate` export (checked
+   from JavaScript and Python, see [Guest languages](guest-languages.md#the-gate-export)),
+   `read-only`, and waiting for a person's answer to an ask, with the `approval` plugin as
+   the first gate. *Still to do:* general waits and signals, content blocks, progress and
+   cancellation.
 5. Services across the WebAssembly boundary; `state`; `tools`. Also `log`, `clock` and
    `random`, brought forward from step 7 because JavaScript and Python plugins cannot do
-   without them, and re-instantiating a trapped plugin under the restart limit.
-6. Loading plugins safely: `plugins` with no amplification, the `plugin/load` decision
-   point, protected paths, the cascade limit. With it, the compiled-code cache: a component
-   compiled once per process, wasmtime's `cache` and `parallel-compilation` features switched
-   on, and the cache directory among the protected paths.
-7. The remaining capabilities, each when its first plugin needs it; `provider` as a service;
-   `ShellKernel` out of the core.
+   without them, and re-instantiating a trapped plugin under the restart limit. *Done:*
+   `log`, `clock`, `random` (checked from JavaScript and Python, see
+   [Guest languages](guest-languages.md#host-calls-log-clock-and-random)) and restarting a
+   trapped WebAssembly plugin, then services, `state` and `tools`, with re-entry refused and
+   gating kept apart from calling tools (all checked from JavaScript and Python, see
+   [Guest languages](guest-languages.md#between-plugins-tools-state-and-service)).
+6. *Done.* Loading plugins safely: `plugins` with no amplification, the `plugin/load`
+   decision point, protected paths, the cascade limit. With it, the compiled-code cache: a
+   component compiled once per process, wasmtime's `cache` and `parallel-compilation`
+   features switched on, and the cache directory among the protected paths. Checked from
+   JavaScript and Python, see [Guest languages](guest-languages.md#loading-plugins).
+7. *Done,* but for `session`. `provider` as a service (`Providers`, the `provider` plugin, a
+   loop that looks its provider up on every request); `ShellKernel` out of the core into
+   `corduroy-shell`; and `llm`, `secret`, `http` and `log-read`, with the `Models`,
+   `Secrets` and `HttpClients` registries behind them. Checked from JavaScript and Python,
+   see [Guest languages](guest-languages.md#reaching-out-llm-secret-http-and-log-read).
+   *Still to do:* `session`, after general waits and signals; an HTTP client plugin.
 8. Guest languages. *Spike done early:* one JavaScript and one Python plugin ran against the
    world, which settled the WASI question (build without it) and showed the script host
    works in both; see [Guest languages](guest-languages.md). *Still to do,* once steps 5 and
@@ -555,11 +663,23 @@ the step it waits on is done.
   of another" without changing the log.
 - **Operations from plugins.** Loop steps are native `Operation`s. Letting plugins contribute
   steps needs an async-friendly, effect-returning export.
+- **Listeners and re-entry.** An event a native tool emits while a WebAssembly plugin's
+  call is in progress is delivered at once, and a listener in that same plugin is refused
+  (it is running), so it misses the event. Events plugins raise themselves are queued and
+  unaffected. A per-plugin queue of undelivered events would close the gap.
+- **Exports every guest must write.** Each export of the world is mandatory: the
+  JavaScript and Python toolchains refuse to build a plugin without `gate`, and Rust's
+  bindings will not compile. Plugins that guard nothing carry a stub. The guest SDKs should
+  supply defaults, or generate the world without exports a plugin does not use.
 - **Blocking.** Tool calls run on blocking threads, but event listeners run inline on the
   thread that emitted, including inside the async loop. Slow listeners would need a queue.
 - **Guest SDK.** Each plugin repeats the same `generate!` and error-mapping boilerplate; a
   small shared guest crate would remove it. For JavaScript and Python an SDK is required
   rather than nice to have (see [Guest languages](guest-languages.md)).
+- **Durable loads.** Plugins loaded by a plugin are not reloaded after a restart unless their
+  loader does it. A plugin store (components by hash, with the grants they were loaded with)
+  would let the host do it, and is also where grant files come in.
+- **Approving a load.** `plugin/load` cannot ask a person yet; see Automations.
 - **Shipping precompiled plugins.** wasmtime's cache removes the cost of every load but the
   first on a machine. Removing that one too means distributing compiled code, which is read
   back with the `unsafe` `Component::deserialize`. Not needed now; if it ever is, that is the

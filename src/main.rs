@@ -65,7 +65,7 @@ fn harness(work: &Path) -> Result<Harness, Box<dyn Error>> {
             .map_err(|error| format!("{error}\nBuild the plugins first: cargo plugins"))
     };
 
-    let mut harness =
+    let harness =
         Harness::new(Arc::new(script()))?.with_system_prompt("You are a careful coding agent.");
     harness.plugin(shell_kernel("shell", work));
     harness.plugin(

@@ -27,6 +27,7 @@ fn calculator(ctx: &mut Context<'_>) -> Result<(), PluginError> {
         description: "Sum a list of integers.".into(),
         input_schema: r#"{"type":"object","properties":{"terms":{"type":"array"}}}"#.into(),
         replay_safe: true,
+        read_only: true,
     };
     let add = tool_fn(spec, |input| {
         let input: serde_json::Value = serde_json::from_str(input)
@@ -48,7 +49,7 @@ fn harness(
 ) -> Result<(Harness, Arc<ScriptedProvider>), HarnessError> {
     let model = Arc::new(ScriptedProvider::new(replies));
     let provider: Arc<ScriptedProvider> = Arc::clone(&model);
-    let mut harness = Harness::new(provider)?;
+    let harness = Harness::new(provider)?;
     harness.plugin(plugin_fn("calculator", &[TOOLS], calculator));
     Ok((harness, model))
 }
@@ -187,7 +188,7 @@ async fn a_failing_model_ends_the_run_with_the_error_in_the_conversation() {
 
 #[tokio::test]
 async fn unloading_a_plugin_takes_its_tools_away_from_the_next_request() {
-    let (mut harness, model) = harness([say("first"), say("second")]).unwrap();
+    let (harness, model) = harness([say("first"), say("second")]).unwrap();
     let calculator = harness.app().fibers()[0].id;
 
     harness.run("one").await.unwrap();

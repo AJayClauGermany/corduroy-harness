@@ -21,6 +21,11 @@
 //! many sessions on one stream, and [`Harness::continue_run`] finishes a run that a crash
 //! cut short. [`jsonl`] keeps the log in a file.
 //!
+//! Gates decide whether a tool call may run. Plugins register them in the
+//! [`Gates`](corduroy_core::Gates) registry; a call a gate denies goes back to the model as
+//! an error, and a call a gate asks about makes the run wait, durably, until
+//! [`Harness::answer`] is called.
+//!
 //! oi-kit supplies the provider, message and conversation types and the state machine that
 //! runs the loop; this crate re-exports them as [`oi_kit_agent`] and [`oi_kit_provider_types`].
 //!
@@ -46,6 +51,7 @@
 //!         description: "Upper-case the input.".into(),
 //!         input_schema: r#"{"type":"object"}"#.into(),
 //!         replay_safe: true,
+//!         read_only: false,
 //!     };
 //!     let tools = ctx.service::<Tools>(TOOLS)?;
 //!     tools.register(ctx, "shout", Arc::new(tool_fn(spec, |input| Ok(input.to_uppercase()))))?;
@@ -64,14 +70,20 @@
     reason = "the wasmtime and oi-kit dependency trees each pull several versions of shared crates"
 )]
 
+pub mod gates;
 pub mod harness;
+pub mod provider;
 pub mod scripted;
 pub mod session;
 pub mod tools;
 
 pub use corduroy_core as core;
 pub use corduroy_jsonl as jsonl;
+pub use corduroy_shell as shell;
+pub use corduroy_shell::shell_kernel;
 pub use corduroy_wasm as wasm;
-pub use harness::{Harness, HarnessError, Outcome, Status, shell_kernel};
-pub use session::{Effect, Journal, MAIN, Session, SessionInfo, Sessions};
+pub use gates::GateOperation;
+pub use harness::{Harness, HarnessError, Outcome, Status};
+pub use provider::{DEFAULT_PROVIDER, PROVIDERS, ProviderPlugin, Providers, provider};
+pub use session::{Answer, Ask, Effect, Journal, MAIN, Session, SessionInfo, Sessions};
 pub use {oi_kit_agent, oi_kit_provider_types};

@@ -1,14 +1,17 @@
 //! A WebAssembly component as a [`Plugin`].
 
+use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use corduroy_core::{
-    Context, Event, Grants, KERNELS, Kernels, PROMPTS, Plugin, PluginError, PromptPart, Prompts,
-    Scope, Source, TOOLS, Tool, ToolError, ToolSpec, Tools,
+    CallError, Context, ContextError, Draft, Event, EventStream, GATES, Gate, Gates, Grants, HTTP,
+    HttpClients, KERNELS, Kernels, MODELS, Models, PLUGIN_LOAD, POINTS, PROMPTS, Pattern, Plugin,
+    PluginError, PromptPart, Prompts, SECRETS, SERVICES, Scope, Secrets, Service, Services, Source,
+    TOOL_CALL, TOOLS, Tool, ToolError, ToolSpec, Tools, Verdict,
 };
+use serde_json::Value;
 use wasmtime::component::{Component, HasSelf, Linker};
-use wasmtime::{Store, StoreLimitsBuilder};
 
 use crate::runtime::{WasmError, WasmRuntime};
 
@@ -17,15 +20,37 @@ mod host;
 mod instance;
 mod paths;
 
-use bindings::corduroy::plugin::{events, fs_read, fs_write, kernel, types};
-use host::HostState;
-use instance::Instance;
+use bindings::corduroy::plugin::{
+    clock, events, fs_read, fs_write, http, kernel, llm, log, log_read, plugins, random, secret,
+    service, state, tools, types,
+};
+use host::{HostState, Lent, Loader};
+use instance::{Blueprint, Instance};
 
 /// The package every host interface belongs to.
 const PACKAGE: &str = "corduroy:plugin/";
 
 /// The host interfaces that are capabilities, by the name they are granted under.
-const CAPABILITIES: [&str; 4] = ["fs-read", "fs-write", "kernel", "events"];
+const CAPABILITIES: [&str; 15] = [
+    "fs-read", "fs-write", "kernel", "events", "log", "clock", "random", "tools", "state",
+    "service", "plugins", "llm", "secret", "http", "log-read",
+];
+
+/// The capabilities whose host functions reach a registry the host provides, and its name.
+const LENT: [(&str, &str); 4] = [
+    ("kernel", KERNELS),
+    ("llm", MODELS),
+    ("secret", SECRETS),
+    ("http", HTTP),
+];
+
+/// The event recording that a plugin was not called for an event too far down a chain of
+/// causes.
+const CASCADE: &str = "plugin/cascade";
+
+/// For each decision point, the capability whose use is decided there. A plugin may not gate
+/// a point and hold its capability: it would be asked about its own calls while making them.
+const DECIDED_BY: [(&str, &str); 2] = [(TOOL_CALL, "tools"), (PLUGIN_LOAD, "plugins")];
 
 /// A plugin implemented as a WebAssembly component.
 ///
@@ -39,6 +64,8 @@ pub struct WasmPlugin {
     requires: Vec<String>,
     grants: Grants,
     config: String,
+    /// The SHA-256 of the component's bytes, in hex.
+    hash: String,
 }
 
 impl fmt::Debug for WasmPlugin {
@@ -56,6 +83,7 @@ impl WasmPlugin {
         runtime: WasmRuntime,
         name: String,
         component: Component,
+        hash: String,
     ) -> Result<Self, WasmError> {
         let mut requires = Vec::new();
         for (import, _) in component.component_type().imports(runtime.engine()) {
@@ -78,6 +106,7 @@ impl WasmPlugin {
             requires,
             grants: Grants::none(),
             config: "{}".to_owned(),
+            hash,
         })
     }
 
@@ -109,6 +138,13 @@ impl WasmPlugin {
         self
     }
 
+    /// The SHA-256 of the component's bytes, in lowercase hex: what a gate deciding whether to
+    /// load it is shown, and what the compiled code is cached under.
+    #[must_use]
+    pub fn hash(&self) -> &str {
+        &self.hash
+    }
+
     /// The capabilities this plugin imports, and so must be granted before it can start.
     #[must_use]
     pub fn requires(&self) -> &[String] {
@@ -126,11 +162,40 @@ impl WasmPlugin {
                 "fs-write" => fs_write::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state),
                 "kernel" => kernel::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state),
                 "events" => events::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state),
+                "log" => log::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state),
+                "clock" => clock::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state),
+                "random" => random::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state),
+                "tools" => tools::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state),
+                "state" => state::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state),
+                "service" => service::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state),
+                "plugins" => plugins::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state),
+                "llm" => llm::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state),
+                "secret" => secret::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state),
+                "http" => http::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state),
+                "log-read" => log_read::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state),
                 _ => Ok(()),
             }
             .map_err(|error| link_error(&error))?;
         }
         Ok(linker)
+    }
+
+    /// Whether the component imports `capability`.
+    fn imports(&self, capability: &str) -> bool {
+        self.requires.iter().any(|required| required == capability)
+    }
+
+    /// What `get` returns, if this plugin imports `capability`.
+    fn lends<T>(
+        &self,
+        capability: &str,
+        get: impl FnOnce() -> Result<Arc<T>, ContextError>,
+    ) -> Result<Option<Arc<T>>, PluginError> {
+        if self.imports(capability) {
+            Ok(Some(get()?))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Instantiate the component with exactly the granted interfaces linked.
@@ -149,44 +214,41 @@ impl WasmPlugin {
             )));
         }
 
-        let engine = self.runtime.engine();
-        let linker = self.linker()?;
-
-        let limits = self.runtime.limits();
-        let kernels = if self
-            .requires
-            .iter()
-            .any(|capability| capability == "kernel")
-        {
-            Some(ctx.service::<Kernels>(KERNELS)?)
-        } else {
-            None
-        };
-        let mut store = Store::new(
-            engine,
-            HostState {
-                plugin: self.name.clone(),
-                grants: self.grants.clone(),
-                root: self.runtime.root().to_owned(),
-                kernels,
-                outbox: Vec::new(),
-                limits: StoreLimitsBuilder::new()
-                    .memory_size(limits.memory_bytes)
-                    .build(),
+        let lent = Lent {
+            kernels: self.lends("kernel", || ctx.service::<Kernels>(KERNELS))?,
+            tools: self.lends("tools", || ctx.service::<Tools>(TOOLS))?,
+            gates: if self.imports("tools") || self.imports("plugins") {
+                Some(ctx.service::<Gates>(GATES)?)
+            } else {
+                None
             },
-        );
-        store.limiter(|state| &mut state.limits);
-        store
-            .set_fuel(limits.fuel_per_call)
-            .map_err(|error| link_error(&error))?;
-        let exports = bindings::Plugin::instantiate(&mut store, &self.component, &linker)
-            .map_err(|error| link_error(&error))?;
-        Ok(Instance::new(
-            store,
-            exports,
-            ctx.events(),
-            limits.fuel_per_call,
-        ))
+            services: self.lends("service", || ctx.service::<Services>(SERVICES))?,
+            models: self.lends("llm", || ctx.service::<Models>(MODELS))?,
+            secrets: self.lends("secret", || ctx.service::<Secrets>(SECRETS))?,
+            http: self.lends("http", || ctx.service::<HttpClients>(HTTP))?,
+            events: self.imports("log-read").then(|| ctx.events()),
+            state: Arc::new(Mutex::new(stored_state(&ctx.events(), &self.name))),
+            loader: self.imports("plugins").then(|| Loader {
+                runtime: self.runtime.clone(),
+                requests: ctx.requests(),
+                fiber: ctx.fiber(),
+                children: Arc::default(),
+            }),
+        };
+        let blueprint = Blueprint {
+            name: self.name.clone(),
+            engine: self.runtime.engine().clone(),
+            component: self.component.clone(),
+            linker: self.linker()?,
+            grants: self.grants.clone(),
+            root: self.runtime.root().to_owned(),
+            protected: self.runtime.protected().to_vec(),
+            lent,
+            limits: self.runtime.limits(),
+            config: self.config.clone(),
+        };
+        let inner = blueprint.instantiate().map_err(PluginError::new)?;
+        Ok(Instance::new(blueprint, inner, ctx.events()))
     }
 }
 
@@ -196,13 +258,19 @@ impl Plugin for WasmPlugin {
     }
 
     fn inject(&self) -> Vec<String> {
-        let mut services = vec![TOOLS.to_owned(), PROMPTS.to_owned()];
-        if self
-            .requires
-            .iter()
-            .any(|capability| capability == "kernel")
-        {
-            services.push(KERNELS.to_owned());
+        // What a plugin contributes is known only once it is running, so every registry it
+        // might contribute to is a dependency.
+        let mut services = vec![
+            TOOLS.to_owned(),
+            PROMPTS.to_owned(),
+            GATES.to_owned(),
+            SERVICES.to_owned(),
+        ];
+        // And so is each registry a capability it imports reaches.
+        for (capability, service) in LENT {
+            if self.imports(capability) {
+                services.push(service.to_owned());
+            }
         }
         services
     }
@@ -226,6 +294,7 @@ impl Plugin for WasmPlugin {
                     description: spec.description,
                     input_schema: spec.input_schema,
                     replay_safe: spec.replay_safe,
+                    read_only: spec.read_only,
                 },
             };
             tools.register(ctx, name, Arc::new(tool))?;
@@ -241,8 +310,89 @@ impl Plugin for WasmPlugin {
             let part: Arc<dyn PromptPart> = Arc::new(WasmPrompt(Arc::clone(&instance)));
             prompts.register(ctx, self.name.clone(), part)?;
         }
+
+        self.register_gate(ctx, &instance, info.gates)?;
+
+        let services = ctx.service::<Services>(SERVICES)?;
+        for name in info.provides {
+            let provider: Arc<dyn Service> = Arc::new(WasmService {
+                instance: Arc::clone(&instance),
+                name: name.clone(),
+            });
+            services.register(ctx, name, provider)?;
+        }
         Ok(())
     }
+}
+
+impl WasmPlugin {
+    /// Register the plugin as a gate at `points`, if it named any.
+    fn register_gate(
+        &self,
+        ctx: &mut Context<'_>,
+        instance: &Arc<Instance>,
+        points: Vec<String>,
+    ) -> Result<(), PluginError> {
+        if points.is_empty() {
+            return Ok(());
+        }
+        if let Some(unknown) = points
+            .iter()
+            .find(|point| !POINTS.contains(&point.as_str()))
+        {
+            return Err(PluginError::new(format!(
+                "plugin `{}` wants to gate `{unknown}`, which is not a decision point; \
+                 the points are: {}",
+                self.name,
+                POINTS.join(", ")
+            )));
+        }
+        // A plugin's own tool calls and loads pass the gates, so it would be asked about them
+        // while it runs. Gating a kind of call and making it are kept apart.
+        for (point, capability) in DECIDED_BY {
+            if points.iter().any(|gated| gated == point) && self.imports(capability) {
+                return Err(PluginError::new(format!(
+                    "plugin `{}` gates `{point}` and imports `{capability}`: a plugin may \
+                     decide such calls or make them, not both",
+                    self.name
+                )));
+            }
+        }
+        let gates = ctx.service::<Gates>(GATES)?;
+        let gate: Arc<dyn Gate> = Arc::new(WasmGate {
+            instance: Arc::clone(instance),
+            points,
+        });
+        gates.register(ctx, self.name.clone(), gate)?;
+        Ok(())
+    }
+}
+
+/// The `state` store of the plugin `name`, as its `state/set` and `state/remove` events on
+/// `events` leave it.
+fn stored_state(events: &EventStream, name: &str) -> BTreeMap<String, String> {
+    let source = Source::Plugin(name.to_owned());
+    let mut store = BTreeMap::new();
+    for event in events.matching(&Pattern::new("state/*")) {
+        if event.source != source {
+            continue;
+        }
+        let Ok(payload) = serde_json::from_str::<Value>(&event.payload) else {
+            continue;
+        };
+        let Some(key) = payload.get("key").and_then(Value::as_str) else {
+            continue;
+        };
+        match (
+            event.topic.as_str(),
+            payload.get("value").and_then(Value::as_str),
+        ) {
+            ("state/set", Some(value)) => store.insert(key.to_owned(), value.to_owned()),
+            ("state/remove", _) => store.remove(key),
+            _ => None,
+        };
+    }
+    store
 }
 
 /// The capability an import names, if it is one of the host's interfaces.
@@ -266,20 +416,30 @@ fn deliver(instance: &Instance, event: &Event) {
     if event.source == Source::Plugin(instance.name().to_owned()) {
         return;
     }
-    let event = types::Event {
-        id: event.id.get(),
-        session: event
-            .session
-            .as_ref()
-            .map(|session| session.as_str().to_owned()),
-        source: event.source.to_string(),
-        cause: event.cause.map(corduroy_core::EventId::get),
-        topic: event.topic.clone(),
-        payload: event.payload.clone(),
-    };
+    if instance.too_deep(event.id) {
+        // A cascade's own record is deeper still, so answering it with another would never
+        // end for a plugin that listens to it.
+        if event.topic == CASCADE {
+            return;
+        }
+        let payload = format!(
+            "{{\"plugin\":{},\"event\":{}}}",
+            corduroy_core::json::string(instance.name()),
+            event.id.get()
+        );
+        let stopped = Draft::new(Source::Host, CASCADE)
+            .cause(event.id)
+            .payload(payload);
+        drop(instance.events().emit(stopped));
+        return;
+    }
+    let cause = event.id;
+    let event = host::event_of(event);
     // A trap is already on the event stream as `plugin/trapped`; a listener has nobody to
     // return it to.
-    drop(instance.call(|plugin, store| plugin.call_on_event(store, &event)));
+    drop(instance.call_caused(Some(cause), |plugin, store| {
+        plugin.call_on_event(store, &event)
+    }));
 }
 
 struct WasmTool {
@@ -313,5 +473,56 @@ impl PromptPart for WasmPrompt {
             .call(|plugin, store| plugin.call_prompt_part(store))
             .ok()
             .flatten()
+    }
+}
+
+/// A plugin's `gate` export, asked only at the points the plugin listed.
+struct WasmGate {
+    instance: Arc<Instance>,
+    points: Vec<String>,
+}
+
+impl Gate for WasmGate {
+    fn check(&self, point: &str, request: &str) -> Option<Verdict> {
+        if !self.points.iter().any(|guarded| guarded == point) {
+            return None;
+        }
+        let verdict = self
+            .instance
+            .call(|plugin, store| plugin.call_gate(store, point, request));
+        // A gate that cannot answer fails closed: a policy that trapped is no reason to let
+        // through what it was there to stop.
+        Some(match verdict {
+            Ok(types::Verdict::Allow) => Verdict::Allow,
+            Ok(types::Verdict::Ask(reason)) => Verdict::Ask(reason),
+            Ok(types::Verdict::Deny(reason)) => Verdict::Deny(reason),
+            Err(trapped) => Verdict::Deny(trapped),
+        })
+    }
+}
+
+/// A service the plugin provides, answered by its `handle-call` export.
+struct WasmService {
+    instance: Arc<Instance>,
+    name: String,
+}
+
+impl Service for WasmService {
+    fn call(&self, caller: &str, method: &str, payload: &str) -> Result<String, CallError> {
+        let call = types::ServiceCall {
+            caller: caller.to_owned(),
+            service: self.name.clone(),
+            method: method.to_owned(),
+            payload: payload.to_owned(),
+        };
+        self.instance
+            .call(|plugin, store| plugin.call_handle_call(store, &call))
+            .map_err(CallError::Failed)?
+            .map_err(|error| match error {
+                types::CallError::Unknown(what) => CallError::Unknown(what),
+                types::CallError::InvalidInput(reason) => CallError::InvalidInput(reason),
+                types::CallError::Failed(reason) => CallError::Failed(reason),
+                types::CallError::Denied(reason) => CallError::Denied(reason),
+            })
     }
 }

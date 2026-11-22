@@ -3,15 +3,15 @@
 //! A plugin is a WebAssembly component built against the `corduroy:plugin/plugin` world in
 //! `wit/corduroy.wit`. Any language that compiles to a component can implement one. This crate
 //! turns such a component into a [`corduroy_core::Plugin`], so it joins the same context tree
-//! as native plugins: its tools, listeners and prompt part are effects that vanish when it is
-//! unloaded.
+//! as native plugins: its tools, listeners, prompt part and gate are effects that vanish when
+//! it is unloaded.
 //!
 //! # Capabilities
 //!
 //! A component can only reach the outside world through its imports, and it has no imports
 //! but the host interfaces of the plugin world. Each of those interfaces is one *capability*:
-//! `fs-read`, `fs-write`, `kernel`, `events`. There is no WASI, so there is no ambient
-//! authority to fall back on.
+//! `fs-read`, `fs-write`, `kernel`, `events`, `log`, `clock`, `random`, `tools`, `state`,
+//! `service`, `plugins`. There is no WASI, so there is no ambient authority to fall back on.
 //!
 //! * **At load time** the host links only the interfaces the plugin was granted. A component
 //!   that imports an interface it was not granted is never instantiated.
@@ -20,7 +20,8 @@
 //!   `denied` when it falls outside.
 //!
 //! Plugins are also metered: each call into a plugin gets a fuel budget and the plugin's
-//! memory is capped, see [`Limits`].
+//! memory is capped, see [`Limits`]. A call that traps (out of fuel, out of memory, a panic)
+//! kills the instance; the next call starts a new one, up to a limit of restarts.
 //!
 //! ```no_run
 //! use corduroy_core::{App, Scope};

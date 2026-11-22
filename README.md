@@ -37,6 +37,16 @@ Each tool call is logged when it starts and when it returns, so after a crash a 
 call's result is reused, a call that never started simply runs, and the one that was running
 is repeated only if its tool says that is safe; otherwise the model is told and decides.
 
+**Gates** decide whether a tool call may run. Any plugin can be one, WebAssembly included;
+the strictest answer wins, and an "ask" makes the run wait, across restarts, for a person:
+
+```rust
+harness.plugin(runtime.load("plugins/…/approval.wasm")?.config(r#"{"mode":"smart"}"#));
+if let Status::Waiting { asks } = harness.run("tidy the repo").await?.status {
+    harness.answer(&MAIN.into(), &asks[0].call, Answer::Allow).await?;   // run the write
+}
+```
+
 ## Where the ideas come from
 
 | From | Idea | Where it lives |
@@ -78,13 +88,16 @@ demo drive the loop with a scripted provider.
 
 | Path | Purpose |
 | --- | --- |
-| `crates/corduroy-core` | Dependency-free core: plugin contexts, capabilities, event stream with sessions and a `Log` trait, tool / prompt / kernel registries |
+| `crates/corduroy-core` | Dependency-free core: plugin contexts, capabilities, event stream with sessions and a `Log` trait, the registries plugins contribute to (tools, prompts, kernels, gates, services, models, secrets, HTTP clients) |
+| `crates/corduroy-shell` | A persistent POSIX shell as a kernel |
 | `crates/corduroy-jsonl` | A JSON Lines file as the durable log behind an event stream |
 | `crates/corduroy-wasm` | wasmtime host that loads components as capability-gated plugins |
-| `src/` | `corduroy-harness`: the agent loop assembled from oi-kit, journaled to the event stream one commit per step; sessions, and continuing an interrupted run |
+| `src/` | `corduroy-harness`: the agent loop assembled from oi-kit, journaled to the event stream one commit per step; sessions, continuing an interrupted run, waiting for a person, and the model as a service |
 | `wit/corduroy.wit` | The plugin world: host capabilities in, tools / event handlers / prompt text out |
 | `plugins/pi-tools` | read, write, edit, and bash on a persistent kernel |
 | `plugins/skills` | Agent-written `SKILL.md` files with a prompt index and a review nudge |
+| `plugins/approval` | A gate: permission modes with allow and deny lists |
+| `plugins/testbed` | For the host's own tests: exercises every host call |
 | `tests/`, `crates/*/tests/` | Integration tests through the public API |
 
 See [`CLAUDE.md`](CLAUDE.md) for contributor and agent guidelines.

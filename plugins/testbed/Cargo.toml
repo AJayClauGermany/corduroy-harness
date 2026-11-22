@@ -1,0 +1,19 @@
+[package]
+name = "testbed"
+description = "Exercises the host from inside a plugin, for the host's own tests: host calls, loads and traps."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+wit-bindgen = { workspace = true }
+serde_json = { workspace = true }

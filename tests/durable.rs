@@ -27,6 +27,7 @@ fn echo(ctx: &mut Context<'_>) -> Result<(), PluginError> {
         description: "Return the input.".into(),
         input_schema: r#"{"type":"object"}"#.into(),
         replay_safe: true,
+        read_only: true,
     };
     ctx.service::<Tools>(TOOLS)?.register(
         ctx,
@@ -43,7 +44,7 @@ fn harness(
 ) -> Result<(Harness, Arc<ScriptedProvider>), HarnessError> {
     let model = Arc::new(ScriptedProvider::new(replies));
     let provider: Arc<ScriptedProvider> = Arc::clone(&model);
-    let mut harness = Harness::resume(provider, Arc::new(events))?;
+    let harness = Harness::resume(provider, Arc::new(events))?;
     harness.plugin(plugin_fn("echo", &[TOOLS], echo));
     Ok((harness, model))
 }
@@ -157,6 +158,7 @@ fn rocketry(launches: &Arc<AtomicUsize>, peeks: &Arc<AtomicUsize>) -> impl Plugi
                 description: String::new(),
                 input_schema: r#"{"type":"object"}"#.into(),
                 replay_safe,
+                read_only: replay_safe,
             };
             let calls = Arc::clone(calls);
             let tool = tool_fn(spec, move |_| {
@@ -187,7 +189,7 @@ async fn interrupted_run(request: Message, stored: usize) -> Vec<Event> {
         commits: Arc::new(AtomicUsize::new(0)),
     };
     let model = Arc::new(ScriptedProvider::new([request]));
-    let mut harness = Harness::resume(model, Arc::new(EventStream::new().with_log(log))).unwrap();
+    let harness = Harness::resume(model, Arc::new(EventStream::new().with_log(log))).unwrap();
     harness.plugin(rocketry(&Arc::default(), &Arc::default()));
     harness.run("launch it").await.unwrap_err();
     harness.events().events()
@@ -200,7 +202,7 @@ fn restarted(
 ) -> (Harness, Arc<AtomicUsize>, Arc<AtomicUsize>) {
     let (launches, peeks) = (Arc::default(), Arc::default());
     let model = Arc::new(ScriptedProvider::new(replies));
-    let mut harness = Harness::resume(model, Arc::new(EventStream::replay(events))).unwrap();
+    let harness = Harness::resume(model, Arc::new(EventStream::replay(events))).unwrap();
     harness.plugin(rocketry(&launches, &peeks));
     (harness, launches, peeks)
 }

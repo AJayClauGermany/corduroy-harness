@@ -464,6 +464,57 @@ impl EventStream {
         self.lock().log.clone()
     }
 
+    /// A copy of the event `id`, if the stream holds it.
+    #[must_use]
+    pub fn get(&self, id: EventId) -> Option<Event> {
+        let inner = self.lock();
+        inner
+            .log
+            .binary_search_by_key(&id, |event| event.id)
+            .ok()
+            .and_then(|position| inner.log.get(position).cloned())
+    }
+
+    /// How many causes lead up to the event `id`: zero for an event nothing caused. Stops
+    /// counting at `limit`, so a long chain costs no more than that.
+    #[must_use]
+    pub fn depth(&self, id: EventId, limit: usize) -> usize {
+        let inner = self.lock();
+        let mut depth = 0;
+        let mut current = id;
+        while depth < limit {
+            let cause = inner
+                .log
+                .binary_search_by_key(&current, |event| event.id)
+                .ok()
+                .and_then(|position| inner.log.get(position))
+                .and_then(|event| event.cause);
+            let Some(cause) = cause else {
+                break;
+            };
+            depth += 1;
+            current = cause;
+        }
+        drop(inner);
+        depth
+    }
+
+    /// A copy of the first `limit` events with an id above `after` for which `keep` holds,
+    /// oldest first.
+    #[must_use]
+    pub fn after(&self, after: EventId, limit: usize, keep: impl Fn(&Event) -> bool) -> Vec<Event> {
+        let inner = self.lock();
+        let start = inner.log.partition_point(|event| event.id <= after);
+        inner
+            .log
+            .iter()
+            .skip(start)
+            .filter(|event| keep(event))
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
     /// A copy of every event whose topic matches `topics`, oldest first.
     #[must_use]
     pub fn matching(&self, topics: &Pattern) -> Vec<Event> {
@@ -567,6 +618,26 @@ mod tests {
     }
 
     #[test]
+    fn events_are_found_by_id_and_their_causes_counted() {
+        let stream = EventStream::new();
+        let first = stream.emit(Draft::new(Source::Host, "a")).unwrap();
+        let second = stream
+            .emit(Draft::new(Source::Host, "b").cause(first))
+            .unwrap();
+        let third = stream
+            .emit(Draft::new(Source::Host, "c").cause(second))
+            .unwrap();
+
+        assert_eq!(
+            stream.get(second).map(|event| event.topic),
+            Some("b".to_owned())
+        );
+        assert_eq!(stream.depth(first, 10), 0);
+        assert_eq!(stream.depth(third, 10), 2);
+        assert_eq!(stream.depth(third, 1), 1);
+    }
+
+    #[test]
     fn replay_restores_the_log_and_continues_numbering() {
         let original = EventStream::new();
         original.emit(user("a")).unwrap();
@@ -579,6 +650,22 @@ mod tests {
         assert_eq!(restored.len(), 3);
         assert!(!restored.is_empty());
         assert_eq!(Source::Plugin("skills".into()).to_string(), "plugin:skills");
+    }
+
+    #[test]
+    fn events_after_an_id_are_read_in_pages() {
+        let stream = EventStream::new();
+        for topic in ["a", "b", "a", "a"] {
+            stream.emit(user(topic)).unwrap();
+        }
+        let topic_a = |event: &Event| event.topic == "a";
+
+        let first = stream.after(EventId::new(0), 2, topic_a);
+        let ids: Vec<u64> = first.iter().map(|event| event.id.get()).collect();
+        assert_eq!(ids, [1, 3]);
+        let rest = stream.after(EventId::new(3), 10, topic_a);
+        assert_eq!(rest.len(), 1);
+        assert_eq!(rest[0].id.get(), 4);
     }
 
     /// A log that keeps its batches where the test can see them and can be told to fail.

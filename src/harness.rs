@@ -2,12 +2,12 @@
 
 use std::error::Error;
 use std::fmt;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use corduroy_core::{
-    App, ContextError, EventStream, FiberId, KERNELS, Kernel, Kernels, LogError, PROMPTS, Plugin,
-    Prompts, SessionId, ShellKernel, TOOLS, Tools, plugin_fn,
+    App, ContextError, EventStream, FiberId, GATES, Gates, HTTP, HttpClients, KERNELS, Kernels,
+    LogError, MODELS, Models, PROMPTS, Plugin, Prompts, SECRETS, SERVICES, Secrets, Services,
+    SessionId, TOOLS, Tools,
 };
 use oi_kit_agent::inference::InferenceRunner;
 use oi_kit_agent::machine::{StateMachine, Step};
@@ -23,7 +23,11 @@ use rmcp::model::{CallToolResult, ContentBlock};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::session::{Effect, Journal, MAIN, Progress, Session, SessionInfo, Sessions};
+use crate::gates::{GateOperation, SettleOperation};
+use crate::provider::{DEFAULT_PROVIDER, PROVIDERS, Providers, Routed};
+use crate::session::{
+    Answer, Ask, Effect, Journal, MAIN, Progress, Session, SessionInfo, Sessions,
+};
 use crate::tools::{PluginTools, PromptOperation};
 
 /// Why the harness could not be set up or a run could not complete.
@@ -42,6 +46,16 @@ pub enum HarnessError {
     /// The session has a run that never reached its end, so it cannot take a new prompt.
     /// [`Harness::continue_run`] finishes it.
     Unfinished(SessionId),
+    /// The session's run is waiting for answers to gates that asked about its tool calls, so
+    /// it cannot take a new prompt. [`Harness::answer`] gives them.
+    Waiting(SessionId),
+    /// No gate of this session is waiting for an answer about this tool call.
+    NotAsked {
+        /// The session.
+        session: SessionId,
+        /// The tool call that was answered.
+        call: String,
+    },
 }
 
 impl fmt::Display for HarnessError {
@@ -55,6 +69,16 @@ impl fmt::Display for HarnessError {
             Self::Unfinished(id) => {
                 write!(f, "session `{id}` has an unfinished run: continue it first")
             }
+            Self::Waiting(id) => {
+                write!(
+                    f,
+                    "session `{id}` is waiting for an answer: answer it first"
+                )
+            }
+            Self::NotAsked { session, call } => write!(
+                f,
+                "nothing in session `{session}` is waiting for an answer about `{call}`"
+            ),
         }
     }
 }
@@ -101,6 +125,12 @@ pub enum Status {
     /// The loop stopped with nothing left to do but no answer, for example because an
     /// operation is waiting on the user.
     Yielded,
+    /// Gates asked about tool calls the model wants to make, and the run waits for a
+    /// person's answer to each through [`Harness::answer`]. It survives a restart.
+    Waiting {
+        /// The calls waiting for an answer.
+        asks: Vec<Ask>,
+    },
 }
 
 impl fmt::Display for Status {
@@ -110,6 +140,7 @@ impl fmt::Display for Status {
             Self::TurnLimitReached => f.write_str("stopped: turn limit reached"),
             Self::Failed { reason } => write!(f, "failed: {reason}"),
             Self::Yielded => f.write_str("yielded"),
+            Self::Waiting { asks } => write!(f, "waiting for {} answer(s)", asks.len()),
         }
     }
 }
@@ -128,17 +159,27 @@ pub struct Outcome {
 /// A harness holds any number of sessions, each a conversation of its own on the one stream.
 /// It starts with the session [`MAIN`], which [`run`](Self::run) uses.
 ///
-/// The harness itself does very little. It provides the three registries plugins contribute
-/// to ([`Tools`], [`Prompts`], [`Kernels`]), journals the conversation to the event stream,
-/// and lines up oi-kit operations into a loop. Tools, prompt text, kernels and reactions to
+/// The harness itself does very little. It provides the registries plugins contribute to
+/// ([`Tools`], [`Prompts`], [`Kernels`], [`Gates`], [`Services`], [`Providers`], [`Models`],
+/// [`Secrets`], [`HttpClients`]), journals the conversation to the event stream, and lines up
+/// oi-kit operations into a loop. The model, tools, prompt text, kernels and reactions to
 /// events all come from plugins.
 pub struct Harness {
-    app: App,
+    /// Shared with the step that applies changes plugins asked for while the loop runs.
+    app: Arc<Mutex<App>>,
+    events: Arc<EventStream>,
     tools: Arc<Tools>,
     prompts: Arc<Prompts>,
     kernels: Arc<Kernels>,
+    gates: Arc<Gates>,
+    services: Arc<Services>,
+    providers: Arc<Providers>,
+    models: Arc<Models>,
+    secrets: Arc<Secrets>,
+    http: Arc<HttpClients>,
     sessions: Arc<Sessions>,
-    provider: Arc<dyn Provider>,
+    /// The name of the provider the loop asks, looked up in `providers` on every request.
+    provider: String,
     model: ModelConfig,
     system: String,
     max_turns: u32,
@@ -151,6 +192,7 @@ impl fmt::Debug for Harness {
         f.debug_struct("Harness")
             .field("app", &self.app)
             .field("tools", &self.tools)
+            .field("provider", &self.provider)
             .field("model", &self.model.model_name)
             .field("max_turns", &self.max_turns)
             .finish_non_exhaustive()
@@ -158,7 +200,7 @@ impl fmt::Debug for Harness {
 }
 
 impl Harness {
-    /// A harness around `provider` with no plugins and an empty event stream.
+    /// A harness around `provider` with an empty event stream. See [`resume`](Self::resume).
     ///
     /// # Errors
     ///
@@ -172,6 +214,11 @@ impl Harness {
     /// stream holds, and each conversation is whatever that session's `message` events add
     /// up to.
     ///
+    /// `provider` is registered in [`Providers`] as [`DEFAULT_PROVIDER`], which the loop asks
+    /// unless [`with_provider`](Self::with_provider) names another. It belongs to the host
+    /// rather than to a plugin; to have plugins supply the model, start with
+    /// [`open`](Self::open) and load a [`provider`](crate::provider()) plugin.
+    ///
     /// # Errors
     ///
     /// Returns [`HarnessError::Log`] if the stream cannot store the start of the main
@@ -180,27 +227,70 @@ impl Harness {
         provider: Arc<dyn Provider>,
         events: Arc<EventStream>,
     ) -> Result<Self, HarnessError> {
+        let harness = Self::open(events)?;
+        harness
+            .providers
+            .insert(DEFAULT_PROVIDER, provider)
+            .map_err(|duplicate| HarnessError::Run(duplicate.to_string()))?;
+        Ok(harness)
+    }
+
+    /// A harness over `events` with no plugins at all, not even a provider: the model comes
+    /// from a plugin registered in [`Providers`], such as [`provider`](crate::provider()).
+    /// Until one is there, every model request fails and the run ends as [`Status::Failed`].
+    ///
+    /// # Errors
+    ///
+    /// As [`resume`](Self::resume).
+    pub fn open(events: Arc<EventStream>) -> Result<Self, HarnessError> {
         let sessions = Arc::new(Sessions::load(Arc::clone(&events))?);
         let tools = Arc::new(Tools::new());
         let prompts = Arc::new(Prompts::new());
         let kernels = Arc::new(Kernels::new());
-        let mut app = App::with_events(events);
+        let gates = Arc::new(Gates::new());
+        let services = Arc::new(Services::new());
+        let providers = Arc::new(Providers::new());
+        let models = Arc::new(Models::new());
+        let secrets = Arc::new(Secrets::new());
+        let http = Arc::new(HttpClients::new());
+        let mut app = App::with_events(Arc::clone(&events));
         app.provide(TOOLS, Arc::clone(&tools))?;
         app.provide(PROMPTS, Arc::clone(&prompts))?;
         app.provide(KERNELS, Arc::clone(&kernels))?;
+        app.provide(GATES, Arc::clone(&gates))?;
+        app.provide(SERVICES, Arc::clone(&services))?;
+        app.provide(PROVIDERS, Arc::clone(&providers))?;
+        app.provide(MODELS, Arc::clone(&models))?;
+        app.provide(SECRETS, Arc::clone(&secrets))?;
+        app.provide(HTTP, Arc::clone(&http))?;
         Ok(Self {
-            app,
+            app: Arc::new(Mutex::new(app)),
+            events,
             tools,
             prompts,
             kernels,
+            gates,
+            services,
+            providers,
+            models,
+            secrets,
+            http,
             sessions,
-            provider,
+            provider: DEFAULT_PROVIDER.to_owned(),
             model: ModelConfig::new("default"),
             system: String::new(),
             max_turns: 25,
             restart_limit: 5,
             operations: Vec::new(),
         })
+    }
+
+    /// Ask the provider registered as `name` in [`Providers`], rather than
+    /// [`DEFAULT_PROVIDER`].
+    #[must_use]
+    pub fn with_provider(mut self, name: impl Into<String>) -> Self {
+        self.provider = name.into();
+        self
     }
 
     /// Ask the provider for `model`.
@@ -243,19 +333,21 @@ impl Harness {
     }
 
     /// Load a plugin.
-    pub fn plugin(&mut self, plugin: impl Plugin + 'static) -> FiberId {
-        self.app.plugin(plugin)
+    pub fn plugin(&self, plugin: impl Plugin + 'static) -> FiberId {
+        self.app().plugin(plugin)
     }
 
-    /// The plugin tree, for unloading and reloading plugins.
-    pub const fn app(&mut self) -> &mut App {
-        &mut self.app
+    /// The plugin tree, for unloading and reloading plugins. Changes plugins ask for through
+    /// [`Requests`](corduroy_core::Requests) are applied before each step of the loop, and by
+    /// any change made here.
+    pub fn app(&self) -> MutexGuard<'_, App> {
+        self.app.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// The stream every event of this harness is recorded on.
     #[must_use]
     pub const fn events(&self) -> &Arc<EventStream> {
-        self.app.events()
+        &self.events
     }
 
     /// The tools plugins have registered.
@@ -268,6 +360,42 @@ impl Harness {
     #[must_use]
     pub const fn kernels(&self) -> &Arc<Kernels> {
         &self.kernels
+    }
+
+    /// The gates plugins have registered.
+    #[must_use]
+    pub const fn gates(&self) -> &Arc<Gates> {
+        &self.gates
+    }
+
+    /// The services plugins provide to each other.
+    #[must_use]
+    pub const fn services(&self) -> &Arc<Services> {
+        &self.services
+    }
+
+    /// The model providers plugins have registered. The loop asks one of them.
+    #[must_use]
+    pub const fn providers(&self) -> &Arc<Providers> {
+        &self.providers
+    }
+
+    /// The models plugins may ask for a completion of their own.
+    #[must_use]
+    pub const fn models(&self) -> &Arc<Models> {
+        &self.models
+    }
+
+    /// The secrets plugins may use without seeing.
+    #[must_use]
+    pub const fn secrets(&self) -> &Arc<Secrets> {
+        &self.secrets
+    }
+
+    /// The HTTP clients the `http` capability sends through, by URL scheme.
+    #[must_use]
+    pub const fn http(&self) -> &Arc<HttpClients> {
+        &self.http
     }
 
     /// Start a session called `id`, recording `parent` as the session it came from. The new
@@ -303,9 +431,9 @@ impl Harness {
         self.sessions.journal(session)
     }
 
-    /// The loop, as the ordered steps a [`StateMachine`] walks: custom operations, the
-    /// prompt, plugin tools, an answer for calls nobody handled, the turn limit and finally
-    /// the model.
+    /// The loop, as the ordered steps a [`StateMachine`] walks: applying the plugin changes
+    /// plugins asked for, custom operations, the prompt, the gates, plugin tools, an answer for
+    /// calls nobody handled, the turn limit and finally the model.
     #[must_use]
     pub fn steps(&self) -> Vec<Step<'static, Session, Effect>> {
         let tools = ToolOperation::new().with_provider(Arc::new(PluginTools::new(
@@ -313,14 +441,27 @@ impl Harness {
             Arc::clone(&self.sessions),
         )));
         let prompt = PromptOperation::new(self.system.clone(), Arc::clone(&self.prompts));
+        let routed = Routed {
+            providers: Arc::clone(&self.providers),
+            name: self.provider.clone(),
+        };
         let model: InferenceRunner<'static, Session, Effect> =
-            InferenceRunner::new(Arc::clone(&self.provider), self.model.clone());
+            InferenceRunner::new(Arc::new(routed), self.model.clone());
         let mut steps: Vec<Step<'static, Session, Effect>> = self
             .operations
             .iter()
             .map(|operation| Step::Operation(Arc::clone(operation)))
             .collect();
+        steps.insert(
+            0,
+            Step::Operation(Arc::new(SettleOperation(Arc::clone(&self.app)))),
+        );
         steps.push(Step::Operation(Arc::new(prompt)));
+        steps.push(Step::Operation(Arc::new(GateOperation::new(
+            Arc::clone(&self.gates),
+            Arc::clone(&self.tools),
+            Arc::clone(&self.sessions),
+        ))));
         steps.push(Step::Operation(Arc::new(tools)));
         steps.push(Step::Operation(
             Arc::new(UnhandledToolCallsOperation::new()),
@@ -358,12 +499,16 @@ impl Harness {
     /// # Errors
     ///
     /// Returns [`HarnessError::UnknownSession`] if there is no such session,
-    /// [`HarnessError::Unfinished`] if its last run never reached its end,
+    /// [`HarnessError::Waiting`] if its last run waits for an answer,
+    /// [`HarnessError::Unfinished`] if its last run never reached its end otherwise,
     /// [`HarnessError::Run`] if an operation fails outright, for example because two plugins
     /// registered tools the model cannot tell apart, or [`HarnessError::Log`] if the event
     /// log could not store a step.
     pub async fn run_in(&self, session: &SessionId, prompt: &str) -> Result<Outcome, HarnessError> {
         let journal = self.journal(session)?;
+        if !journal.waiting().is_empty() {
+            return Err(HarnessError::Waiting(session.clone()));
+        }
         if journal.unfinished() {
             return Err(HarnessError::Unfinished(session.clone()));
         }
@@ -392,13 +537,16 @@ impl Harness {
     /// Each call counts as a restart of the run. Past the
     /// [restart limit](Self::with_restart_limit) the run ends as [`Status::Failed`].
     ///
+    /// A run that is waiting for an answer is not picked up, nor counted: the outcome is
+    /// [`Status::Waiting`] until [`answer`](Self::answer) is called.
+    ///
     /// # Errors
     ///
     /// As [`run_in`](Self::run_in), except that an unfinished run is what this is for.
     pub async fn continue_run(&self, session: &SessionId) -> Result<Outcome, HarnessError> {
         let journal = self.journal(session)?;
-        if !journal.unfinished() {
-            return Ok(outcome_of(journal.session()));
+        if !journal.unfinished() || !journal.waiting().is_empty() {
+            return Ok(outcome_of(&journal));
         }
         let attempt = journal.restart()?;
         if attempt > self.restart_limit {
@@ -411,7 +559,7 @@ impl Harness {
                 .with_generated_id_if_missing();
             journal.record(&failure)?;
             journal.end_turn()?;
-            return Ok(outcome_of(journal.session()));
+            return Ok(outcome_of(&journal));
         }
         if let Some(settled) = self.settled(&journal) {
             journal.record(&settled)?;
@@ -451,32 +599,70 @@ impl Harness {
         (!results.content.is_empty()).then(|| results.with_generated_id_if_missing())
     }
 
+    /// Answer the gate that asked about the tool call `call` in `session`. Once every call
+    /// the run waits for is answered, the run goes on: allowed calls run, declined ones go
+    /// back to the model as errors carrying the reason, and the loop continues until the run
+    /// ends or waits again.
+    ///
+    /// The answer is stored before anything else happens, so a crash after it loses
+    /// nothing: [`continue_run`](Self::continue_run) takes the run on from there.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HarnessError::NotAsked`] if no gate of the session waits for an answer about
+    /// `call`, and otherwise as [`run_in`](Self::run_in).
+    pub async fn answer(
+        &self,
+        session: &SessionId,
+        call: &str,
+        answer: Answer,
+    ) -> Result<Outcome, HarnessError> {
+        let journal = self.journal(session)?;
+        if !journal.answer(call, &answer)? {
+            return Err(HarnessError::NotAsked {
+                session: session.clone(),
+                call: call.to_owned(),
+            });
+        }
+        if !journal.waiting().is_empty() {
+            return Ok(outcome_of(&journal));
+        }
+        self.drive(&journal).await
+    }
+
     fn replay_safe(&self, tool: &str) -> bool {
         self.tools
             .get(tool)
             .is_some_and(|tool| tool.spec().replay_safe)
     }
 
-    /// Run the loop over `journal`'s session until it stops, and mark the end of the turn.
+    /// Run the loop over `journal`'s session until it stops, and mark the end of the turn
+    /// unless the run is waiting for an answer.
     async fn drive(&self, journal: &Journal) -> Result<Outcome, HarnessError> {
         let cancel = CancellationToken::new();
         let machine = self.machine(cancel.clone());
         // Streaming updates have no audience here; the event stream is the record.
         let (updates, _unwatched) = mpsc::unbounded_channel();
         let emitter = Emitter::new(updates, cancel);
-        let session = machine
+        machine
             .run(journal, journal.id().as_str(), &emitter)
             .await?;
-        journal.end_turn()?;
-        Ok(outcome_of(session))
+        if journal.waiting().is_empty() {
+            journal.end_turn()?;
+        }
+        Ok(outcome_of(journal))
     }
 }
 
-fn outcome_of(session: Session) -> Outcome {
-    Outcome {
-        status: status_of(&session),
-        session,
-    }
+fn outcome_of(journal: &Journal) -> Outcome {
+    let session = journal.session();
+    let asks = journal.waiting();
+    let status = if asks.is_empty() {
+        status_of(&session)
+    } else {
+        Status::Waiting { asks }
+    };
+    Outcome { status, session }
 }
 
 fn status_of(session: &Session) -> Status {
@@ -497,19 +683,4 @@ fn status_of(session: &Session) -> Status {
         },
         None => Status::Yielded,
     }
-}
-
-/// A plugin that provides a persistent shell as the kernel `name`, working in `dir`.
-///
-/// Unloading the plugin stops the shell and removes the kernel.
-pub fn shell_kernel(name: impl Into<String>, dir: impl Into<PathBuf>) -> impl Plugin + 'static {
-    let name = name.into();
-    let dir = dir.into();
-    plugin_fn(format!("kernel-{name}"), &[KERNELS], move |ctx| {
-        let kernels = ctx.service::<Kernels>(KERNELS)?;
-        let kernel: Arc<Mutex<dyn Kernel>> =
-            Arc::new(Mutex::new(ShellKernel::new().in_dir(dir.clone())));
-        kernels.register(ctx, name.clone(), kernel)?;
-        Ok(())
-    })
 }
