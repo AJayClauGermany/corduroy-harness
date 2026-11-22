@@ -17,3 +17,11 @@ if [ ! -d sdk/js/node_modules ]; then
 fi
 node sdk/js/bin/corduroy-js.js build examples/notes-js/plugin.js \
   --out "$out/notes_js.wasm" --capabilities state,log,clock,random
+
+step "Python SDK"
+if [ ! -x sdk/python/.venv/bin/corduroy-py ]; then
+  python3 -m venv sdk/python/.venv
+  sdk/python/.venv/bin/pip install --quiet -e sdk/python
+fi
+sdk/python/.venv/bin/corduroy-py build examples/notes-py/notes.py \
+  --out "$out/notes_py.wasm" --capabilities state,log,clock,random

@@ -156,17 +156,27 @@ notes_plugin_works!(
     a_javascript_plugin_built_with_the_sdk_works_in_the_host,
     "notes_js"
 );
+notes_plugin_works!(
+    a_python_plugin_built_with_the_sdk_works_in_the_host,
+    "notes_py"
+);
 
 /// A plugin is instantiated only with every capability its world imports, and the world is
 /// what the SDK generated from the capability list: nothing more.
 #[test]
-fn a_javascript_plugin_imports_only_the_capabilities_it_was_built_with() {
-    let Some(component) = guest("notes_js") else {
-        return;
-    };
-    let plugin = WasmRuntime::cached(compile_cache())
-        .unwrap()
-        .load(component)
-        .unwrap();
-    assert_eq!(plugin.requires(), ["log", "clock", "random", "state"]);
+fn a_guest_plugin_imports_only_the_capabilities_it_was_built_with() {
+    for name in ["notes_js", "notes_py"] {
+        let Some(component) = guest(name) else {
+            continue;
+        };
+        let plugin = WasmRuntime::cached(compile_cache())
+            .unwrap()
+            .load(component)
+            .unwrap();
+        assert_eq!(
+            plugin.requires(),
+            ["log", "clock", "random", "state"],
+            "{name}"
+        );
+    }
 }

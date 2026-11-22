@@ -34,7 +34,11 @@ fn newest(dir: &Path) -> SystemTime {
     };
     entries
         .filter_map(Result::ok)
-        .filter(|entry| !NOT_SOURCES.iter().any(|name| entry.file_name() == *name))
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            !NOT_SOURCES.contains(&name.as_ref()) && !name.ends_with(".egg-info")
+        })
         .map(|entry| entry.path())
         .map(|path| {
             if path.is_dir() {
@@ -85,9 +89,11 @@ pub fn plugin(name: &str) -> PathBuf {
     artifact
 }
 
-/// Path to the built guest-language plugin `name` (`notes_js`, say), built by
-/// `scripts/guests.sh` from `examples/` with the SDKs in `sdk/`. `None` if it has not been
-/// built, so the test can skip.
+/// Path to the built guest-language plugin `name`, or `None` if it is not built, so the test
+/// can skip.
+///
+/// `scripts/guests.sh` builds `notes_js` from `examples/notes-js` with `sdk/js`, and
+/// `notes_py` from `examples/notes-py` with `sdk/python`.
 ///
 /// # Panics
 ///
@@ -104,11 +110,21 @@ pub fn guest(name: &str) -> Option<PathBuf> {
         );
         return None;
     };
-    let sources = ["sdk", "examples", "wit"]
-        .iter()
-        .map(|dir| newest(&root.join(dir)))
-        .max()
-        .unwrap_or(SystemTime::UNIX_EPOCH);
+    // `notes_js` is built from `examples/notes-js` with `sdk/js`.
+    let language = match name.rsplit_once('_') {
+        Some((_, "py")) => "python",
+        Some((_, language)) => language,
+        None => "",
+    };
+    let sources = [
+        root.join("wit"),
+        root.join("sdk").join(language),
+        root.join("examples").join(name.replace('_', "-")),
+    ]
+    .iter()
+    .map(|dir| newest(dir))
+    .max()
+    .unwrap_or(SystemTime::UNIX_EPOCH);
     assert!(
         built >= sources,
         "guest plugin `{name}` is older than its sources: run `scripts/guests.sh` again"

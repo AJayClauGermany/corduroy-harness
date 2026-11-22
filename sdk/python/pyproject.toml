@@ -1,0 +1,17 @@
+[project]
+name = "corduroy-plugin"
+version = "0.1.0"
+description = "Write corduroy plugins in Python: decorated functions in, a capability-gated WebAssembly component out."
+license = "BSL-1.0"
+requires-python = ">=3.11"
+dependencies = ["componentize-py==0.25.1"]
+
+[project.scripts]
+corduroy-py = "corduroy_plugin.build:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["corduroy_plugin"]
