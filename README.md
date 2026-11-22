@@ -185,14 +185,15 @@ in [`examples/local-model/`](examples/local-model/corduroy.toml) against Liquid 
 | Path | Purpose |
 | --- | --- |
 | `crates/corduroy-core` | Dependency-free core, `no_std` with an allocator (microcontrollers included; the default `std` feature adds what needs an OS): plugin contexts, capabilities, event stream with sessions and a `Log` trait, the registries plugins contribute to (tools, prompts, kernels, gates, services, models, secrets, HTTP clients) |
-| `crates/corduroy-cli` | The `corduroy` command: an agent file (providers, kernels, secrets, extensions, plugins and their grants) run in a terminal; a library, so a binary can add extension kinds |
+| `crates/corduroy-cli` | The `corduroy` command: an agent file (providers, kernels, secrets, extensions, plugins and their grants) run in a terminal; a library, so a binary can swap the standard extensions' parts or add extension kinds |
+| `crates/corduroy-std` | The standard extensions for macOS, Windows and Linux, as one `Standard` whose parts (kinds, kernels, the log store, add-ons) can each be swapped |
 | `crates/corduroy-mcp` | MCP servers (stdio, through a kernel, or streamable HTTP) as plugins |
 | `crates/corduroy-providers` | Model providers from `oi-kit-providers` (Anthropic, OpenAI, Ollama and the providers Goose knows), converted to the harness's own messages at the boundary |
 | `crates/corduroy-http` | The HTTP client behind the `http` capability, which never follows a redirect |
 | `crates/corduroy-shell` | A persistent POSIX shell as a kernel |
 | `crates/corduroy-jsonl` | A JSON Lines file as the durable log behind an event stream |
 | `crates/corduroy-wasm` | wasmtime host that loads components as capability-gated plugins |
-| `src/` | `corduroy-harness`: the agent loop, journaled to the event stream one commit per step; stopping a run; sessions, continuing an interrupted run, waiting for a person, and the model as a service |
+| `src/` | `corduroy-harness`: the agent loop (`no_std`, any executor; the loop itself swappable through the `Loops` registry), journaled to the event stream one commit per step; stopping a run; sessions, continuing an interrupted run, waiting for a person, and the model as a service |
 | `wit/corduroy.wit` | The plugin world: host capabilities in, tools / event handlers / prompt text out |
 | `sdk/js`, `sdk/python` | SDKs for plugins in JavaScript/TypeScript and Python, and the script host for automations written as scripts |
 | `examples/` | The same `notes` plugin in JavaScript and Python |

@@ -54,7 +54,7 @@ pub use places::{DATA_DIR, Places};
 /// Opens the event log kept at a path.
 type OpenLog = dyn Fn(&Path) -> Result<EventStream, String> + Send + Sync;
 
-/// The standard extensions, as parts that can each be swapped. See the [crate](crate).
+/// The standard extensions, as parts that can each be swapped. See the [crate documentation](crate).
 #[derive(Clone)]
 pub struct Standard {
     kinds: Extensions,

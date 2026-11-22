@@ -185,11 +185,12 @@ effects for the host to persist; inference is the last step. `oi-kit-provider-ty
 `Provider`, `Message` and `Conversation`, and `oi-kit-providers` the HTTP clients for
 Anthropic, OpenAI, Ollama and the providers Goose knows.
 
-**Here.** The idea, not the crate. `src/harness.rs` runs a loop of its own of the same shape:
-at each step the host's operations, the operations extensions registered (the `Operations`
-registry), compaction, the gates, the tools, waiting for a signal, the turn limit and the
-model are tried in order, and the first that does something is the step; its effects become
-one commit. `Operation` is a small trait of the harness's own (`Next`: pass, continue,
+**Here.** The idea, not the crate. The harness runs a loop of its own of the same shape, and
+the loop itself is a part that can be swapped (see [The loop](#the-loop)). The standard one
+(`StandardLoop`, `src/loops.rs`) tries at each step the host's operations, the operations
+extensions registered (the `Operations` registry), compaction, the gates, the tools, waiting
+for a signal, the turn limit and the model in order, and the first that does something is the
+step; its effects become one commit. `Operation` is a small trait of the harness's own (`Next`: pass, continue,
 stop), and `Harness::step` runs one step for a caller who wants to watch. The model is a
 service (`src/provider.rs`): the loop asks whichever `Provider` is registered under its
 provider name in the `Providers` registry, looked up on every request, so a `provider`
@@ -323,7 +324,7 @@ are trusted with, not by what they contribute. Underneath both is the core.
 
 | Tier | What it is | Gets in by | Trust |
 | --- | --- | --- | --- |
-| **Core** | `corduroy-core` (the plugin tree, capabilities, the event stream, the registries); the WIT world (`wit/corduroy.wit`) and the WebAssembly host that enforces it (`corduroy-wasm`); and the loop (`corduroy-harness`: `Harness`, `Journal`, the built-in steps, `PluginTools`, the `Providers` and `Operations` registries, the `sessions` service) | is always there, and cannot be unloaded | the trusted base; changes rarely, as the contract the other two are written against |
+| **Core** | `corduroy-core` (the plugin tree, capabilities, the event stream, the registries); the WIT world (`wit/corduroy.wit`) and the WebAssembly host that enforces it (`corduroy-wasm`); and the loop (`corduroy-harness`: `Harness`, `Journal`, the built-in steps, `PluginTools`, the `Providers`, `Operations` and `Loops` registries, the `sessions` service; the loop that takes the steps is itself registered, `StandardLoop` by default) | is always there, and cannot be unloaded; the WebAssembly host only in a build with add-ons | the trusted base; changes rarely, as the contract the other two are written against |
 | **Extension** | a native plugin: Rust compiled into the command | rebuilding the command with it; the agent file then turns it on | the host's authority |
 | **Add-on** | a WebAssembly plugin: a component built against the WIT world | a `.wasm` file, plugged in at start or while the agent runs; nothing is rebuilt but the add-on | none beyond its grants |
 
@@ -439,18 +440,59 @@ thread, the system clock, and kernels. Without `std`:
   the A extension, Xtensa; not Cortex-M0+ (RP2040) or the ESP32-C3. CI builds and lints the
   core for `thumbv7em-none-eabihf`.
 
-**The standard extensions** are what the shipped command carries over the core: the loop
-(`corduroy-harness`, on tokio), the WebAssembly host, the shell kernel, the JSON Lines log,
-the HTTP client, MCP and the providers. Each is chosen where the harness is put together.
-`corduroy-harness`'s features `wasm`, `shell` and `jsonl` are on by default; without them
-the harness carries no WebAssembly runtime, starts no shell and writes no file, and runs
-extensions only. A device swaps in its own: a log on flash, a kernel that is an embedded
-interpreter, an HTTP client over its network stack. Without `wasm` the core tier has no
-WebAssembly host, and the agent has no add-ons.
+**The loop** (`corduroy-harness`) is `no_std` too, with the same `std` and `critical-section`
+features, so a microcontroller runs `Harness`: sessions, the journal, operations, gates, tool
+calls, child sessions and the model, over the core. It is plain `async` and chooses no
+executor. A stop wakes a run waiting for the model through the waker it left, not through a
+runtime's notification, and `tests/executor.rs` drives a run, a tool call and a stop with a
+hand-written `block_on`. The `tokio` feature (on by default) only moves each tool call to
+tokio's blocking pool when the loop runs on a tokio runtime, so a long tool does not hold up
+the runtime's other tasks; anywhere else a tool runs where the loop runs, as it must on a
+device with one thread. Offering a provider's models to plugins (`ProviderPlugin::serving`)
+bridges a synchronous call to an asynchronous provider with a thread and a runtime, so it
+needs `tokio`. CI lints the loop for `thumbv7em-none-eabihf` as it does the core.
 
-*Planned.* The loop needs `std` and tokio, so a microcontroller can run the plugin tree, the
-registries, the gates and the event stream, but not yet `Harness`. A loop for one needs an
-executor it does not choose, and tool calls that do not run on a thread pool.
+**The standard extensions** (`corduroy-std`) are what the shipped command carries over the
+core and the loop, for an ordinary computer running macOS, Windows or Linux: tokio, the JSON
+Lines log, the shell kernel, the HTTP client, the providers, MCP and the WebAssembly host.
+`corduroy_std::Standard` is that set as one value whose parts can each be swapped: the
+extension kinds an agent file can ask for (a kernel entry is one: `[kernels.<name>]` with
+`kind = "shell"` builds the kind `shell-kernel`), the extensions every agent gets (the HTTP
+client), how the event log is kept, and whether add-ons are loaded at all. The `corduroy`
+command is put together from a `Standard` (`main_standard`), so a command for another kind
+of machine changes the parts that do not fit and keeps the rest; one for a device leaves
+`corduroy-std` out and brings its own over the same core and loop: a log on flash, a kernel
+that is an embedded interpreter, an HTTP client over its network stack. The harness's
+features `wasm`, `shell` and `jsonl` (on by default) are how a build leaves those parts out
+altogether; without `wasm` the core tier has no WebAssembly host, and the agent has no
+add-ons.
+
+*Planned.* A kernel for Windows without a POSIX shell (PowerShell): today the shell kernel
+needs one, such as the `bash` Git for Windows installs (`program = "bash"`). And CI on macOS
+and Windows, which only builds and tests on Linux so far.
+
+## The loop
+
+The loop is a part that can be swapped, as the model is. What one step of a run does is a
+`Loop` (`src/loops.rs`), registered by name in the `Loops` registry (the `loops` service) and
+looked up on every step, so a plugin can contribute one and unloading the plugin takes it
+away. `Harness::with_loop` names the loop a harness takes its steps with; the harness
+registers `StandardLoop`, the order described under [Goose](#goose-a-loop-of-steps-over-the-persisted-conversation),
+as `default`.
+
+The line between the harness and a loop is what must hold for every run, whichever loop takes
+it. The harness applies the changes plugins asked for before each step, ends a run asked to
+stop, keeps a run that waits for a person or a signal waiting in the log, runs the child
+sessions a run waits for, and records how the run ended; `continue_run`, `answer` and
+`signal` work the same for any loop. A loop decides what each step does, from the parts
+`Run` offers: the session, the standard operations and `operate`, `call_tools` (with each
+call's trail in the log), the standard `request` and `ask_model`. Everything those parts do is
+recorded, so a run any loop took reads back, resumes and stops the same way. A loop can wrap
+the standard one (to watch or adjust its steps) or order the parts differently: ask the model
+once without tools, plan before acting, review before answering.
+
+An `Operation` is still how one step is added to the standard loop; a `Loop` is how the order
+itself is replaced.
 
 ## What is stable
 
@@ -460,7 +502,7 @@ working. Everything else may move.
 | Contract | Where | Rule for change |
 | --- | --- | --- |
 | The plugin world | `wit/corduroy.wit` | Adding an import interface (a capability) breaks nobody: a plugin that does not import it is unaffected, and a host without it refuses, at load, a plugin that does. Changing an export, or a type a guest sees, changes the package version, and guests are rebuilt against it; so exports and shared types change only together, rarely, and never to add what an import could add. |
-| The core's traits and registries | `corduroy-core`, and the loop's own that extensions implement or register in: `Operation`, `Operations`, `Provider`, `Providers` (`corduroy-harness`) | New trait methods come with defaults (as `Kernel::spawn` did). Types that grow are `#[non_exhaustive]` with constructors (`ToolSpec`, tool results), so a new field breaks no extension. What the core offers without `std` only grows: something that needs an operating system is added behind `std`. |
+| The core's traits and registries | `corduroy-core`, and the loop's own that extensions implement or register in: `Operation`, `Operations`, `Loop`, `Loops`, `Provider`, `Providers` (`corduroy-harness`) | New trait methods come with defaults (as `Kernel::spawn` did). Types that grow are `#[non_exhaustive]` with constructors (`ToolSpec`, tool results), so a new field breaks no extension. What the core offers without `std` only grows: something that needs an operating system is added behind `std`. |
 | The log | `corduroy-jsonl`, the topic table in `src/session.rs` | The header's schema version changes when a line's shape does, and older versions stay readable. Events gain fields; they do not lose or repurpose them. Readers ignore topics and fields they do not know. |
 | The agent file | `crates/corduroy-cli` | Keys are added, not renamed; an unknown key is an error, so a typo is never a silently ignored grant. |
 
