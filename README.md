@@ -97,7 +97,8 @@ demo drive the loop with a scripted provider.
 | `plugins/pi-tools` | read, write, edit, and bash on a persistent kernel |
 | `plugins/skills` | Agent-written `SKILL.md` files with a prompt index and a review nudge |
 | `plugins/approval` | A gate: permission modes with allow and deny lists |
-| `plugins/testbed` | For the host's own tests: exercises every host call |
+| `plugins/testbed` | For the host's own tests: makes host calls, loads plugins, echoes events and traps on demand |
+| `crates/corduroy-test-support` | Test-only helpers: finds the built plugins, makes scratch directories |
 | `tests/`, `crates/*/tests/` | Integration tests through the public API |
 
 See [`CLAUDE.md`](CLAUDE.md) for contributor and agent guidelines.

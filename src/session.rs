@@ -14,7 +14,7 @@
 //! | `session/start` | `host` | `{"parent"}`, or `{}` for a session with no parent |
 //! | `message` | `user`, `agent` or `environment` | the oi-kit message, as JSON |
 //! | `tool/call` | `agent` | `{"id", "tool", "input"}`, caused by its `message` |
-//! | `gate/decision` | `host` | `{"point", "id", "tool", "verdict", "reason", "gate"}`, caused by its `tool/call`: what the gates said |
+//! | `gate/decision` | `host` | `{"point", "id", "tool", "verdict", "reason", "gate", "caller"}`, caused by its `tool/call`: what the gates said |
 //! | `gate/answer` | `user` | `{"id", "tool", "allow", "reason"}`, caused by its `tool/call`: a person's answer to a gate that asked |
 //! | `tool/start` | `host` | `{"id", "tool"}`, caused by its `tool/call`: the tool is about to run |
 //! | `tool/result` | `environment` | `{"id", "tool", "ok", "output"}`, caused by its `tool/call` |

@@ -21,7 +21,7 @@ them. Sections and table rows marked *planned* describe that target, not the cod
 
 ```
                  ┌───────────────────────── corduroy-harness (src/) ─────────────────────────┐
-                 │  Harness: oi-kit StateMachine over [ops, prompt, gates, tools, limit, LLM]  │
+                 │  Harness: oi-kit StateMachine over [settle, ops, prompt, gates, tools, …]   │
                  │  Journal: effects ──► events            PluginTools: registry ──► oi-kit   │
                  └───────────────┬───────────────────────────────────────┬───────────────────┘
                                  │                                       │
@@ -29,7 +29,8 @@ them. Sections and table rows marked *planned* describe that target, not the cod
         │ App / Context / Plugin   (fibers, effects)      │   │ WasmRuntime, WasmPlugin │
         │ Grants / Scope           (capabilities)         │◄──┤ linker = granted WIT    │
         │ EventStream, Log, SessionId (commits + pub/sub) │   │ interfaces only         │
-        │ Tools, Prompts, Kernels, Gates (registries)     │   └───────────┬─────────────┘
+        │ Tools, Prompts, Kernels, Gates, Services,       │   └───────────┬─────────────┘
+        │ Models, Secrets, HttpClients (registries)       │               │
         └─────────────────────────────────────────────────┘               │ wit/corduroy.wit
                                                               ┌───────────┴─────────────┐
                                                               │ plugins/: pi-tools,      │
@@ -118,7 +119,8 @@ among others rather than a built-in: the harness has no tools of its own.
 
 **Left out.** Fuzzy matching in `edit`, saving truncated `bash` output to a file, per-tool
 prompt snippets, and the session tree. Pi's gate-style hooks have an equivalent in
-`Harness::with_operation` (see `tests/agent_loop.rs`), but only for native code so far.
+[gates](#events-gates-and-hooks), which WebAssembly plugins can be, and in
+`Harness::with_operation` for native code.
 
 **Pi Durable.** `@earendil-works/pi-durable` (`packages/durable`, marked experimental) stores
 each step of a run so that the run survives a crash. It is a separate runtime with its own
@@ -163,9 +165,9 @@ there is no crate named just `oi-kit`. `oi-kit-provider-types` has `Provider`, `
 `Operation`s, each of which looks at the persisted conversation and either declines or returns
 effects for the host to persist; inference is the last step.
 
-**Here.** `src/harness.rs` uses those types directly. `Harness::steps` is the pipeline: custom
-operations, the prompt, the gates, plugin tools, an answer for calls nobody handled, the turn
-limit, and oi-kit's `InferenceRunner`. The model is a service (`src/provider.rs`): the loop
+**Here.** `src/harness.rs` uses those types directly. `Harness::steps` is the pipeline: applying the
+plugin changes plugins asked for, custom operations, the prompt, the gates, plugin tools, an
+answer for calls nobody handled, the turn limit, and oi-kit's `InferenceRunner`. The model is a service (`src/provider.rs`): the loop
 asks whichever `Provider` is registered under its provider name in the `Providers` registry,
 looked up on every request, so a `provider` plugin supplies it and swapping the plugin swaps
 the model. `Harness::machine` hands the state machine to
@@ -230,7 +232,10 @@ denied a capability its interpreter imports.
 - **Enforced twice.** At load time only granted interfaces are linked, so a plugin missing a
   grant is never instantiated. At call time every host function resolves its resource (paths
   are made absolute and symbolic links followed first) and checks it against the scope; a
-  refusal is returned to the plugin as `denied` and logged as `capability/denied`.
+  refusal is returned to the plugin as `denied` and logged as `capability/denied`. Calls
+  that list (`tools.list`, `state.keys`, `log-read`) leave out what the scope does not reach
+  instead of refusing, and `plugins.loaded` and `credential.name` only report what the plugin
+  already holds.
 - **Metered.** Each call into a plugin has a fuel budget and instance memory is capped.
 
 A new capability is a new WIT interface, a `Host` implementation, and an entry in
@@ -319,8 +324,8 @@ tool failure.
 
 **How `tool/call` is gated (built).** A loop step, `GateOperation`, sits between the prompt
 and the tools step. For each call of the model's message it asks the gates once, with
-`{"session", "id", "tool", "input", "read-only"}`, and stores the decision as `gate/decision`
-in that step's commit, so the decision is in the log before the tool can start. An allowed
+`{"session", "id", "tool", "input", "read-only", "caller"}` (`caller` is `agent`), and
+stores the decision as `gate/decision` in that step's commit, so the decision is in the log before the tool can start. An allowed
 call goes on to the tools step; a denied one is answered with an error result. A call a gate
 asked about makes the whole message wait: none of its calls runs, the run stops with
 `Status::Waiting` and no `turn/end`, and the session refuses a new prompt.
@@ -358,7 +363,7 @@ wins" lets a permissive plugin loaded early pre-empt a strict one.
 
 The oi-kit state machine already has the right shape: an operation reads the persisted
 conversation and returns effects for the host to persist. One step is therefore one commit.
-The first five points are built; the last two are *planned*.
+All but the last point are built; kernel state is *planned*.
 
 - **Commit, then deliver.** `Journal::apply_effects` turns a step's effects into one batch
   and hands it to `EventStream::commit`. The batch is written to the `Log`; only then is it
@@ -465,8 +470,9 @@ plugin as their source, committed when the plugin's own call returns. These call
 durable intent: they carry no session yet, and after a crash the plugin's own call is what
 is repeated or not.
 
-The built-in registries (`tools`, `prompts`, `kernels`, `gates`) are the cases where the loop
-itself is the consumer. A plugin that wants its own extension point (an MCP plugin accepting
+The built-in registries the loop itself consumes (`tools`, `prompts`, `gates`, `providers`)
+and those host functions consume (`kernels`, `models`, `secrets`, `http`) are the cases where
+the harness is the consumer. A plugin that wants its own extension point (an MCP plugin accepting
 server definitions, a skills plugin accepting skill sources) provides a service.
 
 ## Automations
@@ -498,10 +504,11 @@ What the core must guarantee, because the author is now the agent (built):
   call, because the loader's call cannot wait for a person; approving a load waits on the
   general form of waits and signals.
 - **The core's own files are out of reach.** The host binary and the compiled-code cache are
-  protected from the start; the host adds the log, grant files and the plugin store with
-  `WasmRuntime::protect`, and every plugin loaded through that runtime (children included) is
-  refused them by `fs-read` and `fs-write`, whatever its grant says. A plugin cannot edit its
-  own grants.
+  protected from the start. Every plugin loaded through a runtime (children included) is
+  refused them by `fs-read` and `fs-write`, whatever its grant says. The rest is the host's
+  to add with `WasmRuntime::protect`: the library cannot know where the log or the grant
+  files are, so whoever opens them protects them (the `corduroy` command does), and then a
+  plugin cannot edit its own grants.
 - **Cascades end.** See [Capabilities](#capabilities): a plugin is not called for an event
   more than `Limits::cascade` causes deep, and fuel bounds each call. *Changed from the
   plan:* the stream was to refuse a deep chain; it is the plugin delivery that refuses, since
@@ -644,7 +651,25 @@ the step it waits on is done.
    6 have landed: an SDK per language (bindings, `print` and clocks routed to host calls,
    exceptions as tool errors, a world generated from a capability list, the build flags),
    the script host as a shipped component, and one example plugin per language built in CI.
-9. Shipped plugins, MCP first.
+   *Phase three, first part,* in this order: a shared Rust guest crate (the Rust plugins
+   each repeat the same bindings and stubs); the JavaScript SDK; the Python SDK; the script
+   host; then CI builds the examples and the host loads them in its tests.
+9. Shipped plugins. *Phase three, second part,* aiming at a version that can be tried out
+   with a real model:
+   - A `corduroy` command and an agent file (the plugins of an agent and each one's grants,
+     the first form of grant files), a `providers` plugin over `oi-kit-providers`, and an
+     HTTP client plugin.
+   - The plugins that wait on nothing: `hints`, `todo`, `memory`, `recall`, `summarize`,
+     `inspect`, `plugin-manager`, and `tree` in `pi-tools`.
+   - MCP. A server over stdio is a long-lived process with pipes, which `Kernel::exec`
+     cannot hold, so kernels gain an optional way to start one: the rule that processes
+     start only through a kernel stays, and a sandboxed kernel sandboxes MCP servers too.
+   - Compaction: the projection learns the `compaction` event, and a `compact` plugin
+     writes it.
+   - Sub-agents: the general form of waits and signals, the `session` capability, and a
+     `subagents` plugin.
+
+   Left for later: code mode (the kernel-to-host bridge) and `read_image` (content blocks).
 
 ## Open questions
 

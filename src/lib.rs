@@ -1,9 +1,9 @@
 //! A plugin-first agent harness.
 //!
 //! Almost everything here is a plugin. The harness provides a small frame (a plugin tree, an
-//! event stream, three registries and a loop) and plugins fill it in: the tools a model can
-//! call, the text in its system prompt, the kernels it computes in, and the reactions to
-//! what happens. Plugins can be native Rust or WebAssembly components, and WebAssembly
+//! event stream, the registries plugins contribute to and a loop) and plugins fill it in: the
+//! model, the tools it can call, the text in its system prompt, the kernels it computes in,
+//! and the reactions to what happens. Plugins can be native Rust or WebAssembly components, and WebAssembly
 //! plugins hold only the capabilities they were granted.
 //!
 //! The design borrows one idea from each of six harnesses:

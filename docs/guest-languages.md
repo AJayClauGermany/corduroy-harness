@@ -6,6 +6,14 @@ answers can shape steps 4 to 7. One JavaScript and one Python plugin were built 
 through `Tools`, `Prompts` and the event stream. Nothing from the spike is in the build; the
 sources that matter are reproduced at the end.
 
+**Read as a record.** The first three sections describe the host and the world as they were
+at the time, with four capabilities, no compiled-code cache and no `parallel-compilation`:
+"today" means then. Later sections record each export and import as it was checked. The
+cache and parallel compilation landed in step 6 ([Loading plugins](#loading-plugins)), the
+world now has fifteen imports and six exports, and the script-host sources at the end
+predate `gate`, `handle-call`, `read-only`, `gates` and `provides`, so they no longer build
+as they stand.
+
 | | JavaScript | Python |
 | --- | --- | --- |
 | Toolchain | `@bytecodealliance/componentize-js` 0.23.0 (StarlingMonkey) | `componentize-py` 0.25.1 (CPython 3.14) |
