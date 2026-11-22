@@ -118,9 +118,11 @@ as design guidance, not noise.
   secret's name. Do not record response bodies, which may echo it. An `HttpClient` must not
   follow redirects: the host checked one host against the grant.
 - **Host calls that wait on the outside world are bounded.** `llm` and `http` pass
-  `Limits::outbound_wait` to the model or client; a native implementation must honour it.
+  `Limits::outbound_wait` to the model or client and stop waiting shortly after it
+  themselves (`host::bounded`), whether or not the implementation honours it.
 - **Plugin state lives on the stream.** `state` writes are `state/set` / `state/remove`
-  events from the plugin, kept only if the call returns; the store is rebuilt from them.
+  events from the plugin, kept only if the call returns; the store is rebuilt from them, so
+  `events.emit` refuses `state/*` topics.
 - **The event stream is the record.** The conversation is a projection of `message` events
   (`src/session.rs`); do not keep conversation state that cannot be rebuilt from the stream.
   The same goes for sessions (`session/start`) and for whether a run is unfinished.

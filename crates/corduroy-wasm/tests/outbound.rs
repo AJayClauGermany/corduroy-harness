@@ -244,6 +244,17 @@ fn requests_beyond_the_grant_are_refused_before_they_are_sent() {
         "{disguised}"
     );
     assert_eq!(plain["failed"], "the host has no HTTP client for `http`");
+    // A parser would read the backslash as `/` and the host as `evil.org`.
+    for tricky in [
+        "https://evil.org\\.api.example.com/",
+        "https://api.example.com\t/",
+    ] {
+        let refused = call(&host, "fetch", &json!({"method": "GET", "url": tricky})).unwrap();
+        assert!(
+            refused["failed"].as_str().unwrap().contains("backslash"),
+            "{refused}"
+        );
+    }
     assert_eq!(host.sent.lock().unwrap().len(), 0);
     assert_eq!(payloads(&host.app, "http/request"), Vec::<Value>::new());
 }
@@ -251,7 +262,12 @@ fn requests_beyond_the_grant_are_refused_before_they_are_sent() {
 #[test]
 fn a_plugin_reads_only_the_sessions_and_topics_its_grant_reaches() {
     let events = EventStream::new();
-    for (session, topic) in [("a", "message"), ("b", "message"), ("a", "tool/call")] {
+    for (session, topic) in [
+        ("a", "message"),
+        ("b", "message"),
+        ("a", "tool/call"),
+        ("a:b", "message"),
+    ] {
         let draft = Draft::new(Source::User, topic).session(SessionId::new(session));
         events.emit(draft).unwrap();
     }
@@ -265,6 +281,7 @@ fn a_plugin_reads_only_the_sessions_and_topics_its_grant_reaches() {
     let everything = call(&host, "read", &json!({"topic": "*"})).unwrap();
     let messages = call(&host, "read", &json!({"topic": "message", "session": "a"})).unwrap();
     let other = call(&host, "read", &json!({"topic": "*", "session": "b"})).unwrap();
+    let nested = call(&host, "read", &json!({"topic": "*", "session": "a:b"})).unwrap();
     let paged = call(
         &host,
         "read",
@@ -278,5 +295,25 @@ fn a_plugin_reads_only_the_sessions_and_topics_its_grant_reaches() {
     );
     assert_eq!(messages, json!([[1, "a", "message"]]));
     assert_eq!(other, json!([]));
+    // `a:*` reaches session `a`, not a session whose id merely starts with `a:`.
+    assert_eq!(nested, json!([]));
     assert_eq!(paged, json!([[3, "a", "tool/call"]]));
+}
+
+#[test]
+fn a_plugin_cannot_write_its_state_store_through_events() {
+    let mut host = host(EventStream::new()).unwrap();
+    let config = json!({"echo": {"on": "ping", "emit": "state/set"}});
+    host.app.plugin(
+        testbed(vec![("events", Scope::any())])
+            .unwrap()
+            .config(config.to_string()),
+    );
+
+    host.app
+        .events()
+        .emit(Draft::new(Source::Host, "ping").payload(r#"{"key":"k","value":"forged"}"#))
+        .unwrap();
+
+    assert_eq!(payloads(&host.app, "state/set"), Vec::<Value>::new());
 }

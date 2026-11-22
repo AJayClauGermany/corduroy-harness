@@ -44,6 +44,10 @@ const LENT: [(&str, &str); 4] = [
     ("http", HTTP),
 ];
 
+/// The event recording that a plugin was not called for an event too far down a chain of
+/// causes.
+const CASCADE: &str = "plugin/cascade";
+
 /// For each decision point, the capability whose use is decided there. A plugin may not gate
 /// a point and hold its capability: it would be asked about its own calls while making them.
 const DECIDED_BY: [(&str, &str); 2] = [(TOOL_CALL, "tools"), (PLUGIN_LOAD, "plugins")];
@@ -413,12 +417,17 @@ fn deliver(instance: &Instance, event: &Event) {
         return;
     }
     if instance.too_deep(event.id) {
+        // A cascade's own record is deeper still, so answering it with another would never
+        // end for a plugin that listens to it.
+        if event.topic == CASCADE {
+            return;
+        }
         let payload = format!(
             "{{\"plugin\":{},\"event\":{}}}",
             corduroy_core::json::string(instance.name()),
             event.id.get()
         );
-        let stopped = Draft::new(Source::Host, "plugin/cascade")
+        let stopped = Draft::new(Source::Host, CASCADE)
             .cause(event.id)
             .payload(payload);
         drop(instance.events().emit(stopped));

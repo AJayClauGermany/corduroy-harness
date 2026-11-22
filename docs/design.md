@@ -205,7 +205,7 @@ own beyond what these give it.
 | `llm` | one completion from a model a provider serves, recorded as `llm/request` and `llm/response` | model name |
 | `secret` | an opaque handle to a named credential, never its value | secret name |
 | `http` | an HTTP request through the client registered for its scheme, with credentials written in by the host | host name |
-| `log-read` | events of any session, by topic, in pages | `<session>:<topic>` (empty session for harness events) |
+| `log-read` | events of any session, by topic, in pages | `<session>:<topic>`, the session with `%` and `:` percent-encoded (empty for harness events) |
 
 Two limits hold whatever a grant says. **Protected paths** (the host binary, the compiled-code
 cache and whatever the host adds with `WasmRuntime::protect`, such as the event log and grant
@@ -284,6 +284,8 @@ Two rules came with the capabilities that reach outside:
   into what they send and record its name, not its value. Response bodies are not recorded
   either, since they may echo what was sent. HTTP clients must not follow redirects: the
   host checked one host against the grant, and a redirect elsewhere would go around it.
+  For the same reason the host refuses URLs a parser could read differently from its own
+  check: a backslash, whitespace, a control character, or a user name before the host.
 - **Time and randomness are host calls.** A WebAssembly plugin has no clock of its own, so
   given the same host-call results it computes the same thing. That is what makes
   [replaying a plugin](#durability) possible, and WASI stays out of the linker to

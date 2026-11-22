@@ -145,6 +145,10 @@ impl Model for Bridged {
 }
 
 /// The provider the loop talks to: whichever is registered under `name` when it is asked.
+///
+/// It reports `name` as its own, so oi-kit takes everything registered under one name for
+/// one provider: signed thinking and provider sessions are kept across a swap. Register a
+/// different kind of provider under a different name and point the harness at it.
 pub(crate) struct Routed {
     pub(crate) providers: Arc<Providers>,
     pub(crate) name: String,

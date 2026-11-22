@@ -7,14 +7,16 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use corduroy_core::{
     CallError as CoreCallError, Completion, Draft, Event, EventId, EventStream, FiberId, Gates,
-    Grants, HttpClients, HttpRequest, Kernels, Models, PLUGIN_LOAD, Pattern, Requests, Role, Scope,
-    Secrets, Services, SessionId, Source, TOOL_CALL, ToolError as CoreToolError, Tools, Turn,
-    Verdict, json,
+    Grants, HttpClients, HttpRequest, Kernels, ModelError, Models, PLUGIN_LOAD, Pattern, Requests,
+    Role, Scope, Secrets, Services, SessionId, Source, TOOL_CALL, ToolError as CoreToolError,
+    Tools, Turn, Verdict, json,
 };
 use serde_json::{Value, json};
 use wasmtime::StoreLimits;
@@ -49,6 +51,9 @@ type Headers = Vec<(String, String)>;
 
 /// Largest response body `http` hands to a plugin, in bytes.
 const MAX_BODY: usize = 8 << 20;
+
+/// Most credentials one instance may hold open at once.
+const MAX_CREDENTIALS: usize = 256;
 
 /// Most events one `log-read` call returns.
 const MAX_EVENTS: u32 = 1000;
@@ -266,6 +271,12 @@ impl kernel::Host for HostState {
 impl events::Host for HostState {
     fn emit(&mut self, topic: String, payload: String) -> Result<(), HostError> {
         self.check("events", &topic)?;
+        if topic.starts_with("state/") {
+            // The `state` store is rebuilt from these topics, so only `state` may raise them.
+            return Err(HostError::Denied(
+                "`state/*` topics are raised by the `state` capability only".to_owned(),
+            ));
+        }
         let source = Source::Plugin(self.plugin.clone());
         self.outbox.push(Draft::new(source, topic).payload(payload));
         Ok(())
@@ -329,6 +340,20 @@ impl random::Host for HostState {
             .map_err(|error| HostError::Failed(format!("no random bytes: {error}")))?;
         Ok(bytes)
     }
+}
+
+/// Run `work` on a thread of its own and wait for it a little longer than `wait`, the bound
+/// it was given, so that its own timeout error comes back if it honours it. `None` if it did
+/// not finish by then; the thread is left to end on its own.
+fn bounded<T: Send + 'static>(
+    wait: Duration,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let (done, finished) = mpsc::channel();
+    thread::spawn(move || drop(done.send(work())));
+    finished
+        .recv_timeout(wait.saturating_add(Duration::from_secs(1)))
+        .ok()
 }
 
 /// A registry the host was to lend and did not: a host misconfiguration, not the plugin's.
@@ -686,7 +711,12 @@ impl llm::Host for HostState {
             .collect();
         let asked = json!({"model": model, "system": completion.system, "messages": messages});
         self.outbox.push(self.draft("llm/request", &asked));
-        let answer = models.complete(&model, &completion, self.wait);
+        let wait = self.wait;
+        let model_name = model.clone();
+        let answer = bounded(wait, move || {
+            models.complete(&model_name, &completion, wait)
+        })
+        .unwrap_or(Err(ModelError::TimedOut(wait)));
         let (ok, output) = match &answer {
             Ok(text) => (true, text.clone()),
             Err(error) => (false, error.to_string()),
@@ -710,9 +740,21 @@ impl secret::Host for HostState {
                 "no secret is registered as `{name}`"
             )));
         }
-        let handle = u32::try_from(self.credentials.len())
+        let slot = if let Some(free) = self.credentials.iter().position(Option::is_none) {
+            free
+        } else if self.credentials.len() < MAX_CREDENTIALS {
+            self.credentials.push(None);
+            self.credentials.len() - 1
+        } else {
+            return Err(HostError::Failed(format!(
+                "{MAX_CREDENTIALS} credentials are open: drop some first"
+            )));
+        };
+        let handle = u32::try_from(slot)
             .map_err(|_| HostError::Failed("too many credentials are open".to_owned()))?;
-        self.credentials.push(Some(name));
+        if let Some(free) = self.credentials.get_mut(slot) {
+            *free = Some(name);
+        }
         Ok(Resource::new_own(handle))
     }
 }
@@ -720,6 +762,17 @@ impl secret::Host for HostState {
 /// The scheme and host of an absolute `http` or `https` URL, both in lowercase. URLs with a
 /// user name or password are refused, since they make the host easy to misread.
 fn authority(url: &str) -> Result<(String, String), String> {
+    // URL parsers ignore tabs and newlines and read `\\` as `/`, so the host they find could
+    // differ from the one checked here. Such URLs are refused rather than second-guessed.
+    if url
+        .chars()
+        .any(|c| c == '\\' || c.is_whitespace() || c.is_control())
+    {
+        return Err(format!(
+            "`{}` contains a backslash, whitespace or a control character",
+            url.escape_debug()
+        ));
+    }
     let (scheme, rest) = url
         .split_once("://")
         .ok_or_else(|| format!("`{url}` is not an absolute URL"))?;
@@ -810,20 +863,24 @@ impl http::Host for HostState {
             headers,
             body: request.body,
         };
-        let outcome = client.send(&sent, self.wait).and_then(|response| {
-            if response.body.len() > MAX_BODY {
-                Err(format!(
-                    "the response body is over the {MAX_BODY} byte limit"
-                ))
-            } else {
-                Ok(response)
-            }
-        });
+        let url = sent.url.clone();
+        let wait = self.wait;
+        let outcome = bounded(wait, move || client.send(&sent, wait))
+            .unwrap_or_else(|| Err(format!("no response within {}ms", wait.as_millis())))
+            .and_then(|response| {
+                if response.body.len() > MAX_BODY {
+                    Err(format!(
+                        "the response body is over the {MAX_BODY} byte limit"
+                    ))
+                } else {
+                    Ok(response)
+                }
+            });
         let answered = match &outcome {
             Ok(response) => json!({
-                "url": sent.url, "status": response.status, "body": response.body.len(),
+                "url": url, "status": response.status, "body": response.body.len(),
             }),
-            Err(error) => json!({"url": sent.url, "error": error}),
+            Err(error) => json!({"url": url, "error": error}),
         };
         self.outbox.push(self.draft("http/response", &answered));
         let response = outcome.map_err(HostError::Failed)?;
@@ -833,6 +890,12 @@ impl http::Host for HostState {
             body: response.body,
         })
     }
+}
+
+/// A session id as it appears in a `log-read` resource: `%` and `:` percent-encoded, so that
+/// the `:` before the topic is the first one and `a:*` cannot reach session `a:b`.
+fn escaped(session: &str) -> String {
+    session.replace('%', "%25").replace(':', "%3A")
 }
 
 /// An event as the plugin sees it.
@@ -868,7 +931,11 @@ impl log_read::Host for HostState {
         let grants = &self.grants;
         let found = events.after(EventId::new(after), limit, |event| {
             let in_session = event.session.as_ref().map(SessionId::as_str);
-            let reached = format!("{}:{}", in_session.unwrap_or_default(), event.topic);
+            let reached = format!(
+                "{}:{}",
+                escaped(in_session.unwrap_or_default()),
+                event.topic
+            );
             session
                 .as_deref()
                 .is_none_or(|wanted| in_session == Some(wanted))

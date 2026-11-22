@@ -356,3 +356,27 @@ fn plugins_reacting_to_each_other_are_stopped_at_the_cascade_limit() {
     assert_eq!(stopped.len(), 1);
     assert!(stopped[0].cause.is_some());
 }
+
+#[test]
+fn a_plugin_listening_to_everything_is_not_set_off_by_the_cascade_record() {
+    let work = scratch("cascade-watcher");
+    let mut host = host(&work).unwrap();
+    host.app.plugin(echo("pinger", "pong", "ping", 4).unwrap());
+    host.app.plugin(echo("ponger", "ping", "pong", 4).unwrap());
+    // Hears every event, `plugin/cascade` included, and emits nothing.
+    host.app.plugin(echo("watcher", "*", "", 4).unwrap());
+
+    host.app
+        .events()
+        .emit(Draft::new(Source::Host, "ping"))
+        .unwrap();
+
+    let events = host.app.events();
+    let stopped = events.matching(&Pattern::new("plugin/cascade"));
+    assert_ne!(stopped.len(), 0);
+    // Each record answers an event of the chain, never another record.
+    for record in &stopped {
+        let cause = events.get(record.cause.unwrap()).unwrap();
+        assert_ne!(cause.topic, "plugin/cascade");
+    }
+}

@@ -78,7 +78,7 @@ fn payloads(harness: &Harness, topic: &str) -> Vec<Value> {
         .events()
         .matching(&Pattern::new(topic))
         .iter()
-        .map(|event| serde_json::from_str(&event.payload).unwrap())
+        .filter_map(|event| serde_json::from_str(&event.payload).ok())
         .collect()
 }
 

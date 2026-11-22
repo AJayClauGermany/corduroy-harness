@@ -8,7 +8,9 @@
 //! | `chat` | refused | refused |
 //!
 //! Tools on the `allow` list always run and tools on the `deny` list never do, whatever the
-//! mode; `deny` wins. Whether a tool only reads is what the tool itself declares.
+//! mode; `deny` wins. Whether a tool only reads is what the tool itself declares, so `smart`
+//! trusts every plugin's word for it: where a plugin's tools are not to be taken at their
+//! word, use `approve`, or put those tools on the `deny` list.
 //!
 //! The plugin imports no capability: it holds no authority and only answers. Asking a person
 //! is the harness's job; this plugin only says when to.

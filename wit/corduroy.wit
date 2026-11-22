@@ -147,6 +147,7 @@ interface events {
     use types.{host-error};
 
     /// Queue an event. It is delivered once the current call into the plugin returns.
+    /// `state/*` topics are refused: the `state` store is rebuilt from them.
     emit: func(topic: string, payload: string) -> result<_, host-error>;
 }
 
@@ -325,7 +326,8 @@ interface http {
     record request {
         /// `GET`, `POST` and so on.
         method: string,
-        /// An absolute `http` or `https` URL.
+        /// An absolute `http` or `https` URL, with no user name or password, backslash,
+        /// whitespace or control character in it.
         url: string,
         headers: list<header>,
         body: option<list<u8>>,
@@ -344,7 +346,8 @@ interface http {
 }
 
 /// Capability `log-read`: read the event stream, other sessions' included. Scoped by
-/// `<session>:<topic>`, where the session is empty for events about the harness itself.
+/// `<session>:<topic>`, where the session is empty for events about the harness itself and
+/// has `%` and `:` percent-encoded (`a:b` is `a%3Ab`), so `a:*` reaches session `a` only.
 interface log-read {
     use types.{event, host-error};
 
