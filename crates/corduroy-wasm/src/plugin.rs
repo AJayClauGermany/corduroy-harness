@@ -8,7 +8,7 @@ use corduroy_core::{
     CallError, Context, ContextError, Draft, Event, EventStream, GATES, Gate, Gates, Grants, HTTP,
     HttpClients, KERNELS, Kernels, MODELS, Models, PLUGIN_LOAD, PROMPTS, Pattern, Plugin,
     PluginError, PromptPart, Prompts, SECRETS, SERVICES, Scope, Secrets, Service, Services, Source,
-    TOOL_CALL, TOOLS, Tool, ToolError, ToolSpec, Tools, Verdict,
+    TOOL_CALL, TOOLS, Tool, ToolError, ToolOutput, ToolSpec, Tools, Verdict,
 };
 use serde_json::Value;
 use wasmtime::component::{Component, HasSelf, Linker};
@@ -290,13 +290,9 @@ impl Plugin for WasmPlugin {
             let name = spec.name.clone();
             let tool = WasmTool {
                 instance: Arc::clone(&instance),
-                spec: ToolSpec {
-                    name: spec.name,
-                    description: spec.description,
-                    input_schema: spec.input_schema,
-                    replay_safe: spec.replay_safe,
-                    read_only: spec.read_only,
-                },
+                spec: ToolSpec::new(spec.name, spec.description, spec.input_schema)
+                    .replay_safe(spec.replay_safe)
+                    .read_only(spec.read_only),
             };
             tools.register(ctx, name, Arc::new(tool))?;
         }
@@ -451,10 +447,11 @@ impl Tool for WasmTool {
         self.spec.clone()
     }
 
-    fn call(&self, input: &str) -> Result<String, ToolError> {
+    fn call(&self, input: &str) -> Result<ToolOutput, ToolError> {
         self.instance
             .call(|plugin, store| plugin.call_call_tool(store, &self.spec.name, input))
             .map_err(ToolError::Failed)?
+            .map(|blocks| blocks.into_iter().map(host::content_from).collect())
             .map_err(|error| match error {
                 types::ToolError::UnknownTool(name) => ToolError::UnknownTool(name),
                 types::ToolError::InvalidInput(reason) => ToolError::InvalidInput(reason),

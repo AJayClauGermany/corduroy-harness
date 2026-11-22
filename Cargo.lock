@@ -513,6 +513,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.23.1",
  "corduroy-core",
  "corduroy-jsonl",
  "corduroy-shell",
@@ -548,6 +549,7 @@ dependencies = [
 name = "corduroy-mcp"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
  "corduroy-core",
  "corduroy-shell",
  "rmcp",
@@ -580,6 +582,7 @@ version = "0.1.0"
 name = "corduroy-wasm"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
  "corduroy-core",
  "corduroy-shell",
  "corduroy-test-support",

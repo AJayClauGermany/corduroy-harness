@@ -22,13 +22,9 @@ fn toolbox(runs: &Arc<AtomicUsize>) -> impl Plugin + 'static {
     plugin_fn("toolbox", &[TOOLS], move |ctx| {
         let tools = ctx.service::<Tools>(TOOLS)?;
         for (name, read_only) in [("peek", true), ("poke", false), ("launch", false)] {
-            let spec = ToolSpec {
-                name: name.into(),
-                description: String::new(),
-                input_schema: r#"{"type":"object"}"#.into(),
-                replay_safe: read_only,
-                read_only,
-            };
+            let spec = ToolSpec::new(name, "", r#"{"type":"object"}"#)
+                .replay_safe(read_only)
+                .read_only(read_only);
             let runs = Arc::clone(&runs);
             let tool = tool_fn(spec, move |_| {
                 runs.fetch_add(1, Ordering::SeqCst);

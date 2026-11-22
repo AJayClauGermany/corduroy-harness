@@ -19,6 +19,10 @@
 //!
 //! A tool's `readOnlyHint` makes it read-only for the gates, and `idempotentHint` (or being
 //! read-only) makes it safe to call again after a crash.
+//!
+//! A tool's result keeps its text as text and its images as images ([`Content`]), in the
+//! server's order. Other kinds of block (audio, resources) are passed on as text: a
+//! resource's own text, or a note that the block was there.
 
 #![expect(
     clippy::multiple_crate_versions,
@@ -32,9 +36,11 @@ use std::sync::mpsc as sync_mpsc;
 use std::thread;
 use std::time::Duration;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use corduroy_core::{
-    Context, KERNELS, Kernels, Plugin, PluginError, Process, Spawn, TOOLS, Tool, ToolError,
-    ToolSpec, Tools,
+    Content, Context, KERNELS, Kernels, Plugin, PluginError, Process, Spawn, TOOLS, Tool,
+    ToolError, ToolOutput, ToolSpec, Tools,
 };
 use rmcp::ServiceExt as _;
 use rmcp::model::{CallToolRequestParams, CallToolResult, JsonObject};
@@ -143,14 +149,12 @@ impl Plugin for McpPlugin {
                 .and_then(|annotations| annotations.idempotent_hint)
                 .unwrap_or(false);
             let name = format!("{}__{}", self.name, tool.name);
-            let spec = ToolSpec {
-                name: name.clone(),
-                description: tool.description.as_deref().unwrap_or_default().to_owned(),
-                input_schema: serde_json::to_string(&*tool.input_schema)
-                    .unwrap_or_else(|_| r#"{"type":"object"}"#.to_owned()),
-                replay_safe: read_only || idempotent,
-                read_only,
-            };
+            let input_schema = serde_json::to_string(&*tool.input_schema)
+                .unwrap_or_else(|_| r#"{"type":"object"}"#.to_owned());
+            let description = tool.description.as_deref().unwrap_or_default();
+            let spec = ToolSpec::new(name.clone(), description, input_schema)
+                .replay_safe(read_only || idempotent)
+                .read_only(read_only);
             let remote: Arc<dyn Tool> = Arc::new(McpTool {
                 client: Arc::clone(&client),
                 tool: tool.name.to_string(),
@@ -386,7 +390,7 @@ impl Tool for McpTool {
         self.spec.clone()
     }
 
-    fn call(&self, input: &str) -> Result<String, ToolError> {
+    fn call(&self, input: &str) -> Result<ToolOutput, ToolError> {
         let arguments = match serde_json::from_str::<Value>(input) {
             Ok(Value::Object(arguments)) => Some(arguments),
             Ok(Value::Null) => None,
@@ -398,43 +402,52 @@ impl Tool for McpTool {
             Err(error) => return Err(ToolError::InvalidInput(error.to_string())),
         };
         let result = self.client.call(&self.tool, arguments)?;
-        let text = text_of(&result);
+        let output = output_of(&result);
         if result.is_error == Some(true) {
-            Err(ToolError::Failed(text))
+            Err(ToolError::Failed(output.to_text()))
         } else {
-            Ok(text)
+            Ok(output)
         }
     }
 }
 
-/// The text of a tool's result: its text blocks, a note for anything else, or its structured
-/// content as JSON when there is no text.
-fn text_of(result: &CallToolResult) -> String {
+/// A tool's result as content blocks: its images as images, and everything else as text (a
+/// text block, a resource's text, a note for any other kind of block), in the server's
+/// order. Text that follows text joins it, a line each, so a result with no image is one
+/// block of text; one with no blocks at all is its structured content as JSON.
+fn output_of(result: &CallToolResult) -> ToolOutput {
     let blocks = serde_json::to_value(&result.content).unwrap_or(Value::Null);
-    let parts: Vec<String> = blocks
-        .as_array()
-        .into_iter()
-        .flatten()
-        .map(|block| match block.get("type").and_then(Value::as_str) {
-            Some("text") => block
-                .get("text")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
-            Some("resource") => block
-                .pointer("/resource/text")
-                .and_then(Value::as_str)
-                .map_or_else(|| "[a resource]".to_owned(), str::to_owned),
+    let mut content: Vec<Content> = Vec::new();
+    for block in blocks.as_array().into_iter().flatten() {
+        let text = |pointer: &str| block.pointer(pointer).and_then(Value::as_str);
+        let part = match text("/type") {
+            Some("text") => text("/text").unwrap_or_default().to_owned(),
+            Some("resource") => {
+                text("/resource/text").map_or_else(|| "[a resource]".to_owned(), str::to_owned)
+            }
+            Some("image") => {
+                // An image whose data is not what MCP says it is cannot be shown.
+                let data = text("/data").and_then(|data| BASE64.decode(data).ok());
+                if let Some(data) = data {
+                    let kind = text("/mimeType").unwrap_or("application/octet-stream");
+                    content.push(Content::image(kind, data));
+                    continue;
+                }
+                "[image content]".to_owned()
+            }
             Some(other) => format!("[{other} content]"),
             None => String::new(),
-        })
-        .collect();
-    if parts.is_empty() {
-        return result
-            .structured_content
-            .as_ref()
-            .map(Value::to_string)
-            .unwrap_or_default();
+        };
+        if let Some(Content::Text(before)) = content.last_mut() {
+            before.push('\n');
+            before.push_str(&part);
+        } else {
+            content.push(Content::Text(part));
+        }
     }
-    parts.join("\n")
+    if content.is_empty() {
+        let structured = result.structured_content.as_ref();
+        return ToolOutput::text(structured.map(Value::to_string).unwrap_or_default());
+    }
+    ToolOutput::new(content)
 }

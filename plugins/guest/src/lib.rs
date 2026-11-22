@@ -8,8 +8,9 @@
 //!   [`activate`](Plugin::activate) has a default: no tools, no prompt part, events ignored,
 //!   no services, and a gate that denies (a gate that cannot answer fails closed).
 //! * [`export!`], which makes a type implementing [`Plugin`] the component's exports.
-//! * Builders for [`PluginInfo`] and [`ToolSpec`], [`parse`] and [`config`] for JSON, and
-//!   `?` from a [`HostError`] to a [`ToolError`].
+//! * Builders for [`PluginInfo`], [`ToolSpec`] and [`Content`], [`parse`] and [`config`] for
+//!   JSON, [`text_of`] for the text of another tool's result, and `?` from a [`HostError`]
+//!   to a [`ToolError`].
 //! * The host interfaces, under [`host`]. Each is a capability, and a Rust plugin imports
 //!   only those it calls, so the capabilities it needs are the host functions it uses.
 //!
@@ -34,6 +35,11 @@
 //!
 //! corduroy_guest::export!(Hello);
 //! ```
+//!
+//! A tool's result is a list of [`Content`] blocks. Most tools return text, and
+//! [`call_tool`](Plugin::call_tool) is for those: its text is a result of one block. A plugin
+//! with a tool that returns something else, an image say, implements
+//! [`call_tool_content`](Plugin::call_tool_content) as well, or instead.
 //!
 //! A plugin crate is a `cdylib` built for `wasm32-unknown-unknown`; the host turns the module
 //! into a component when it loads it. A panic is a trap that takes the instance down, so a
@@ -62,7 +68,8 @@ pub mod bindings {
 /// plugin import it, and the host instantiates the plugin only if it granted that capability.
 pub use bindings::corduroy::plugin as host;
 pub use bindings::corduroy::plugin::types::{
-    CallError, Credential, Event, HostError, PluginInfo, ServiceCall, ToolError, ToolSpec, Verdict,
+    CallError, Content, Credential, Event, HostError, Image, PluginInfo, ServiceCall, ToolError,
+    ToolSpec, Verdict,
 };
 
 /// A plugin: the exports of the plugin world. Only [`activate`](Self::activate) has no
@@ -77,14 +84,36 @@ pub trait Plugin {
     /// the plugin.
     fn activate(config: String) -> Result<PluginInfo, String>;
 
-    /// Run one of the tools listed by [`activate`](Self::activate). `input` is a JSON
-    /// object. By default there are no tools.
+    /// Run one of the tools listed by [`activate`](Self::activate) and return its result as
+    /// text. `input` is a JSON object. By default there are no tools.
     ///
     /// # Errors
     ///
     /// A [`ToolError`], which goes back to the model as an error result.
     fn call_tool(name: String, _input: String) -> Result<String, ToolError> {
         Err(ToolError::UnknownTool(name))
+    }
+
+    /// Run one of the tools listed by [`activate`](Self::activate) and return its result as
+    /// content blocks. This is what the host calls. By default the result is the text
+    /// [`call_tool`](Self::call_tool) returns, as one block, so a plugin whose tools return
+    /// text implements only that. One with a tool that returns an image implements this
+    /// for that tool and hands the others on:
+    ///
+    /// ```ignore
+    /// fn call_tool_content(name: String, input: String) -> Result<Vec<Content>, ToolError> {
+    ///     match name.as_str() {
+    ///         "chart" => Ok(vec![Content::text("sales"), Content::image("image/png", draw())]),
+    ///         _ => Self::call_tool(name, input).map(|text| vec![Content::text(text)]),
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// A [`ToolError`], which goes back to the model as an error result.
+    fn call_tool_content(name: String, input: String) -> Result<Vec<Content>, ToolError> {
+        Self::call_tool(name, input).map(|text| vec![Content::Text(text)])
     }
 
     /// An event matching one of the plugin's subscriptions. Ignored by default.
@@ -120,8 +149,8 @@ impl<T: Plugin> bindings::Guest for T {
         <T as Plugin>::activate(config)
     }
 
-    fn call_tool(name: String, input: String) -> Result<String, ToolError> {
-        <T as Plugin>::call_tool(name, input)
+    fn call_tool(name: String, input: String) -> Result<Vec<Content>, ToolError> {
+        <T as Plugin>::call_tool_content(name, input)
     }
 
     fn on_event(event: Event) {
@@ -238,6 +267,41 @@ impl ToolSpec {
         self.read_only = true;
         self
     }
+}
+
+impl Content {
+    /// A block of text.
+    #[must_use]
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::Text(text.into())
+    }
+
+    /// An image of the kind `mime_type` names, such as `image/png`, from its bytes as they
+    /// would be in a file.
+    #[must_use]
+    pub fn image(mime_type: &str, data: impl Into<Vec<u8>>) -> Self {
+        Self::Image(Image {
+            mime_type: mime_type.to_owned(),
+            data: data.into(),
+        })
+    }
+}
+
+/// The text of a tool's result, such as [`host::tools::call`] returns: its text blocks
+/// joined by newlines, with an image standing as a marker such as
+/// `[image: image/png, 1234 bytes]`. For a plugin that reads what another tool said.
+#[must_use]
+pub fn text_of(blocks: &[Content]) -> String {
+    let lines: Vec<String> = blocks
+        .iter()
+        .map(|block| match block {
+            Content::Text(text) => text.clone(),
+            Content::Image(image) => {
+                format!("[image: {}, {} bytes]", image.mime_type, image.data.len())
+            }
+        })
+        .collect();
+    lines.join("\n")
 }
 
 impl From<HostError> for ToolError {

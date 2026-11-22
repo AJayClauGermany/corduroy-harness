@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
-use corduroy_core::{SessionId, ToolError, Tools};
+use corduroy_core::{SessionId, ToolError, ToolOutput, Tools};
 use oi_kit_agent::machine::MachineSession as _;
 use oi_kit_agent::operation::{Emitter, Operation};
 use oi_kit_agent::tool::ToolProvider;
@@ -14,7 +14,7 @@ use rmcp::model::{
 };
 use serde_json::Value;
 
-use crate::session::{Effect, Session, Sessions};
+use crate::session::{Effect, Session, Sessions, blocks_of};
 
 /// Exposes whatever is in the [`Tools`] registry right now.
 ///
@@ -105,12 +105,13 @@ impl ToolProvider<Session> for PluginTools {
         // A failed tool is data for the model, not an error for the run.
         let (ok, output) = match outcome {
             Ok(output) => (true, output),
-            Err(error) => (false, error.to_string()),
+            Err(error) => (false, ToolOutput::text(error.to_string())),
         };
         journal
             .finish_call(request_id, ok, &output)
             .map_err(|error| unrecorded(&error))?;
-        let content = vec![ContentBlock::text(output)];
+        // The model is sent what the log now holds: every block, images included.
+        let content = blocks_of(&output);
         Ok(if ok {
             CallToolResult::success(content)
         } else {

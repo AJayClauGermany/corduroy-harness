@@ -16,13 +16,7 @@ use corduroy_test_support::plugin;
 use serde_json::json;
 
 fn spec(name: &str) -> ToolSpec {
-    ToolSpec {
-        name: name.into(),
-        description: String::new(),
-        input_schema: r#"{"type":"object"}"#.into(),
-        replay_safe: false,
-        read_only: false,
-    }
+    ToolSpec::new(name, "", r#"{"type":"object"}"#)
 }
 
 /// A harness over `events` with the `subagents` plugin, a `poke` tool, and a `ci` tool whose
@@ -34,11 +28,11 @@ fn harness(model: &Arc<ScriptedProvider>, events: Arc<EventStream>) -> Harness {
         tools.register(
             ctx,
             "poke",
-            Arc::new(tool_fn(spec("poke"), |_| Ok("poked".into()))),
+            Arc::new(tool_fn(spec("poke"), |_| Ok("poked"))),
         )?;
         let ci = tool_fn(spec("ci"), |_| {
             if corduroy_harness::core::call::wait_for("ci/done") {
-                Ok("started the build".into())
+                Ok("started the build")
             } else {
                 Err(ToolError::Failed("not in a call".into()))
             }

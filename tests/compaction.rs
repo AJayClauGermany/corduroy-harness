@@ -20,13 +20,9 @@ use serde_json::{Value, json};
 fn harness(model: &Arc<ScriptedProvider>, events: Arc<EventStream>) -> Harness {
     let harness = Harness::resume(Arc::<ScriptedProvider>::clone(model), events).unwrap();
     harness.plugin(plugin_fn("echo", &[TOOLS], |ctx| {
-        let spec = ToolSpec {
-            name: "echo".into(),
-            description: String::new(),
-            input_schema: r#"{"type":"object"}"#.into(),
-            replay_safe: true,
-            read_only: true,
-        };
+        let spec = ToolSpec::new("echo", "", r#"{"type":"object"}"#)
+            .replay_safe(true)
+            .read_only(true);
         let tools = ctx.service::<Tools>(TOOLS)?;
         tools.register(
             ctx,

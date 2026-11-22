@@ -22,8 +22,45 @@ export interface ServiceCall {
   payload: string;
 }
 
-/** What a tool returns: text as it is, anything else as JSON. */
-export type ToolOutput = string | number | boolean | object | null | undefined;
+/** What a service returns: text as it is, anything else as JSON. */
+export type TextOutput = string | number | boolean | object | null | undefined;
+
+/** An image in a tool's result, as the `tools` capability's `call` returns it. */
+export interface Image {
+  /** What kind of image `data` is, such as `image/png`. */
+  mimeType: string;
+  /** The image's bytes, as they would be in a file. */
+  data: Uint8Array;
+}
+
+/** One block of a tool's result, as the `tools` capability's `call` returns it. */
+export type ContentBlock = { tag: 'text'; val: string } | { tag: 'image'; val: Image };
+
+/**
+ * One block of a tool's result, for a tool to return: text, or an image. Made with
+ * `Content.text` and `Content.image`.
+ */
+export class Content {
+  private constructor();
+  readonly tag: 'text' | 'image';
+  readonly val: string | Image;
+  /** A block of text. Anything but a string is written as JSON. */
+  static text(value: TextOutput): Content;
+  /** An image of the kind `mimeType` names, such as `image/png`, from its bytes. */
+  static image(mimeType: string, data: Uint8Array | ArrayBuffer | ArrayBufferView | number[]): Content;
+  /**
+   * The text of a tool's result: its text blocks joined by newlines, with an image standing
+   * as a marker such as `[image: image/png, 1234 bytes]`.
+   */
+  static textOf(blocks: ReadonlyArray<ContentBlock | Content>): string;
+}
+
+/**
+ * What a tool returns. A `Content`, or a non-empty array of them, is the result's blocks as
+ * they are, so a tool can return images. Anything else is one block of text: a string as it
+ * is, any other value (an array of anything but `Content` included) as JSON.
+ */
+export type ToolOutput = Content | Content[] | TextOutput;
 
 export interface Tool<Input = any> {
   description: string;
@@ -53,7 +90,7 @@ export interface Plugin {
   /** Gates by decision point, such as `tool/call`. A gate that throws denies. */
   gates?: Record<string, (request: any) => Verdict>;
   /** Services by name, each a set of methods taking the parsed payload. */
-  services?: Record<string, Record<string, (payload: any, call: ServiceCall) => ToolOutput>>;
+  services?: Record<string, Record<string, (payload: any, call: ServiceCall) => TextOutput>>;
 }
 
 /** Returns `plugin` unchanged, typed. */

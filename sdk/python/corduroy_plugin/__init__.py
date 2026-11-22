@@ -15,13 +15,33 @@ A plugin module holds a `Plugin` and registers its parts with decorators::
 `corduroy-py build hello.py --out hello.wasm` turns it into a component. Host capabilities
 are the `wit_world.imports` modules, for example ``from wit_world.imports import state``,
 and the plugin must be built with each one it imports (``--capabilities state,...``).
+
+A tool's result is a list of content blocks. What a tool returns is one block of text,
+unless it is a `Text` or an `Image`, or a list of them::
+
+    from corduroy_plugin import Image, Text
+
+    @plugin.tool(description="Draw the sales chart")
+    def chart(input):
+        return [Text("sales by month"), Image("image/png", draw_png())]
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from typing import Any
 
-__all__ = ["CallError", "Plugin", "ToolError", "allow", "ask", "deny"]
+__all__ = [
+    "CallError",
+    "Image",
+    "Plugin",
+    "Text",
+    "ToolError",
+    "allow",
+    "ask",
+    "deny",
+    "text_of",
+]
 
 TOOL_ERRORS = ("unknown-tool", "invalid-input", "failed", "denied")
 CALL_ERRORS = ("unknown", "invalid-input", "failed", "denied")
@@ -47,6 +67,39 @@ class CallError(Exception):
         super().__init__(message)
         self.kind = kind
         self.message = message
+
+
+@dataclass(frozen=True)
+class Text:
+    """A block of text in a tool's result."""
+
+    text: str
+
+
+@dataclass(frozen=True)
+class Image:
+    """An image in a tool's result: what kind it is, such as ``image/png``, and its bytes as
+    they would be in a file (not base64)."""
+
+    mime_type: str
+    data: bytes
+
+
+def text_of(blocks: Iterable[Any]) -> str:
+    """The text of a tool's result, such as `call` of the `tools` capability returns: its
+    text blocks joined by newlines, with an image standing as a marker such as
+    ``[image: image/png, 1234 bytes]``. Takes the host's blocks, or `Text` and `Image`."""
+    lines = []
+    for block in blocks:
+        # The host's blocks wrap what they hold: a string, or an image.
+        held = getattr(block, "value", block)
+        if isinstance(held, str):
+            lines.append(held)
+        elif isinstance(held, Text):
+            lines.append(held.text)
+        else:
+            lines.append(f"[image: {held.mime_type}, {len(held.data)} bytes]")
+    return "\n".join(lines)
 
 
 def allow() -> tuple[str, str]:
@@ -99,7 +152,8 @@ class Plugin:
         replay_safe: bool = False,
     ):
         """Offer the decorated function to the model as a tool. It takes the parsed input
-        object and returns text, or anything else as JSON."""
+        object and returns text, or anything else as JSON; or content blocks, as a `Text` or
+        an `Image` or a list of them, which is how a tool returns an image."""
 
         def register(run):
             tool_name = name or run.__name__

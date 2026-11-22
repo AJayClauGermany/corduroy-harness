@@ -17,7 +17,7 @@
 //! | `gate/decision` | `host` | `{"point", "id", "tool", "verdict", "reason", "gate", "caller"}`, caused by its `tool/call`: what the gates said |
 //! | `gate/answer` | `user` | `{"id", "tool", "allow", "reason"}`, caused by its `tool/call`: a person's answer to a gate that asked |
 //! | `tool/start` | `host` | `{"id", "tool"}`, caused by its `tool/call`: the tool is about to run |
-//! | `tool/result` | `environment` | `{"id", "tool", "ok", "output"}`, caused by its `tool/call` |
+//! | `tool/result` | `environment` | `{"id", "tool", "ok", "output"}`, and `"content"` unless the result is one block of text, caused by its `tool/call` |
 //! | `usage` | `agent` | the provider's usage report, as JSON |
 //! | `turn/end` | `host` | empty |
 //! | `run/restart` | `host` | `{"attempt"}`: an unfinished run was picked up again |
@@ -30,6 +30,14 @@
 //! only then the `message` that carries the results of every call of that step to the
 //! model. After a crash the log therefore says of each call whether it never started, was
 //! running, or finished with a result that only needs handing over.
+//!
+//! A tool's result is a list of content blocks (see [`ToolOutput`]). Its `tool/result` always
+//! has the result's text as `output`: the text blocks joined by newlines, with an image
+//! standing as a marker such as `[image: image/png, 1234 bytes]`. For a result that is one
+//! block of text, which most are, that is all of it. Any other result also has its blocks as
+//! `content`, an array of `{"type": "text", "text"}` and
+//! `{"type": "image", "mime_type", "data"}` with the image's bytes in base64, so that the
+//! log alone gives back the result the tool returned, images included.
 //!
 //! Where a gate guards tool calls, its decision on each call is stored before the tool can
 //! start. A call a gate asked about waits for a `gate/answer`.
@@ -61,9 +69,11 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use corduroy_core::{
-    Decision, Draft, Event, EventId, EventStream, LogError, Pattern, SessionId, Source, TOOL_CALL,
-    Verdict,
+    Content, Decision, Draft, Event, EventId, EventStream, LogError, Pattern, SessionId, Source,
+    TOOL_CALL, ToolOutput, Verdict,
 };
 
 use crate::harness::HarnessError;
@@ -464,7 +474,7 @@ struct OpenCall {
     /// Whether a `tool/start` was stored for it.
     started: bool,
     /// Whether it succeeded and what it returned, once a `tool/result` was stored for it.
-    result: Option<(bool, String)>,
+    result: Option<(bool, ToolOutput)>,
 }
 
 /// How far the log says a tool call got, for one whose response is not in the conversation.
@@ -478,8 +488,8 @@ pub(crate) enum Progress {
     Finished {
         /// Whether the call succeeded.
         ok: bool,
-        /// What the tool returned.
-        output: String,
+        /// What the tool returned, or the text of its error.
+        output: ToolOutput,
     },
 }
 
@@ -559,10 +569,10 @@ impl Batch {
             (None, None) => (draft.cause_in_batch(message), String::new()),
         };
         let (ok, output) = match &response.tool_result {
-            Ok(result) => (result.is_error != Some(true), text_of(result)),
-            Err(error) => (false, error.message.to_string()),
+            Ok(result) => (result.is_error != Some(true), output_of(result)),
+            Err(error) => (false, ToolOutput::text(&*error.message)),
         };
-        let payload = json!({"id": response.id, "tool": tool, "ok": ok, "output": output});
+        let payload = result_payload(&response.id, &tool, ok, &output);
         self.drafts.push(draft.payload(payload.to_string()));
     }
 }
@@ -582,7 +592,7 @@ impl State {
         );
         if let Some(open) = self.calls.get_mut(call) {
             open.started = true;
-            open.result = Some((true, placeholder(signal)));
+            open.result = Some((true, ToolOutput::text(placeholder(signal))));
         }
     }
 
@@ -785,7 +795,7 @@ impl State {
                 call.started = true;
                 if topic == "tool/result" {
                     let ok = payload.get("ok").and_then(Value::as_bool) == Some(true);
-                    call.result = Some((ok, text("output").unwrap_or_default()));
+                    call.result = Some((ok, recorded_output(event.id, &payload)?));
                 }
             }
         }
@@ -1040,12 +1050,15 @@ impl Journal {
 
     /// Record what the tool behind `call` returned, as soon as it has. This is its own
     /// commit, so a result is not lost with whatever else the step was still doing.
-    pub(crate) fn finish_call(&self, call: &str, ok: bool, output: &str) -> Result<()> {
+    ///
+    /// `output` is what the tool returned, or the text of its error. It is stored whole,
+    /// images included, so a run picked up later hands the model the same result.
+    pub(crate) fn finish_call(&self, call: &str, ok: bool, output: &ToolOutput) -> Result<()> {
         let (draft, tool) = self.about_call(call, Source::Environment, "tool/result");
-        let payload = json!({"id": call, "tool": tool, "ok": ok, "output": output});
+        let payload = result_payload(call, &tool, ok, output);
         self.events.emit(draft.payload(payload.to_string()))?;
         if let Some(open) = self.state().calls.get_mut(call) {
-            open.result = Some((ok, output.to_owned()));
+            open.result = Some((ok, output.clone()));
         }
         Ok(())
     }
@@ -1221,14 +1234,71 @@ fn transcript(messages: &[&Message]) -> String {
     lines.join("\n")
 }
 
-/// The text blocks of a tool result, joined.
-fn text_of(result: &CallToolResult) -> String {
-    result
-        .content
+/// The blocks of a tool's result as the model is sent them: an image's bytes in base64.
+pub(crate) fn blocks_of(output: &ToolOutput) -> Vec<ContentBlock> {
+    let block = |block: &Content| match block {
+        Content::Image { mime_type, data } => ContentBlock::image(BASE64.encode(data), mime_type),
+        text => ContentBlock::text(text.to_string()),
+    };
+    output.content().iter().map(block).collect()
+}
+
+/// The text and image blocks of a tool result in the conversation, as a tool returns them.
+fn output_of(result: &CallToolResult) -> ToolOutput {
+    let block = |block: &ContentBlock| match block {
+        ContentBlock::Text(text) => Some(Content::text(&text.text)),
+        ContentBlock::Image(image) => Some(BASE64.decode(&image.data).map_or_else(
+            |_| Content::text(format!("[image: {}, not base64]", image.mime_type)),
+            |data| Content::image(&image.mime_type, data),
+        )),
+        _ => None,
+    };
+    result.content.iter().filter_map(block).collect()
+}
+
+/// The payload of the `tool/result` event for the call `id`: the result's text as `output`,
+/// and its blocks as `content` unless the result is one block of text, which `output`
+/// already is. [`recorded_output`] reads it back.
+fn result_payload(id: &str, tool: &str, ok: bool, output: &ToolOutput) -> Value {
+    let mut payload = json!({"id": id, "tool": tool, "ok": ok, "output": output.to_text()});
+    if !matches!(output.content(), [Content::Text(_)])
+        && let Some(fields) = payload.as_object_mut()
+    {
+        let blocks = output.content().iter().map(|block| match block {
+            Content::Image { mime_type, data } => {
+                json!({"type": "image", "mime_type": mime_type, "data": BASE64.encode(data)})
+            }
+            text => json!({"type": "text", "text": text.to_string()}),
+        });
+        fields.insert("content".to_owned(), blocks.collect());
+    }
+    payload
+}
+
+/// What the `tool/result` event `id`, with `payload`, says the tool returned: its `content`
+/// blocks if it has them, or else its `output` as one block of text.
+fn recorded_output(id: EventId, payload: &Value) -> Result<ToolOutput> {
+    let text = |value: &Value, name: &str| {
+        let text = value.get(name).and_then(Value::as_str);
+        text.unwrap_or_default().to_owned()
+    };
+    let Some(blocks) = payload.get("content").and_then(Value::as_array) else {
+        return Ok(ToolOutput::text(text(payload, "output")));
+    };
+    blocks
         .iter()
-        .filter_map(|block| block.as_text().map(|text| text.text.as_str()))
-        .collect::<Vec<_>>()
-        .join("\n")
+        .map(|block| match block.get("type").and_then(Value::as_str) {
+            Some("image") => {
+                let data = BASE64
+                    .decode(text(block, "data"))
+                    .with_context(|| format!("event {id} has an image that is not base64"))?;
+                Ok(Content::image(text(block, "mime_type"), data))
+            }
+            // A kind of block this version does not know stands as a note that it was there.
+            Some(kind) if kind != "text" => Ok(Content::text(format!("[{kind} content]"))),
+            _ => Ok(Content::text(text(block, "text"))),
+        })
+        .collect()
 }
 
 #[async_trait]
@@ -1299,5 +1369,101 @@ impl EffectHandler<Session, Effect> for Journal {
         }
         self.commit(batch)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PNG: [u8; 8] = [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
+
+    /// `output` written as a `tool/result` and read back.
+    fn round_trip(output: &ToolOutput) -> ToolOutput {
+        let payload = result_payload("c1", "snap", true, output);
+        recorded_output(EventId::new(1), &payload).unwrap()
+    }
+
+    #[test]
+    fn a_recorded_result_reads_back_as_the_tool_returned_it() {
+        let outputs = [
+            ToolOutput::text("plain"),
+            ToolOutput::text(""),
+            ToolOutput::default(),
+            ToolOutput::new(vec![Content::text("one"), Content::text("two")]),
+            ToolOutput::from(Content::image("image/png", PNG)),
+            ToolOutput::new(vec![
+                Content::text("before"),
+                Content::image("image/png", PNG),
+                Content::image("image/jpeg", Vec::new()),
+                Content::text("after"),
+            ]),
+        ];
+        for output in outputs {
+            assert_eq!(round_trip(&output), output);
+        }
+    }
+
+    #[test]
+    fn one_block_of_text_is_recorded_as_output_alone() {
+        assert_eq!(
+            result_payload("c1", "label", true, &ToolOutput::text("a view")).to_string(),
+            r#"{"id":"c1","tool":"label","ok":true,"output":"a view"}"#
+        );
+        assert_eq!(
+            result_payload(
+                "c1",
+                "snap",
+                false,
+                &Content::image("image/png", PNG).into()
+            ),
+            json!({
+                "id": "c1",
+                "tool": "snap",
+                "ok": false,
+                "output": "[image: image/png, 8 bytes]",
+                "content": [{"type": "image", "mime_type": "image/png", "data": "iVBORw0KGgo="}],
+            })
+        );
+    }
+
+    #[test]
+    fn a_record_this_version_did_not_write_is_read_as_far_as_it_can_be() {
+        let read = |payload: Value| recorded_output(EventId::new(7), &payload);
+        // A log from before results had blocks: the output is the result.
+        assert_eq!(
+            read(json!({"id": "c1", "ok": true, "output": "old"})).unwrap(),
+            ToolOutput::text("old")
+        );
+        // A kind of block from a later version is noted, not dropped; the rest is kept.
+        let later =
+            json!({"content": [{"type": "audio", "data": "AAAA"}, {"type": "text", "text": "x"}]});
+        assert_eq!(
+            read(later).unwrap().content(),
+            [Content::text("[audio content]"), Content::text("x")]
+        );
+        // An image that cannot be decoded is not passed off as one.
+        let broken = json!({"content": [{"type": "image", "mime_type": "image/png", "data": "!"}]});
+        assert_eq!(
+            read(broken).unwrap_err().to_string(),
+            "event #7 has an image that is not base64"
+        );
+    }
+
+    #[test]
+    fn blocks_go_to_the_model_and_come_back_from_the_conversation_unchanged() {
+        let output = ToolOutput::new(vec![
+            Content::text("the view"),
+            Content::image("image/png", PNG),
+        ]);
+        let blocks = blocks_of(&output);
+        assert_eq!(
+            blocks,
+            [
+                ContentBlock::text("the view"),
+                ContentBlock::image("iVBORw0KGgo=", "image/png"),
+            ]
+        );
+        assert_eq!(output_of(&CallToolResult::success(blocks)), output);
     }
 }
