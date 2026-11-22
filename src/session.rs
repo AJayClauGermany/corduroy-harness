@@ -17,7 +17,7 @@
 //! | `gate/answer` | `user` | `{"id", "tool", "allow", "reason"}`, caused by its `tool/call`: a person's answer to a gate that asked |
 //! | `tool/start` | `host` | `{"id", "tool"}`, caused by its `tool/call`: the tool is about to run |
 //! | `tool/result` | `environment` | `{"id", "tool", "ok", "output"}`, and `"content"` when the result is not one block of text, caused by its `tool/call` |
-//! | `usage` | `agent` | `{"model", "input_tokens", "output_tokens"}`, each count only if the provider gave it |
+//! | `usage` | `agent` | `{"model", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"}`, each count only if the provider gave it; the cache counts are part of `input_tokens` |
 //! | `turn/end` | `host` | `{"status"}`: `finished`, `turn-limit`, `failed` (with `"reason"`), `stopped` or `yielded` |
 //! | `run/restart` | `host` | `{"attempt"}`: an unfinished run was picked up again |
 //! | `run/stop` | `user` | `{}`: a person asked the run to stop |
@@ -1429,6 +1429,8 @@ fn usage_payload(model: &str, usage: Usage) -> Value {
     let counts = [
         ("input_tokens", usage.input_tokens),
         ("output_tokens", usage.output_tokens),
+        ("cache_read_tokens", usage.cache_read_tokens),
+        ("cache_write_tokens", usage.cache_write_tokens),
     ];
     for (name, count) in counts {
         if let Some(count) = count {
@@ -1473,6 +1475,17 @@ mod tests {
     fn round_trip(output: &ToolOutput) -> ToolOutput {
         let payload = result_payload("c1", "snap", true, output);
         recorded_output(EventId::new(1), &payload).unwrap()
+    }
+
+    #[test]
+    fn usage_records_only_the_counts_the_provider_gave() {
+        let plain = usage_payload("m", Usage::new(Some(10), None));
+        assert_eq!(plain, json!({"model": "m", "input_tokens": 10}));
+        let cached = usage_payload("m", Usage::new(Some(10), Some(2)).with_cache(Some(8), None));
+        assert_eq!(
+            cached,
+            json!({"model": "m", "input_tokens": 10, "output_tokens": 2, "cache_read_tokens": 8})
+        );
     }
 
     #[test]
