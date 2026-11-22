@@ -137,6 +137,7 @@ async fn a_task_runs_across_both_plugins_within_their_grants() {
             "skill_manage",
             "skill_view",
             "skills_list",
+            "tree",
             "write"
         ]
     );

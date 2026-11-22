@@ -104,7 +104,7 @@ fn granted_tools_work_within_their_scope() {
             .grant("kernel", Scope::none().allow("shell")),
     );
 
-    assert_eq!(host.tools.names(), ["bash", "edit", "read", "write"]);
+    assert_eq!(host.tools.names(), ["bash", "edit", "read", "tree", "write"]);
     assert_eq!(
         host.tools.call(
             "write",

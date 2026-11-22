@@ -1,4 +1,5 @@
-//! The minimal coding toolset, after Pi: `read`, `write`, `edit` and `bash`.
+//! The minimal coding toolset, after Pi: `read`, `write`, `edit` and `bash`, and `tree`
+//! from Goose's developer extension.
 //!
 //! Four tools are enough for a model to do real work, and each one the model does not have
 //! to choose between is prompt space and attention saved. This plugin holds no authority of
@@ -7,7 +8,8 @@
 //! granted.
 //!
 //! `bash` runs in a long-lived kernel rather than a fresh process, so the working directory
-//! and variables carry over from one call to the next.
+//! and variables carry over from one call to the next. `tree` shows a directory's layout
+//! through `fs-read` alone, so an agent without a shell can still find its way.
 
 mod text;
 
@@ -64,6 +66,19 @@ struct Edit {
 }
 
 #[derive(Deserialize)]
+struct Tree {
+    /// The directory to show, `.` by default.
+    path: Option<String>,
+    /// How many levels deep to go.
+    depth: Option<usize>,
+}
+
+/// Entries `tree` shows at most.
+const MAX_ENTRIES: usize = 1000;
+/// Directories `tree` names but does not open.
+const UNOPENED: [&str; 5] = [".git/", "node_modules/", "target/", ".corduroy/", ".venv/"];
+
+#[derive(Deserialize)]
 struct Bash {
     command: String,
     /// Seconds.
@@ -86,6 +101,7 @@ impl Plugin for PiTools {
             "write" => write(&parse(&input)?),
             "edit" => edit(&parse(&input)?),
             "bash" => bash(&parse(&input)?),
+            "tree" => tree(&parse(&input)?),
             _ => Err(ToolError::UnknownTool(name)),
         }
     }
@@ -157,6 +173,43 @@ fn bash(args: &Bash) -> Result<String, ToolError> {
     Ok(output)
 }
 
+fn tree(args: &Tree) -> Result<String, ToolError> {
+    let root = args.path.clone().unwrap_or_else(|| ".".to_owned());
+    let depth = args.depth.unwrap_or(3).clamp(1, 10);
+    let mut lines = vec![root.clone()];
+    let entries = fs_read::list(&root)?;
+    walk(&root, &entries, "", depth, &mut lines);
+    Ok(lines.join("\n"))
+}
+
+/// Add `entries` of `dir`, and below them their own, `depth` levels down.
+fn walk(dir: &str, entries: &[String], prefix: &str, depth: usize, lines: &mut Vec<String>) {
+    for (index, name) in entries.iter().enumerate() {
+        if lines.len() > MAX_ENTRIES {
+            lines.push(format!("{prefix}… stopped at {MAX_ENTRIES} entries"));
+            return;
+        }
+        let last = index + 1 == entries.len();
+        lines.push(format!(
+            "{prefix}{}{name}",
+            if last { "└── " } else { "├── " }
+        ));
+        if !name.ends_with('/') || depth <= 1 || UNOPENED.contains(&name.as_str()) {
+            continue;
+        }
+        let child = format!(
+            "{}/{}",
+            dir.trim_end_matches('/'),
+            name.trim_end_matches('/')
+        );
+        let inner = format!("{prefix}{}", if last { "    " } else { "│   " });
+        match fs_read::list(&child) {
+            Ok(children) => walk(&child, &children, &inner, depth - 1, lines),
+            Err(_) => lines.push(format!("{inner}(not readable)")),
+        }
+    }
+}
+
 fn specs() -> Vec<ToolSpec> {
     // `(replay_safe, read_only)`. Reading twice, or writing the same content twice, is the
     // same as once; an edit that already happened no longer finds its old text, and a command
@@ -197,6 +250,13 @@ fn specs() -> Vec<ToolSpec> {
             "Run a shell command. The shell is persistent: the working directory and \
              variables carry over between calls. Returns the last 2000 lines or 50KB of output.",
             r#"{"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"integer","description":"Seconds before the command is stopped (default 120)"}},"required":["command"]}"#,
+        ),
+        spec(
+            "tree",
+            (true, true),
+            "Show the files and directories below a path as a tree, a few levels deep. \
+             .git, node_modules, target and .venv are named but not opened.",
+            r#"{"type":"object","properties":{"path":{"type":"string","description":"Directory (default .)"},"depth":{"type":"integer","description":"Levels to show (default 3, at most 10)"}}}"#,
         ),
     ]
 }

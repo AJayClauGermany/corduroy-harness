@@ -318,8 +318,8 @@ impl AgentFile {
 
     /// The default agent for a workspace with no agent file: the model from the environment
     /// (`ANTHROPIC_API_KEY`, then `OPENAI_API_KEY`, else a local Ollama), the Pi toolset on a
-    /// shell in the workspace, skills, and the approval gate asking before anything that
-    /// writes.
+    /// shell in the workspace, the approval and inspect gates, and the Goose-baseline
+    /// plugins (skills, hints, todo, memory, recall, summarize).
     #[must_use]
     pub fn default_text() -> String {
         let (kind, model) = if std::env::var_os("ANTHROPIC_API_KEY").is_some() {
@@ -348,6 +348,7 @@ max_turns = 50
 
 [providers.main]
 kind = "{{kind}}"   # anthropic, openai, ollama, *-compatible, or a provider oi-kit knows
+serve = ["{{model}}"]   # models plugins may ask through the `llm` capability
 
 [kernels.shell]
 kind = "shell"      # a persistent shell, starting in {workspace}
@@ -373,11 +374,60 @@ fs-read = ["{data}/skills", "{data}/skills/*"]
 fs-write = ["{data}/skills", "{data}/skills/*"]
 events = "skills/*"
 
-# Asks you before any tool that changes something: auto, smart, approve or chat.
+# Asks you before any tool that changes something: auto, smart, approve or chat. Tools that
+# only change the agent's own notes are allowed.
 [[plugins]]
 name = "approval"
 path = "approval.wasm"
-config = { mode = "smart" }
+config = { mode = "smart", allow = ["todo_write", "memory_save", "skill_manage"] }
+
+# Asks you about destructive commands and credentials in a call, stops a model repeating
+# itself, and warns it when a tool's output tries to give it instructions.
+[[plugins]]
+name = "inspect"
+path = "inspect.wasm"
+
+# AGENTS.md, .goosehints and CLAUDE.md in the workspace, in the system prompt.
+[[plugins]]
+name = "hints"
+path = "hints.wasm"
+config = { files = ["{workspace}/AGENTS.md", "{workspace}/.goosehints", "{workspace}/CLAUDE.md"] }
+grants = { fs-read = ["{workspace}/AGENTS.md", "{workspace}/.goosehints", "{workspace}/CLAUDE.md"] }
+
+# A todo list the agent keeps across turns and restarts.
+[[plugins]]
+name = "todo"
+path = "todo.wasm"
+grants = { state = "*" }
+
+# Memories by category, as Markdown files you can read and edit.
+[[plugins]]
+name = "memory"
+path = "memory.wasm"
+config = { dir = "{data}/memory" }
+grants = { fs-read = ["{data}/memory", "{data}/memory/*"], fs-write = ["{data}/memory", "{data}/memory/*"] }
+
+# Search earlier sessions in the log.
+[[plugins]]
+name = "recall"
+path = "recall.wasm"
+grants = { log-read = ["*:message", "*:session/start"] }
+
+# Files read and summarized by a model of its own.
+[[plugins]]
+name = "summarize"
+path = "summarize.wasm"
+config = { model = "{{model}}" }
+grants = { fs-read = ["{workspace}", "{workspace}/*"], llm = "{{model}}" }
+
+# Lets the model load more plugins from the plugin directory, never granting more than this
+# entry holds. Off by default.
+[[plugins]]
+name = "plugin-manager"
+path = "plugin_manager.wasm"
+enabled = false
+config = { dirs = ["{data}/plugins"] }
+grants = { fs-read = ["{data}/plugins", "{data}/plugins/*"], plugins = "*", state = "*" }
 "#;
 
 impl Grant {
@@ -549,7 +599,8 @@ mod tests {
     fn the_default_agent_parses() {
         let file = AgentFile::parse(&AgentFile::default_text()).unwrap();
         assert_eq!(file.provider, "main");
-        assert_eq!(file.plugins.len(), 3);
+        assert_eq!(file.plugins.len(), 10);
+        assert_eq!(file.plugins.iter().filter(|plugin| plugin.enabled).count(), 9);
         assert!(file.plugins[0].grants.contains_key("kernel"));
     }
 

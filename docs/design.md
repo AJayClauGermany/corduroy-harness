@@ -183,7 +183,7 @@ sub-agents. All exist as oi-kit operations and slot into `Harness::with_operatio
 
 **The baseline.** Goose is also the measure for the plugins shipped with the harness: what a
 user gets from Goose out of the box should be reachable here with shipped plugins alone. See
-[Shipped plugins](#shipped-plugins-the-goose-baseline-planned).
+[Shipped plugins](#shipped-plugins-the-goose-baseline).
 
 ## Capabilities
 
@@ -578,27 +578,27 @@ The core supplies the choke points, not the sandbox. What it must guarantee:
   applies to it. Anything that comes from a third party, or that the agent writes for
   itself, must be WebAssembly.
 
-## Shipped plugins: the Goose baseline (*planned*)
+## Shipped plugins: the Goose baseline
 
 Each row is a plugin, with the core primitive it waits on. Nothing here is built into the
 harness.
 
 | Goose feature | Plugin here | Kind | Waits on |
 | --- | --- | --- | --- |
-| Developer: `write`, `edit`, `shell`, `tree`, `read_image` | `pi-tools`, extended | WebAssembly | content blocks |
+| Developer: `write`, `edit`, `shell`, `tree`, `read_image` | `pi-tools` (`tree` added) | WebAssembly | `read_image` waits on content blocks |
 | MCP extensions (stdio, streamable HTTP) | `mcp` | native (`rmcp`) | kernels for subprocesses |
 | Providers | `corduroy-providers` (`oi-kit-providers`) | native | done |
 | Permission modes, per-tool permissions | `approval` (exists: `auto`, `smart`, `approve`, `chat`, allow and deny lists) | WebAssembly | done |
-| Tool inspection, prompt-injection scan | `inspect` | WebAssembly | nothing (gates are built) |
+| Tool inspection, prompt-injection scan | `inspect` (exists: dangerous commands, credentials, repetition, injected instructions in results) | WebAssembly | done |
 | Auto-compaction | `compact` | WebAssembly | compaction event (`llm` is built) |
 | Summon: `load`, `delegate` | `subagents` | WebAssembly | sessions, `session`, waits |
-| Skills | `skills` (exists) | WebAssembly | nothing (`llm` for the review fork is built) |
-| Context files (`.goosehints`, `AGENTS.md`) | `hints` | WebAssembly | nothing |
-| Todo | `todo` | WebAssembly | nothing (`state` is built) |
-| Memory | `memory` | WebAssembly | nothing (scoped files) |
-| Chat Recall | `recall` | WebAssembly | nothing (`log-read` is built) |
-| Summarize | `summarize` | WebAssembly | nothing (`llm` is built) |
-| Extension Manager | `plugin-manager` | WebAssembly | nothing (`plugins` is built) |
+| Skills | `skills` (exists) | WebAssembly | done; the review fork waits on sessions |
+| Context files (`.goosehints`, `AGENTS.md`) | `hints` (exists) | WebAssembly | done |
+| Todo | `todo` (exists) | WebAssembly | done |
+| Memory | `memory` (exists) | WebAssembly | done |
+| Chat Recall | `recall` (exists) | WebAssembly | done |
+| Summarize | `summarize` (exists) | WebAssembly | done |
+| Extension Manager | `plugin-manager` (exists) | WebAssembly | done |
 | Code Mode | `code-mode` | WebAssembly + kernel | kernel-to-host bridge |
 | Recipes and sub-recipes | the agent file of `corduroy` | host configuration | done for one agent; sub-recipes wait on sessions |
 
@@ -662,8 +662,9 @@ the step it waits on is done.
      come from `oi-kit-providers` (`crates/corduroy-providers`), the `http` capability
      sends through `crates/corduroy-http`. A gate's ask is answered at the terminal, or, with
      nobody there, waits in the log for `corduroy continue`.
-   - The plugins that wait on nothing: `hints`, `todo`, `memory`, `recall`, `summarize`,
-     `inspect`, `plugin-manager`, and `tree` in `pi-tools`.
+   - *Done:* the plugins that waited on nothing: `hints`, `todo`, `memory`, `recall`,
+     `summarize`, `inspect`, `plugin-manager`, and `tree` in `pi-tools`, each a Rust guest
+     of under 120 KB, all but `plugin-manager` in the default agent.
    - MCP. A server over stdio is a long-lived process with pipes, which `Kernel::exec`
      cannot hold, so kernels gain an optional way to start one: the rule that processes
      start only through a kernel stays, and a sandboxed kernel sandboxes MCP servers too.
