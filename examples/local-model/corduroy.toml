@@ -1,0 +1,94 @@
+# A corduroy agent whose model runs on this machine: no API key, no network once set up.
+#
+#   scripts/local-model.sh start
+#   cargo corduroy -- --agent examples/local-model/corduroy.toml --workspace DIR run "..."
+#
+# The model is an ordinary `openai-compatible` provider pointing at the llama.cpp server the
+# script starts on 127.0.0.1. Everything else is the default agent (`corduroy init`), so a run
+# goes through the same plugins, gates and log as one against a hosted model. `cargo eval`
+# runs its tasks against this file.
+
+system = """
+You are a careful coding agent working in {workspace}. Use the tools to do the task: read \
+before you change anything, keep changes small, check your work, then say briefly what you did."""
+provider = "local"
+model = "local"     # the server answers to any name; the script calls it `local`
+max_turns = 20
+
+[providers.local]
+kind = "openai-compatible"
+base_url = "http://127.0.0.1:8080/v1/chat/completions"
+timeout_seconds = 300   # a long answer from a small model on a CPU takes a while
+serve = ["local"]       # plugins (summarize, compact) ask the same model through `llm`
+
+[kernels.shell]
+kind = "shell"
+
+[[plugins]]
+name = "pi-tools"
+path = "pi_tools.wasm"
+config = { kernel = "shell" }
+[plugins.grants]
+fs-read = ["{workspace}", "{workspace}/*"]
+fs-write = { allow = ["{workspace}", "{workspace}/*"], deny = ["{workspace}/.git/*"] }
+kernel = "shell"
+
+[[plugins]]
+name = "skills"
+path = "skills.wasm"
+config = { dir = "{data}/skills" }
+[plugins.grants]
+fs-read = ["{data}/skills", "{data}/skills/*"]
+fs-write = ["{data}/skills", "{data}/skills/*"]
+events = "skills/*"
+
+# `auto` lets every tool through, so a run needs nobody at the terminal; the workspace grants
+# above still bound what the tools can touch. Use `smart` to be asked before changes.
+[[plugins]]
+name = "approval"
+path = "approval.wasm"
+config = { mode = "auto" }
+
+[[plugins]]
+name = "inspect"
+path = "inspect.wasm"
+
+[[plugins]]
+name = "hints"
+path = "hints.wasm"
+config = { files = ["{workspace}/AGENTS.md", "{workspace}/.goosehints", "{workspace}/CLAUDE.md"] }
+grants = { fs-read = ["{workspace}/AGENTS.md", "{workspace}/.goosehints", "{workspace}/CLAUDE.md"] }
+
+[[plugins]]
+name = "todo"
+path = "todo.wasm"
+grants = { state = "*" }
+
+[[plugins]]
+name = "memory"
+path = "memory.wasm"
+config = { dir = "{data}/memory" }
+grants = { fs-read = ["{data}/memory", "{data}/memory/*"], fs-write = ["{data}/memory", "{data}/memory/*"] }
+
+[[plugins]]
+name = "recall"
+path = "recall.wasm"
+grants = { log-read = ["*:message", "*:session/start"] }
+
+[[plugins]]
+name = "summarize"
+path = "summarize.wasm"
+config = { model = "local" }
+grants = { fs-read = ["{workspace}", "{workspace}/*"], llm = "local" }
+
+[[plugins]]
+name = "subagents"
+path = "subagents.wasm"
+grants = { service = "sessions" }
+
+# The script's server has a 16k-token context; compact well before it fills.
+[[plugins]]
+name = "compact"
+path = "compact.wasm"
+config = { model = "local", max_tokens = 12000 }
+grants = { llm = "local" }

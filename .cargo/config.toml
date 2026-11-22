@@ -5,6 +5,9 @@ t = "nextest run --all-features"
 lint = "clippy --all-targets --all-features -- -D warnings"
 # Formatting check without modifying files.
 fmtc = "fmt --all -- --check"
+# Small real tasks against a model on this machine; start one first with
+# `scripts/local-model.sh start`. See crates/corduroy-cli/tests/local_model.rs.
+eval = "nextest run --profile eval -p corduroy-cli --test local_model --run-ignored only"
 # Run the demo agent loop.
 demo = "run --quiet --"
 # Build the guest plugins in plugins/ to WebAssembly. Tests and the demo load the result.
