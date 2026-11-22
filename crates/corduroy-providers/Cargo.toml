@@ -15,7 +15,12 @@ categories.workspace = true
 workspace = true
 
 [dependencies]
+corduroy-harness = { workspace = true }
 oi-kit-providers = { workspace = true }
 oi-kit-provider-types = { workspace = true }
+# The tool and result types oi-kit's providers take, at the version oi-kit uses.
+rmcp = { workspace = true }
+async-trait = { workspace = true }
+base64 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -7,8 +7,8 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
+use corduroy_harness::core::Message;
 use corduroy_harness::core::{Pattern, Scope};
-use corduroy_harness::oi_kit_provider_types::conversation::message::Message;
 use corduroy_harness::scripted::{ScriptedProvider, call, say};
 use corduroy_harness::wasm::{WasmPlugin, WasmRuntime};
 use corduroy_harness::{Harness, Status, provider};

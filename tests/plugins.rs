@@ -6,8 +6,8 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
+use corduroy_harness::core::Message;
 use corduroy_harness::core::{FiberId, Pattern, Scope, SessionId};
-use corduroy_harness::oi_kit_provider_types::conversation::message::Message;
 use corduroy_harness::scripted::{ScriptedProvider, call, say};
 use corduroy_harness::wasm::WasmRuntime;
 use corduroy_harness::{Answer, Harness, MAIN, Status, shell_kernel};

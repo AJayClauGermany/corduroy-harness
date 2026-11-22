@@ -15,7 +15,7 @@
 //! | Hermes | Skills the agent writes and repairs for itself | the `skills` plugin |
 //! | Pi | A minimal toolset: read, write, edit, bash | the `pi-tools` plugin |
 //! | `OpenHands` | An append-only event stream as the source of truth | [`corduroy_core::event`], [`session`] |
-//! | Goose | The base abstractions, from oi-kit | [`harness`] |
+//! | Goose | A loop of steps that each look at the persisted conversation and return effects to store | [`harness`] |
 //!
 //! Runs are durable. Each step of the loop is one commit to the stream's log, a harness holds
 //! many sessions on one stream, and [`Harness::continue_run`] finishes a run that a crash
@@ -26,8 +26,11 @@
 //! an error, and a call a gate asks about makes the run wait, durably, until
 //! [`Harness::answer`] is called.
 //!
-//! oi-kit supplies the provider, message and conversation types and the state machine that
-//! runs the loop; this crate re-exports them as [`oi_kit_agent`] and [`oi_kit_provider_types`].
+//! The loop and its types are the harness's own: [`Message`](corduroy_core::Message) is what
+//! a conversation is made of, in the core, and a [`Provider`] answers a [`ModelRequest`] of
+//! them. Real providers, which convert to and from each model's API, are in
+//! `corduroy-providers`; [`scripted`] has one that replays a script, for tests. A run can be
+//! stopped from another task with [`Harness::stop`].
 //!
 //! ```
 //! use std::sync::Arc;
@@ -62,16 +65,19 @@
 
 #![expect(
     clippy::multiple_crate_versions,
-    reason = "the wasmtime and oi-kit dependency trees each pull several versions of shared crates"
+    reason = "the wasmtime dependency tree pulls several versions of shared crates"
 )]
 
 pub mod children;
 pub mod compact;
 pub mod gates;
 pub mod harness;
+pub mod message;
+pub mod operation;
 pub mod provider;
 pub mod scripted;
 pub mod session;
+pub mod stop;
 pub mod tools;
 
 pub use children::SESSIONS;
@@ -81,10 +87,13 @@ pub use corduroy_jsonl as jsonl;
 pub use corduroy_shell as shell;
 pub use corduroy_shell::shell_kernel;
 pub use corduroy_wasm as wasm;
-pub use gates::{GateOperation, WaitOperation};
-pub use harness::{Harness, HarnessError, OPERATIONS, Operations, Outcome, Status};
-pub use provider::{DEFAULT_PROVIDER, PROVIDERS, ProviderPlugin, Providers, provider};
+pub use gates::GateOperation;
+pub use harness::{Harness, HarnessError, OPERATIONS, Operations, Outcome, Status, Stepped};
+pub use operation::{Next, Operation};
+pub use provider::{
+    DEFAULT_PROVIDER, ModelReply, ModelRequest, PROVIDERS, Provider, ProviderError, ProviderPlugin,
+    Providers, Usage, provider,
+};
 pub use session::{
     Answer, Ask, COMPACTION, Effect, Journal, MAIN, SIGNAL, Session, SessionInfo, Sessions, Wait,
 };
-pub use {oi_kit_agent, oi_kit_provider_types};

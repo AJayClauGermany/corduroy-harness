@@ -5,13 +5,11 @@
 use std::sync::Arc;
 
 use corduroy_harness::core::{
-    Content, Context, Pattern, PluginError, TOOLS, ToolError, ToolOutput, ToolSpec, Tools,
-    plugin_fn, tool_fn,
+    Content, Context, Message, Pattern, PluginError, TOOLS, ToolCall, ToolError, ToolOutput,
+    ToolSpec, Tools, plugin_fn, tool_fn,
 };
-use corduroy_harness::oi_kit_provider_types::conversation::message::{Message, MessageContent};
 use corduroy_harness::scripted::{ScriptedProvider, call, say};
 use corduroy_harness::{Harness, HarnessError, Session, Status};
-use rmcp::model::{CallToolRequestParams, ContentBlock};
 use serde_json::{Value, json};
 
 /// The eight bytes every PNG file starts with. Not text, and not valid UTF-8.
@@ -55,15 +53,12 @@ fn harness(replies: impl IntoIterator<Item = Message>) -> Result<Harness, Harnes
 }
 
 /// The blocks of each tool result in the conversation, in order.
-fn results(session: &Session) -> Vec<Vec<ContentBlock>> {
-    let contents = session.conversation().messages().iter();
-    contents
-        .flat_map(|message| &message.content)
-        .filter_map(|content| match content {
-            MessageContent::ToolResponse(response) => response.tool_result.as_ref().ok(),
-            _ => None,
-        })
-        .map(|result| result.content.clone())
+fn results(session: &Session) -> Vec<Vec<Content>> {
+    session
+        .conversation()
+        .iter()
+        .flat_map(Message::tool_results)
+        .map(|result| result.output.content().to_vec())
         .collect()
 }
 
@@ -88,13 +83,10 @@ async fn an_image_a_tool_returns_reaches_the_model_and_the_log() {
             answer: "a fine view".into()
         }
     );
-    // The model's conversation holds both blocks, in order, the image's bytes in base64.
+    // The model's conversation holds both blocks, in order, the image's bytes as they were.
     assert_eq!(
         results(&outcome.session),
-        [[
-            ContentBlock::text("the view"),
-            ContentBlock::image(PNG_BASE64, "image/png"),
-        ]]
+        [[Content::text("the view"), Content::image("image/png", PNG)]]
     );
     // The log has the result's text as `output`, as for any tool, and its blocks beside it.
     assert_eq!(
@@ -124,7 +116,7 @@ async fn only_a_result_that_is_more_than_one_text_is_recorded_block_by_block() {
     let asked = calls
         .into_iter()
         .fold(Message::assistant(), |message, (id, tool)| {
-            message.with_tool_request(id, Ok(CallToolRequestParams::new(tool)))
+            message.call(ToolCall::new(id, tool, "{}"))
         });
     let harness = harness([asked, say("done")]).unwrap();
 
@@ -156,10 +148,10 @@ async fn only_a_result_that_is_more_than_one_text_is_recorded_block_by_block() {
     assert_eq!(
         results(&outcome.session),
         [
-            vec![ContentBlock::text("a view")],
-            vec![ContentBlock::text("one"), ContentBlock::text("two")],
+            vec![Content::text("a view")],
+            vec![Content::text("one"), Content::text("two")],
             vec![],
-            vec![ContentBlock::text("tool failed: no film")],
+            vec![Content::text("tool failed: no film")],
         ]
     );
 }

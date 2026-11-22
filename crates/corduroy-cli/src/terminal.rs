@@ -4,12 +4,17 @@
 //! Nothing here keeps state of its own. What is shown is read off the event stream as each
 //! commit lands, and an answer to a gate goes to [`Harness::answer`], so a run that waits for
 //! a person can be answered in this process or a later one.
+//!
+//! Ctrl-C while a run is going asks it to stop ([`Harness::stop`]): the tool that is running
+//! is told, the rest of the step's calls are not run, and the run ends as stopped. A second
+//! Ctrl-C leaves at once, and the run stays unfinished in the log for `corduroy continue` or
+//! `corduroy stop`.
 
 use std::io::{BufRead, Write};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use corduroy_harness::core::{Event, ListenerId, Pattern, SessionId, Source};
-use corduroy_harness::oi_kit_provider_types::conversation::message::Message;
+use corduroy_harness::message::decode;
 use corduroy_harness::{Answer, Harness, HarnessError, Outcome, Status};
 use serde_json::Value;
 
@@ -51,13 +56,10 @@ pub fn describe(event: &Event) -> Option<String> {
     let payload: Value = serde_json::from_str(&event.payload).unwrap_or(Value::Null);
     match event.topic.as_str() {
         "message" if event.source == Source::Agent => {
-            let message: Message = serde_json::from_str(&event.payload).ok()?;
-            if let Some(error) = message.error() {
-                return Some(format!("error: {}", error.message));
-            }
-            let text = message.as_concat_text();
+            let text = decode(&event.payload).ok()?.text_content();
             (!text.trim().is_empty()).then(|| text.trim().to_owned())
         }
+        "run/stop" => Some("■ stopping".to_owned()),
         "tool/call" => {
             let input = payload
                 .get("input")
@@ -165,9 +167,45 @@ pub async fn settle(
             "" | "n" | "N" | "no" => Answer::Deny("the user declined".to_owned()),
             reason => Answer::Deny(reason.to_owned()),
         };
-        outcome = harness.answer(&ask.session, &ask.call, answer).await?;
+        let answered = harness.answer(&ask.session, &ask.call, answer);
+        outcome = stoppable(harness, &ask.session, answered).await?;
     }
     Ok(outcome)
+}
+
+/// Await `run` of `session`, asking it to stop when the person presses Ctrl-C. A second
+/// press stops waiting, leaving the run unfinished in the log.
+///
+/// # Errors
+///
+/// What `run` returns, [`HarnessError::Log`] if the stop could not be recorded, or
+/// [`HarnessError::Run`] after a second Ctrl-C.
+pub async fn stoppable(
+    harness: &Harness,
+    session: &SessionId,
+    run: impl Future<Output = Result<Outcome, HarnessError>>,
+) -> Result<Outcome, HarnessError> {
+    let mut run = std::pin::pin!(run);
+    let mut asked = false;
+    loop {
+        tokio::select! {
+            outcome = &mut run => return outcome,
+            pressed = tokio::signal::ctrl_c() => {
+                // Without a way to hear Ctrl-C, the run is simply awaited.
+                if pressed.is_err() {
+                    return run.await;
+                }
+                if asked {
+                    return Err(HarnessError::Run(
+                        "interrupted; the run is unfinished: `corduroy continue` or `corduroy stop`"
+                            .to_owned(),
+                    ));
+                }
+                asked = true;
+                harness.stop(session)?;
+            }
+        }
+    }
 }
 
 /// Run `prompt` in `session` and answer what the gates ask. A run a crash cut short is
@@ -187,7 +225,7 @@ pub async fn prompt(
     if matches!(outcome.status, Status::Waiting { .. }) {
         return Ok(outcome);
     }
-    let outcome = harness.run_in(session, prompt).await?;
+    let outcome = stoppable(harness, session, harness.run_in(session, prompt)).await?;
     settle(harness, outcome, input, out).await
 }
 
@@ -203,7 +241,7 @@ pub async fn resume(
     input: &mut (dyn BufRead + Send),
     out: &Out,
 ) -> Result<Outcome, HarnessError> {
-    let outcome = harness.continue_run(session).await?;
+    let outcome = stoppable(harness, session, harness.continue_run(session)).await?;
     settle(harness, outcome, input, out).await
 }
 
@@ -212,6 +250,7 @@ pub async fn resume(
 pub fn ending(status: &Status) -> Option<String> {
     match status {
         Status::Finished { .. } | Status::Yielded => None,
+        Status::Stopped => Some("stopped".to_owned()),
         Status::TurnLimitReached => Some("stopped: the turn limit was reached".to_owned()),
         Status::Failed { reason } => Some(format!("the run failed: {reason}")),
         Status::Waiting { asks, waits } if asks.is_empty() => {
@@ -222,6 +261,7 @@ pub fn ending(status: &Status) -> Option<String> {
             "waiting for {} answer(s); run `corduroy continue` to give them",
             asks.len()
         )),
+        other => Some(other.to_string()),
     }
 }
 
@@ -259,6 +299,21 @@ mod tests {
             r#"{"id":"1","tool":"read","ok":false,"output":"denied"}"#,
         );
         assert_eq!(failed.as_deref(), Some("  ✗ denied"));
+    }
+
+    #[test]
+    fn what_the_model_says_is_shown_and_its_tool_calls_are_not_repeated() {
+        let said = r#"{"role":"assistant","parts":[{"type":"text","text":"Done."},{"type":"tool_call","id":"1","name":"ls","input":{}}]}"#;
+        assert_eq!(
+            shown(Source::Agent, "message", said).as_deref(),
+            Some("Done.")
+        );
+        let calls_only = r#"{"role":"assistant","parts":[{"type":"tool_call","id":"1","name":"ls","input":{}}]}"#;
+        assert_eq!(shown(Source::Agent, "message", calls_only), None);
+        assert_eq!(
+            shown(Source::User, "run/stop", "{}").as_deref(),
+            Some("■ stopping")
+        );
     }
 
     #[test]

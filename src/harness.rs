@@ -1,63 +1,49 @@
-//! Assembling the pieces into an agent.
+//! Assembling the pieces into an agent, and the loop that runs it.
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use corduroy_core::call::Serve;
 use corduroy_core::{
     App, ContextError, EventStream, FiberId, GATES, Gates, HTTP, HttpClients, KERNELS, Kernels,
-    LogError, MODELS, Models, PROMPTS, Plugin, Prompts, Registry, SECRETS, SERVICES, Secrets,
-    Services, SessionId, TOOLS, Tools,
+    LogError, MODELS, Message, Models, PROMPTS, Plugin, Prompts, Registry, Role, SECRETS, SERVICES,
+    Secrets, Services, SessionId, TOOLS, ToolResult, Tools,
 };
-use oi_kit_agent::inference::InferenceRunner;
-use oi_kit_agent::machine::{StateMachine, Step};
-use oi_kit_agent::max_turns::MaxTurnsOperation;
-use oi_kit_agent::operation::{Emitter, Operation, ends_turn, messages_since_kickoff};
-use oi_kit_agent::tool::ToolOperation;
-use oi_kit_agent::tool_call_state::pending_tool_requests;
-use oi_kit_agent::unhandled_tool_calls::UnhandledToolCallsOperation;
-use oi_kit_provider_types::base::Provider;
-use oi_kit_provider_types::conversation::message::{Message, MessageErrorKind};
-use oi_kit_provider_types::model::ModelConfig;
-use rmcp::model::{CallToolResult, ContentBlock};
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 
 use crate::children::{SESSIONS, SessionsService};
 use crate::compact::CompactOperation;
-use crate::gates::{GateOperation, SettleOperation, WaitOperation};
-use crate::provider::{DEFAULT_PROVIDER, PROVIDERS, Providers, Routed};
+use crate::gates::GateOperation;
+use crate::operation::{Next, Operation};
+use crate::provider::{DEFAULT_PROVIDER, ModelRequest, PROVIDERS, Provider, Providers};
 use crate::session::{
-    Answer, Ask, Effect, Journal, MAIN, Progress, Session, SessionInfo, Sessions, Wait, blocks_of,
-    ended,
+    Answer, Ask, Effect, End, Journal, MAIN, Progress, Session, SessionInfo, Sessions, Wait, ended,
 };
-use crate::tools::{PluginTools, PromptOperation};
+use crate::stop::Stop;
+use crate::tools::{NOT_RUN, PluginTools};
 
 /// Name of the service under which the harness provides the [`Operations`] registry.
 pub const OPERATIONS: &str = "operations";
 
 /// Steps of the loop that native plugins contribute.
 ///
-/// A step is an oi-kit [`Operation`]: it looks at the session at the start of a step of the
-/// loop and either declines or returns [`Effect`]s for the journal to store. Registered
-/// steps are tried in name order, after those the host added with
-/// [`Harness::with_operation`] and ahead of the built-in ones, so one can act before tools
-/// run or the model is asked. A step registered through a plugin's context leaves with the
-/// plugin.
-///
-/// The steps are read whenever a run is started or taken on, so a step registered while a
-/// run is going joins the loop from the next time it stops (to wait, or at its end).
+/// A step is an [`Operation`]: it looks at the session at the start of a step of the loop
+/// and either passes or returns [`Effect`]s for the journal to store. Registered steps are
+/// tried in name order, after those the host added with [`Harness::with_operation`] and
+/// ahead of the built-in ones, so one can act before tools run or the model is asked. A step
+/// registered through a plugin's context leaves with the plugin.
 ///
 /// Operations are native code and run with the host's authority; a WebAssembly plugin
 /// shapes the loop through gates, tools and events instead.
-pub type Operations = Registry<dyn Operation<Session, Effect>>;
+pub type Operations = Registry<dyn Operation>;
 
 /// Why the harness could not be set up or a run could not complete.
 #[derive(Debug)]
 pub enum HarnessError {
     /// The plugin tree rejected a service or plugin.
     Context(ContextError),
-    /// The agent loop failed in a way no operation recovered from.
+    /// The agent loop failed in a way no step recovered from.
     Run(String),
     /// The event log could not store a commit. Nothing after it was recorded or shown.
     Log(LogError),
@@ -66,7 +52,7 @@ pub enum HarnessError {
     /// A session with this id already exists.
     DuplicateSession(SessionId),
     /// The session has a run that never reached its end, so it cannot take a new prompt.
-    /// [`Harness::continue_run`] finishes it.
+    /// [`Harness::continue_run`] finishes it, and [`Harness::stop`] ends it.
     Unfinished(SessionId),
     /// The session's run is waiting for answers to gates that asked about its tool calls, so
     /// it cannot take a new prompt. [`Harness::answer`] gives them.
@@ -89,7 +75,10 @@ impl fmt::Display for HarnessError {
             Self::UnknownSession(id) => write!(f, "there is no session `{id}`"),
             Self::DuplicateSession(id) => write!(f, "session `{id}` already exists"),
             Self::Unfinished(id) => {
-                write!(f, "session `{id}` has an unfinished run: continue it first")
+                write!(
+                    f,
+                    "session `{id}` has an unfinished run: continue or stop it first"
+                )
             }
             Self::Waiting(id) => {
                 write!(
@@ -131,6 +120,7 @@ impl From<anyhow::Error> for HarnessError {
 
 /// How a run ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Status {
     /// The model answered without asking for anything further.
     Finished {
@@ -139,13 +129,15 @@ pub enum Status {
     },
     /// The model was still working when it ran out of turns.
     TurnLimitReached,
-    /// The model could not be reached or failed. The error is in the conversation.
+    /// The model could not be reached or failed. The reason is in the run's `turn/end`.
     Failed {
         /// What went wrong.
         reason: String,
     },
+    /// A person stopped the run with [`Harness::stop`].
+    Stopped,
     /// The loop stopped with nothing left to do but no answer, for example because an
-    /// operation is waiting on the user.
+    /// operation stopped it.
     Yielded,
     /// The run waits, in the log, and survives a restart. Gates asked about tool calls,
     /// here or in a child session this run waits for, and a person's answer to each goes
@@ -165,6 +157,7 @@ impl fmt::Display for Status {
             Self::Finished { answer } => write!(f, "finished: {answer}"),
             Self::TurnLimitReached => f.write_str("stopped: turn limit reached"),
             Self::Failed { reason } => write!(f, "failed: {reason}"),
+            Self::Stopped => f.write_str("stopped"),
             Self::Yielded => f.write_str("yielded"),
             Self::Waiting { asks, waits } if asks.is_empty() => {
                 let signals: Vec<&str> = waits.iter().map(|wait| wait.signal.as_str()).collect();
@@ -184,6 +177,26 @@ pub struct Outcome {
     pub session: Session,
 }
 
+/// What one step of the loop did. See [`Harness::step`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Stepped {
+    /// The step of this name did something, and the run goes on.
+    Applied(String),
+    /// The run stopped: it ended, or it waits.
+    Stopped,
+}
+
+/// What a step of the loop came to, inside the harness.
+enum Turn {
+    /// The step of this name did something.
+    Applied(String),
+    /// The run waits, in the log, for a person or a signal.
+    Wait,
+    /// The run is over.
+    End(End),
+}
+
 /// An agent: a plugin tree, an event stream and a programmable loop around a model.
 ///
 /// A harness holds any number of sessions, each a conversation of its own on the one stream.
@@ -191,9 +204,9 @@ pub struct Outcome {
 ///
 /// The harness itself does very little. It provides the registries plugins contribute to
 /// ([`Tools`], [`Prompts`], [`Kernels`], [`Gates`], [`Services`], [`Providers`], [`Models`],
-/// [`Secrets`], [`HttpClients`]), journals the conversation to the event stream, and lines up
-/// oi-kit operations into a loop. The model, tools, prompt text, kernels and reactions to
-/// events all come from plugins.
+/// [`Secrets`], [`HttpClients`], [`Operations`]), journals the conversation to the event
+/// stream, and runs the loop: the operations, compaction, the gates, the tools, the turn
+/// limit and the model, in that order, at every step.
 pub struct Harness {
     /// Shared with the step that applies changes plugins asked for while the loop runs.
     app: Arc<Mutex<App>>,
@@ -210,14 +223,16 @@ pub struct Harness {
     sessions: Arc<Sessions>,
     /// The name of the provider the loop asks, looked up in `providers` on every request.
     provider: String,
-    model: ModelConfig,
+    model: String,
     system: String,
     max_turns: u32,
     restart_limit: u32,
     /// Steps the host added, tried first and in the order given.
-    operations: Vec<Arc<dyn Operation<Session, Effect>>>,
+    operations: Vec<Arc<dyn Operation>>,
     /// Steps plugins registered, tried next and in name order.
     contributed: Arc<Operations>,
+    /// The sessions being run now, each with what stops it.
+    running: Mutex<BTreeMap<SessionId, Stop>>,
 }
 
 impl fmt::Debug for Harness {
@@ -226,9 +241,24 @@ impl fmt::Debug for Harness {
             .field("app", &self.app)
             .field("tools", &self.tools)
             .field("provider", &self.provider)
-            .field("model", &self.model.model_name)
+            .field("model", &self.model)
             .field("max_turns", &self.max_turns)
             .finish_non_exhaustive()
+    }
+}
+
+/// While alive, the session it names is being run, and [`Harness::stop`] reaches it.
+struct Running<'harness> {
+    running: &'harness Mutex<BTreeMap<SessionId, Stop>>,
+    session: SessionId,
+}
+
+impl Drop for Running<'_> {
+    fn drop(&mut self) {
+        self.running
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.session);
     }
 }
 
@@ -318,12 +348,13 @@ impl Harness {
             http,
             sessions,
             provider: DEFAULT_PROVIDER.to_owned(),
-            model: ModelConfig::new("default"),
+            model: "default".to_owned(),
             system: String::new(),
             max_turns: 25,
             restart_limit: 5,
             operations: Vec::new(),
             contributed,
+            running: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -338,7 +369,7 @@ impl Harness {
     /// Ask the provider for `model`.
     #[must_use]
     pub fn with_model(mut self, model: &str) -> Self {
-        self.model = ModelConfig::new(model);
+        model.clone_into(&mut self.model);
         self
     }
 
@@ -366,13 +397,13 @@ impl Harness {
     }
 
     /// Add a step to the loop, ahead of the built-in ones. Steps are tried in order and the
-    /// first that applies wins, so an operation added here can act before tools run or the
-    /// model is called: approve calls, compact history, answer a command.
+    /// first that does something wins, so an operation added here can act before tools run
+    /// or the model is called: approve calls, compact history, answer a command.
     ///
     /// This is for the host. A native plugin registers its steps in [`Operations`] instead
     /// ([`operations`](Self::operations)), so that they leave with it.
     #[must_use]
-    pub fn with_operation(mut self, operation: Arc<dyn Operation<Session, Effect>>) -> Self {
+    pub fn with_operation(mut self, operation: Arc<dyn Operation>) -> Self {
         self.operations.push(operation);
         self
     }
@@ -471,8 +502,7 @@ impl Harness {
         self.sessions.list()
     }
 
-    /// The journal that persists the effects of `session` to the event stream. It is the
-    /// `runtime` argument for callers that drive a [`StateMachine`] themselves.
+    /// The journal that records `session` on the event stream.
     ///
     /// # Errors
     ///
@@ -480,64 +510,6 @@ impl Harness {
     /// [`HarnessError::Run`] if its events cannot be decoded.
     pub fn journal(&self, session: &SessionId) -> Result<Arc<Journal>, HarnessError> {
         self.sessions.journal(session)
-    }
-
-    /// The loop, as the ordered steps a [`StateMachine`] walks: applying the plugin changes
-    /// plugins asked for, the host's operations, the operations plugins registered (in name
-    /// order), compaction, the prompt, the gates, plugin tools, an answer for calls nobody
-    /// handled, a stop while a call waits for a signal, the turn limit and finally the model.
-    #[must_use]
-    pub fn steps(&self) -> Vec<Step<'static, Session, Effect>> {
-        let tools = ToolOperation::new().with_provider(Arc::new(PluginTools::new(
-            Arc::clone(&self.tools),
-            Arc::clone(&self.sessions),
-        )));
-        let prompt = PromptOperation::new(self.system.clone(), Arc::clone(&self.prompts));
-        let routed = Routed {
-            providers: Arc::clone(&self.providers),
-            name: self.provider.clone(),
-        };
-        let model: InferenceRunner<'static, Session, Effect> =
-            InferenceRunner::new(Arc::new(routed), self.model.clone());
-        let mut steps: Vec<Step<'static, Session, Effect>> = self
-            .operations
-            .iter()
-            .map(|operation| Step::Operation(Arc::clone(operation)))
-            .collect();
-        steps.insert(
-            0,
-            Step::Operation(Arc::new(SettleOperation(Arc::clone(&self.app)))),
-        );
-        steps.extend(self.contributed.entries().into_iter().map(Step::Operation));
-        steps.push(Step::Operation(Arc::new(CompactOperation::new(
-            Arc::clone(&self.services),
-            Arc::clone(&self.sessions),
-        ))));
-        steps.push(Step::Operation(Arc::new(prompt)));
-        steps.push(Step::Operation(Arc::new(GateOperation::new(
-            Arc::clone(&self.gates),
-            Arc::clone(&self.tools),
-            Arc::clone(&self.sessions),
-        ))));
-        steps.push(Step::Operation(Arc::new(tools)));
-        steps.push(Step::Operation(
-            Arc::new(UnhandledToolCallsOperation::new()),
-        ));
-        steps.push(Step::Operation(Arc::new(WaitOperation::new(Arc::clone(
-            &self.sessions,
-        )))));
-        steps.push(Step::Operation(Arc::new(MaxTurnsOperation::new(
-            self.max_turns,
-        ))));
-        steps.push(Step::Inference(Arc::new(model)));
-        steps
-    }
-
-    /// A state machine over [`steps`](Self::steps). Call its `step` and `apply` with a
-    /// session's [`journal`](Self::journal) to advance the loop one step at a time.
-    #[must_use]
-    pub fn machine(&self, cancel: CancellationToken) -> StateMachine<'static, Session, Effect> {
-        StateMachine::new(self.steps(), cancel)
     }
 
     /// Add `prompt` to the main session's conversation as the user and run the loop until
@@ -551,18 +523,17 @@ impl Harness {
     }
 
     /// Add `prompt` to the conversation of `session` as the user and run the loop until the
-    /// model answers, runs out of turns or fails.
+    /// model answers, runs out of turns, fails or is stopped.
     ///
-    /// Tool failures and model failures are recorded in the conversation, not returned from
-    /// here: see [`Status`].
+    /// Tool failures and model failures are recorded in the log, not returned from here:
+    /// see [`Status`].
     ///
     /// # Errors
     ///
     /// Returns [`HarnessError::UnknownSession`] if there is no such session,
     /// [`HarnessError::Waiting`] if its last run waits for an answer,
     /// [`HarnessError::Unfinished`] if its last run never reached its end otherwise,
-    /// [`HarnessError::Run`] if an operation fails outright, for example because two plugins
-    /// registered tools the model cannot tell apart, or [`HarnessError::Log`] if the event
+    /// [`HarnessError::Run`] if a step fails outright, or [`HarnessError::Log`] if the event
     /// log could not store a step.
     pub async fn run_in(&self, session: &SessionId, prompt: &str) -> Result<Outcome, HarnessError> {
         let journal = self.journal(session)?;
@@ -572,11 +543,87 @@ impl Harness {
         if journal.unfinished() {
             return Err(HarnessError::Unfinished(session.clone()));
         }
-        let prompt = Message::user()
-            .with_text(prompt)
-            .with_generated_id_if_missing();
-        journal.record(&prompt)?;
-        self.drive(&journal).await
+        journal.record(&Message::user().text(prompt))?;
+        self.drive(&journal, &Stop::default()).await
+    }
+
+    /// Ask the run of `session` to stop, and return whether there was one to stop.
+    ///
+    /// A run that is going (on another task or thread) stops at the next step: a tool that
+    /// is running is told through its call scope ([`corduroy_core::call::stopping`]) and
+    /// finishes early if it can, the calls of the step not yet begun are answered as not
+    /// run, a model request in flight is abandoned, and the child sessions the run is
+    /// running stop too. The run then ends as [`Status::Stopped`], and the session takes a
+    /// new prompt; the model hears, through the results, which calls never ran.
+    ///
+    /// A run that is not going but has not ended (it waits for an answer or a signal, or a
+    /// crash cut it short) is ended here, the same way, along with the child sessions it
+    /// waits for. Calls the log shows finished keep their results.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HarnessError::UnknownSession`] if there is no such session, or
+    /// [`HarnessError::Log`] if the stop could not be recorded.
+    pub fn stop(&self, session: &SessionId) -> Result<bool, HarnessError> {
+        let journal = self.journal(session)?;
+        let running = self.running_now().get(session).cloned();
+        if let Some(stop) = running {
+            journal.stop_asked()?;
+            stop.ask();
+            return Ok(true);
+        }
+        let open =
+            journal.unfinished() || !journal.waiting().is_empty() || !journal.awaiting().is_empty();
+        if !open {
+            return Ok(false);
+        }
+        journal.stop_asked()?;
+        self.end_stopped(&journal)?;
+        Ok(true)
+    }
+
+    /// End the run of `journal`'s session, and those of the children it waits for, as
+    /// stopped.
+    fn end_stopped(&self, journal: &Journal) -> Result<(), HarnessError> {
+        for wait in journal.awaiting() {
+            if let Some(child) = ended(&wait.signal)
+                && let Ok(child) = self.journal(&child)
+                && (child.unfinished() || !child.awaiting().is_empty())
+            {
+                self.end_stopped(&child)?;
+            }
+            let reason = "stopped: the run was stopped before this call finished";
+            journal.signal(&wait.signal, reason)?;
+        }
+        if let Some(results) = self.settled(journal, NOT_RUN) {
+            journal.record(&results)?;
+        }
+        journal.end_turn(&End::Stopped)?;
+        Ok(())
+    }
+
+    /// Run one step of the loop for `session`: the step that applies first does its work,
+    /// and its effects are stored. Returns what it did. A step that ends the run records
+    /// the end.
+    ///
+    /// This is the loop [`run_in`](Self::run_in) runs, one step at a time, for a caller who
+    /// wants to watch or interleave it. Record the person's message first with the session's
+    /// [`journal`](Self::journal).
+    ///
+    /// # Errors
+    ///
+    /// As [`run_in`](Self::run_in).
+    pub async fn step(&self, session: &SessionId) -> Result<Stepped, HarnessError> {
+        let journal = self.journal(session)?;
+        let stop = self.running_now().get(session).cloned().unwrap_or_default();
+        Ok(match self.step_once(&journal, &stop).await? {
+            Turn::Applied(name) => Stepped::Applied(name),
+            Turn::Wait => Stepped::Stopped,
+            Turn::End(end) => {
+                journal.end_turn(&end)?;
+                Stepped::Stopped
+            }
+        })
     }
 
     /// Pick up the run of `session` that never reached its end, because the process died or
@@ -590,7 +637,7 @@ impl Harness {
     ///   taken from the log and the tool is not run again.
     /// - It never started: it runs now, like any other call.
     /// - It was started and nothing more is known: it is made again if its tool is
-    ///   [`replay_safe`](field@corduroy_core::ToolSpec::replay_safe). Otherwise it is answered
+    ///   [`replay_safe`](corduroy_core::ToolSpec::replay_safe). Otherwise it is answered
     ///   with an error saying it was interrupted, and the model decides what to do, as with
     ///   any other tool failure.
     ///
@@ -605,15 +652,23 @@ impl Harness {
     ///
     /// As [`run_in`](Self::run_in), except that an unfinished run is what this is for.
     pub async fn continue_run(&self, session: &SessionId) -> Result<Outcome, HarnessError> {
+        self.continue_with(session, &Stop::default()).await
+    }
+
+    async fn continue_with(
+        &self,
+        session: &SessionId,
+        stop: &Stop,
+    ) -> Result<Outcome, HarnessError> {
         let journal = self.journal(session)?;
         if !journal.awaiting().is_empty() && journal.waiting().is_empty() {
             // A crash after a call began waiting but before its placeholder reached the
             // conversation leaves the call unanswered: answer it from the log, or the tools
             // step would make it again (and start a second child session).
-            if let Some(settled) = self.settled(&journal) {
+            if let Some(settled) = self.settled(&journal, "") {
                 journal.record(&settled)?;
             }
-            return self.drive(&journal).await;
+            return self.drive(&journal, stop).await;
         }
         if !journal.unfinished() || !journal.waiting().is_empty() {
             return Ok(self.outcome_of(&journal));
@@ -624,50 +679,41 @@ impl Harness {
                 "the run was restarted {} times without finishing and was given up",
                 self.restart_limit
             );
-            let failure = Message::assistant()
-                .with_error(MessageErrorKind::Other, reason)
-                .with_generated_id_if_missing();
-            journal.record(&failure)?;
-            journal.end_turn()?;
+            journal.end_turn(&End::Failed(reason))?;
             return Ok(self.outcome_of(&journal));
         }
-        if let Some(settled) = self.settled(&journal) {
+        if let Some(settled) = self.settled(&journal, "") {
             journal.record(&settled)?;
         }
-        self.drive(&journal).await
+        self.drive(&journal, stop).await
     }
 
-    /// Results for the unanswered tool calls of an interrupted run that must not simply be
+    /// Results for the unanswered tool calls of `journal`'s session that must not simply be
     /// run: those the log already has a result for, and those that were started and are
-    /// not safe to make again. Calls left out are for the tools step to run.
-    fn settled(&self, journal: &Journal) -> Option<Message> {
-        let session = journal.session();
-        let turn = messages_since_kickoff(session.conversation()).ok()?;
+    /// not safe to make again. A call that never started is left for the tools step to
+    /// run, unless `not_run` says what to answer it with instead.
+    fn settled(&self, journal: &Journal, not_run: &str) -> Option<Message> {
         let mut results = Message::user();
-        for request in pending_tool_requests(turn) {
-            // A call that could not be decoded never ran; the tools step answers it.
-            let Ok(call) = request.tool_call.as_ref() else {
-                continue;
-            };
-            let result = match journal.progress(&request.id) {
-                Progress::NotStarted => continue,
-                Progress::Started if self.replay_safe(&call.name) => continue,
-                Progress::Started => CallToolResult::error(vec![ContentBlock::text(format!(
-                    "interrupted: the harness stopped while `{}` was running, and it is not \
-                     safe to run twice. Check what it did before calling it again.",
-                    call.name
-                ))]),
-                // The result as the tool returned it, images included, from the log.
-                Progress::Finished { ok: true, output } => {
-                    CallToolResult::success(blocks_of(&output))
+        for call in journal.session().pending_calls() {
+            let result = match journal.progress(&call.id) {
+                Progress::NotStarted if not_run.is_empty() => continue,
+                Progress::NotStarted => ToolResult::failed(call.id, not_run),
+                Progress::Started if not_run.is_empty() && self.replay_safe(&call.name) => {
+                    continue;
                 }
-                Progress::Finished { ok: false, output } => {
-                    CallToolResult::error(blocks_of(&output))
-                }
+                Progress::Started => ToolResult::failed(
+                    call.id,
+                    format!(
+                        "interrupted: the harness stopped while `{}` was running, and it is \
+                         not safe to run twice. Check what it did before calling it again.",
+                        call.name
+                    ),
+                ),
+                Progress::Finished { ok, output } => ToolResult::new(call.id, ok, output),
             };
-            results = results.with_tool_response(request.id.clone(), Ok(result));
+            results = results.result(result);
         }
-        (!results.content.is_empty()).then(|| results.with_generated_id_if_missing())
+        (!results.is_empty()).then_some(results)
     }
 
     /// Answer the gate that asked about the tool call `call` in `session`. Once every call
@@ -699,8 +745,9 @@ impl Harness {
         if !journal.waiting().is_empty() {
             return Ok(self.outcome_of(&journal));
         }
-        let outcome = self.drive(&journal).await?;
-        self.resume_parents(session, outcome).await
+        let stop = Stop::default();
+        let outcome = self.drive(&journal, &stop).await?;
+        self.resume_parents(session, outcome, &stop).await
     }
 
     /// Bring `payload` to the calls of `session` waiting for the signal `name`, and take the
@@ -722,8 +769,9 @@ impl Harness {
                 "nothing in session `{session}` waits for the signal `{name}`"
             )));
         }
-        let outcome = self.drive(&journal).await?;
-        self.resume_parents(session, outcome).await
+        let stop = Stop::default();
+        let outcome = self.drive(&journal, &stop).await?;
+        self.resume_parents(session, outcome, &stop).await
     }
 
     /// Once `session` has ended, take on each session up the chain that waits for it.
@@ -731,6 +779,7 @@ impl Harness {
         &self,
         session: &SessionId,
         mut outcome: Outcome,
+        stop: &Stop,
     ) -> Result<Outcome, HarnessError> {
         let mut current = session.clone();
         loop {
@@ -750,7 +799,7 @@ impl Harness {
             if !waits_for_us {
                 return Ok(outcome);
             }
-            outcome = Box::pin(self.drive(&journal)).await?;
+            outcome = Box::pin(self.drive(&journal, stop)).await?;
             current = parent;
         }
     }
@@ -761,32 +810,182 @@ impl Harness {
             .is_some_and(|tool| tool.spec().replay_safe)
     }
 
-    /// Run the loop over `journal`'s session until it stops, run the child sessions it then
-    /// waits for, and go on once they end. Marks the end of the turn unless the run waits.
-    async fn drive(&self, journal: &Journal) -> Result<Outcome, HarnessError> {
+    fn running_now(&self) -> MutexGuard<'_, BTreeMap<SessionId, Stop>> {
+        self.running.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Note that `session` is being run, stopped by `stop`, until the guard is dropped.
+    fn running_as(&self, session: &SessionId, stop: &Stop) -> Running<'_> {
+        self.running_now().insert(session.clone(), stop.clone());
+        Running {
+            running: &self.running,
+            session: session.clone(),
+        }
+    }
+
+    /// Run the loop over `journal`'s session until it ends or waits, run the child sessions
+    /// it then waits for, and go on once they end.
+    async fn drive(&self, journal: &Arc<Journal>, stop: &Stop) -> Result<Outcome, HarnessError> {
+        let running = self.running_as(journal.id(), stop);
         loop {
-            self.step_until_stopped(journal).await?;
-            let awaiting = journal.awaiting();
-            if awaiting.is_empty() && journal.waiting().is_empty() {
-                journal.end_turn()?;
+            match self.step_once(journal, stop).await? {
+                Turn::Applied(_) => continue,
+                Turn::Wait => {}
+                Turn::End(end) => journal.end_turn(&end)?,
             }
-            if awaiting.is_empty() || !self.run_children(journal, &awaiting).await? {
+            let awaiting = journal.awaiting();
+            if awaiting.is_empty() || !self.run_children(journal, &awaiting, stop).await? {
+                drop(running);
                 return Ok(self.outcome_of(journal));
             }
         }
     }
 
-    /// Run the loop over `journal`'s session until no step applies or one yields.
-    async fn step_until_stopped(&self, journal: &Journal) -> Result<(), HarnessError> {
-        let cancel = CancellationToken::new();
-        let machine = self.machine(cancel.clone());
-        // Streaming updates have no audience here; the event stream is the record.
-        let (updates, _unwatched) = mpsc::unbounded_channel();
-        let emitter = Emitter::new(updates, cancel);
-        machine
-            .run(journal, journal.id().as_str(), &emitter)
-            .await?;
-        Ok(())
+    /// One step of the loop over `journal`'s session.
+    ///
+    /// The steps are tried in order, and the first that does something is the step:
+    /// stopping, if the run was asked to; the host's operations, then those plugins
+    /// registered; compaction; the gates; the tools; waiting for a signal; noticing that
+    /// the model has answered; the turn limit; and the model.
+    async fn step_once(&self, journal: &Arc<Journal>, stop: &Stop) -> Result<Turn, HarnessError> {
+        // Plugins loaded or unloaded while the loop ran take effect before the next step.
+        self.app().apply_requests();
+        let session = journal.session();
+        if stop.asked() {
+            return self.stopped(journal);
+        }
+        let builtin: [Arc<dyn Operation>; 2] = [
+            Arc::new(CompactOperation::new(
+                Arc::clone(&self.services),
+                Arc::clone(&self.sessions),
+            )),
+            Arc::new(GateOperation::new(
+                Arc::clone(&self.gates),
+                Arc::clone(&self.tools),
+                Arc::clone(&self.sessions),
+            )),
+        ];
+        let operations = self
+            .operations
+            .iter()
+            .cloned()
+            .chain(self.contributed.entries())
+            .chain(builtin);
+        for operation in operations {
+            match operation.run(&session).await? {
+                Next::Pass => {}
+                Next::Continue(effects) => {
+                    journal.apply(effects)?;
+                    return Ok(Turn::Applied(operation.name().to_owned()));
+                }
+                Next::Stop(effects) => {
+                    journal.apply(effects)?;
+                    return Ok(Self::halted(journal));
+                }
+            }
+        }
+        let pending = session.pending_calls();
+        if !pending.is_empty() {
+            let tools = PluginTools::new(Arc::clone(&self.tools));
+            let results = tools.run(journal, pending, stop).await?;
+            journal.apply(vec![Effect::from(results)])?;
+            return Ok(Turn::Applied("tools".to_owned()));
+        }
+        if !journal.awaiting().is_empty() {
+            return Ok(Turn::Wait);
+        }
+        let answered = session
+            .conversation()
+            .last()
+            .is_none_or(|last| last.role == Role::Assistant);
+        if answered {
+            return Ok(Turn::End(Self::ending(&session)));
+        }
+        let limit = usize::try_from(self.max_turns).unwrap_or(usize::MAX);
+        if session.model_turns() >= limit {
+            return Ok(Turn::End(End::TurnLimit));
+        }
+        self.infer(journal, &session, stop).await
+    }
+
+    /// How a run whose last step stopped it stands: waiting, if a call waits for a person
+    /// or a signal, and otherwise at its end.
+    fn halted(journal: &Journal) -> Turn {
+        if journal.waiting().is_empty() && journal.awaiting().is_empty() {
+            Turn::End(Self::ending(&journal.session()))
+        } else {
+            Turn::Wait
+        }
+    }
+
+    /// The end of a run that stopped with nothing left to do: finished if the model has
+    /// answered, yielded if not.
+    fn ending(session: &Session) -> End {
+        if session.answer().is_some() {
+            End::Finished
+        } else {
+            End::Yielded
+        }
+    }
+
+    /// End a run that was asked to stop: the calls of its turn that have no result are
+    /// answered (from the log if they finished, as not run if they did not begin).
+    fn stopped(&self, journal: &Journal) -> Result<Turn, HarnessError> {
+        if let Some(results) = self.settled(journal, NOT_RUN) {
+            journal.record(&results)?;
+        }
+        Ok(Turn::End(End::Stopped))
+    }
+
+    /// Ask the model, and record its answer and what it cost.
+    async fn infer(
+        &self,
+        journal: &Arc<Journal>,
+        session: &Session,
+        stop: &Stop,
+    ) -> Result<Turn, HarnessError> {
+        let Some(provider) = self.providers.get(&self.provider) else {
+            let reason = format!("no model provider is registered as `{}`", self.provider);
+            return Ok(Turn::End(End::Failed(reason)));
+        };
+        let request = ModelRequest::new(
+            &self.model,
+            self.system_prompt(session.id()),
+            session.for_model(),
+        )
+        .with_tools(self.tools.specs());
+        // A person stopping the run does not wait for the model to finish.
+        let reply = tokio::select! {
+            biased;
+            () = stop.asked_now() => return self.stopped(journal),
+            reply = provider.complete(&request) => reply,
+        };
+        match reply {
+            Ok(reply) => {
+                let mut message = reply.message;
+                message.role = Role::Assistant;
+                let usage = Effect::Usage {
+                    model: self.model.clone(),
+                    usage: reply.usage,
+                };
+                journal.apply(vec![Effect::from(message), usage])?;
+                Ok(Turn::Applied("model".to_owned()))
+            }
+            Err(error) => Ok(Turn::End(End::Failed(error.to_string()))),
+        }
+    }
+
+    /// The system prompt for a request of `session`: the host's text, then each plugin's
+    /// part, rendered for that session.
+    fn system_prompt(&self, session: &SessionId) -> String {
+        let (parts, _) = Serve::session(session.clone()).run(|| self.prompts.render());
+        let parts = parts.into_iter().map(|(_, text)| text);
+        let system = (!self.system.is_empty()).then(|| self.system.clone());
+        system
+            .into_iter()
+            .chain(parts)
+            .collect::<Vec<_>>()
+            .join("\n\n")
     }
 
     /// Run each child session `awaiting` waits for, and bring the end of those that ended
@@ -795,13 +994,14 @@ impl Harness {
         &self,
         journal: &Journal,
         awaiting: &[Wait],
+        stop: &Stop,
     ) -> Result<bool, HarnessError> {
         let mut resolved = false;
         for wait in awaiting {
             let Some(child) = ended(&wait.signal) else {
                 continue;
             };
-            if let Some(payload) = Box::pin(self.run_child(&child)).await? {
+            if let Some(payload) = Box::pin(self.run_child(&child, stop)).await? {
                 resolved |= journal.signal(&wait.signal, &payload)?;
             }
         }
@@ -810,7 +1010,11 @@ impl Harness {
 
     /// Take the child session `child` as far as it goes. Returns what its end brings to the
     /// call waiting for it, or `None` if it waits itself.
-    async fn run_child(&self, child: &SessionId) -> Result<Option<String>, HarnessError> {
+    async fn run_child(
+        &self,
+        child: &SessionId,
+        stop: &Stop,
+    ) -> Result<Option<String>, HarnessError> {
         let journal = self.journal(child)?;
         let started = !journal.session().conversation().is_empty();
         let outcome = if !started {
@@ -820,13 +1024,10 @@ impl Harness {
                 .find(|info| info.id == *child)
                 .and_then(|info| info.task)
                 .unwrap_or_default();
-            let prompt = Message::user()
-                .with_text(&task)
-                .with_generated_id_if_missing();
-            journal.record(&prompt)?;
-            self.drive(&journal).await?
+            journal.record(&Message::user().text(task))?;
+            Box::pin(self.drive(&journal, stop)).await?
         } else if journal.unfinished() || !journal.awaiting().is_empty() {
-            self.continue_run(child).await?
+            Box::pin(self.continue_with(child, stop)).await?
         } else {
             self.outcome_of(&journal)
         };
@@ -848,7 +1049,7 @@ impl Harness {
             }
         }
         let status = if asks.is_empty() && waits.is_empty() {
-            status_of(&session)
+            status_of(journal, &session)
         } else {
             Status::Waiting { asks, waits }
         };
@@ -863,10 +1064,9 @@ fn brought(outcome: &Outcome) -> Option<String> {
         outcome
             .session
             .conversation()
-            .messages()
             .iter()
             .rev()
-            .map(Message::as_concat_text)
+            .map(Message::text_content)
             .find(|text| !text.trim().is_empty())
             .unwrap_or_default()
     };
@@ -877,27 +1077,25 @@ fn brought(outcome: &Outcome) -> Option<String> {
             "The sub-agent ran out of turns before it answered. The last it said: {}",
             last()
         )),
+        Status::Stopped => Some("The sub-agent was stopped before it finished.".to_owned()),
         Status::Yielded => Some(last()),
         Status::Waiting { .. } => None,
     }
 }
 
-fn status_of(session: &Session) -> Status {
-    let messages = session.conversation().messages();
-    let Some(last) = messages.last() else {
-        return Status::Yielded;
+/// How the last run of `session` ended, as `journal` recorded it.
+fn status_of(journal: &Journal, session: &Session) -> Status {
+    let answered = || {
+        session
+            .answer()
+            .map_or(Status::Yielded, |answer| Status::Finished { answer })
     };
-    match last.error_kind() {
-        Some(MessageErrorKind::ResourceExhausted) => Status::TurnLimitReached,
-        Some(_) => Status::Failed {
-            reason: last
-                .error()
-                .map_or_else(String::new, |error| error.message.clone()),
-        },
-        // An assistant message that asks for nothing further is the answer.
-        None if ends_turn(messages) => Status::Finished {
-            answer: last.as_concat_text(),
-        },
-        None => Status::Yielded,
+    match journal.ended() {
+        Some(End::TurnLimit) => Status::TurnLimitReached,
+        Some(End::Failed(reason)) => Status::Failed { reason },
+        Some(End::Stopped) => Status::Stopped,
+        Some(End::Yielded) => Status::Yielded,
+        // A run that ended before runs recorded how is read from its conversation.
+        Some(End::Finished) | None => answered(),
     }
 }

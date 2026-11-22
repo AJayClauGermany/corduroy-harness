@@ -4,6 +4,7 @@
 //! corduroy [options]                 talk to the agent
 //! corduroy [options] run <prompt>    one prompt, then exit
 //! corduroy [options] continue        finish a run that was cut short or waits for an answer
+//! corduroy [options] stop            end a run that was cut short or waits, without finishing it
 //! corduroy [options] check           load the agent and say what it has, without a model
 //! corduroy [options] sessions        list the sessions in the log
 //! corduroy [options] log             print the event log
@@ -29,7 +30,7 @@ use crate::extension::Extensions;
 use crate::terminal::{self, Out, say};
 
 const USAGE: &str = "usage: corduroy [--agent FILE] [--workspace DIR] [--session NAME] \
-                     [--model NAME] [--provider NAME] [run PROMPT | continue | check | sessions | log | init]";
+                     [--model NAME] [--provider NAME] [run PROMPT | continue | stop | check | sessions | log | init]";
 
 /// The command line, read.
 #[derive(Debug, Default)]
@@ -169,6 +170,16 @@ async fn run(
             let outcome = terminal::resume(harness, &session, &mut input, out).await?;
             Ok(finish(&outcome.status, out))
         }
+        ["stop"] => {
+            let stopped = harness.stop(&session)?;
+            let said = if stopped {
+                format!("stopped the run of `{session}`")
+            } else {
+                format!("`{session}` has no run to stop")
+            };
+            say(out, &said);
+            Ok(ExitCode::SUCCESS)
+        }
         ["check"] => Ok(check(&agent, out)),
         ["sessions"] => {
             for info in harness.session_list() {
@@ -220,6 +231,8 @@ fn finish(status: &Status, out: &Out) -> ExitCode {
     }
     match status {
         Status::Finished { .. } | Status::Yielded => ExitCode::SUCCESS,
+        // As a program interrupted by Ctrl-C does.
+        Status::Stopped => ExitCode::from(130),
         _ => ExitCode::FAILURE,
     }
 }
@@ -336,7 +349,7 @@ async fn chat(
     );
     let mut shown = terminal::watch(harness, &session, out);
     let outcome = terminal::resume(harness, &session, input, out).await?;
-    let started = !outcome.session.conversation().messages().is_empty();
+    let started = !outcome.session.conversation().is_empty();
     if let Some(line) = terminal::ending(&outcome.status).filter(|_| started) {
         say(out, &line);
     }

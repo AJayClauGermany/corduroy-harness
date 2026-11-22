@@ -34,8 +34,6 @@ getrandom = "0.3.4"
 # Hashes of plugin components, for the compiled-code cache and `plugin/load`. The version
 # wasmtime's cache already carries.
 sha2 = "0.10.9"
-# The base agent abstractions (provider, message, conversation, operation, state machine).
-oi-kit-agent = { version = "=0.1.0-alpha.15", default-features = false }
 oi-kit-provider-types = { version = "=0.1.0-alpha.15", default-features = false }
 # Real model providers (HTTP clients for Anthropic, OpenAI, Ollama and others), for the
 # `corduroy` command. Kept out of the harness library.
@@ -49,13 +47,12 @@ anyhow = "1"
 # The HTTP client behind the `http` capability: blocking, so it fits a plugin's blocking call.
 ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
 async-trait = "0.1"
-futures = { version = "0.3", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# Keys in the order they were written, so log payloads read naturally (`id` first).
+serde_json = { version = "1", features = ["preserve_order"] }
 # The agent file of the `corduroy` command.
 toml = { version = "1.1.8", default-features = false, features = ["parse", "serde", "std"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
-tokio-util = "0.7"
 
 [package]
 name = "corduroy-harness"
@@ -78,16 +75,11 @@ corduroy-core = { workspace = true }
 corduroy-wasm = { workspace = true }
 corduroy-jsonl = { workspace = true }
 corduroy-shell = { workspace = true }
-oi-kit-agent = { workspace = true }
-oi-kit-provider-types = { workspace = true }
-rmcp = { workspace = true }
 base64 = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
-futures = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
-tokio-util = { workspace = true }
 
 [dev-dependencies]
 corduroy-test-support = { workspace = true }

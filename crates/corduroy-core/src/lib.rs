@@ -18,6 +18,8 @@
 //!   and models plugins may ask for a completion of their own.
 //! * [`secret`], [`http`]: credentials plugins use without seeing, and the clients the `http`
 //!   capability sends through. The core checks and records; native plugins do the work.
+//! * [`message`]: what a conversation is made of: messages of text, images, thinking, tool
+//!   calls and their results. The harness's own shape, which providers convert to.
 //! * [`call`]: the tool call a thread is serving, so that what it calls in turn knows the
 //!   session, and can say the call waits for a signal.
 //!
@@ -51,6 +53,7 @@ pub mod gate;
 pub mod http;
 pub mod json;
 pub mod kernel;
+pub mod message;
 pub mod model;
 pub mod pattern;
 pub mod prompt;
@@ -68,6 +71,7 @@ pub use event::{Draft, Event, EventId, EventStream, ListenerId, Log, LogError, S
 pub use gate::{Decision, GATES, Gate, Gates, PLUGIN_LOAD, POINTS, TOOL_CALL, UNDECLARED, Verdict};
 pub use http::{HTTP, HttpClient, HttpClients, HttpRequest, HttpResponse};
 pub use kernel::{Cell, KERNELS, Kernel, KernelError, Kernels, MAX_OUTPUT, Process, Spawn};
+pub use message::{Message, Part, ToolCall, ToolResult};
 pub use model::{Completion, MODELS, Model, ModelError, Models, Role, Turn};
 pub use pattern::Pattern;
 pub use prompt::{PROMPTS, PromptPart, Prompts};

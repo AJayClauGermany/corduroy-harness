@@ -20,12 +20,10 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use corduroy_core::{Services, SessionId};
-use oi_kit_agent::machine::MachineSession as _;
-use oi_kit_agent::operation::{Emitter, Operation, OperationResult, applied, not_applicable};
-use oi_kit_provider_types::conversation::Conversation;
+use corduroy_core::Services;
 use serde_json::{Value, json};
 
+use crate::operation::{Next, Operation};
 use crate::session::{COMPACTION, Effect, Session, Sessions};
 
 /// The step that asks the [`COMPACTION`] service whether to summarise the start of the
@@ -57,36 +55,31 @@ async fn ask(services: &Arc<Services>, method: &'static str, payload: Value) -> 
 }
 
 #[async_trait]
-impl Operation<Session, Effect> for CompactOperation {
+impl Operation for CompactOperation {
     fn name(&self) -> &'static str {
         "compact"
     }
 
-    async fn run(
-        &self,
-        session: &Session,
-        _conversation: &Conversation,
-        _emit: &Emitter,
-    ) -> Result<OperationResult<Effect>> {
+    async fn run(&self, session: &Session) -> Result<Next> {
         if self.services.get(COMPACTION).is_none() {
-            return not_applicable();
+            return Ok(Next::Pass);
         }
-        let journal = self.sessions.journal(&SessionId::new(session.id()))?;
+        let journal = self.sessions.journal(session.id())?;
         let Some(compactable) = journal.compactable() else {
-            return not_applicable();
+            return Ok(Next::Pass);
         };
         let due = json!({
-            "session": session.id(),
+            "session": session.id().as_str(),
             "input_tokens": compactable.input_tokens,
             "messages": compactable.messages,
         });
         // A service that fails, or answers what it should not, leaves the conversation be.
         let is_due = ask(&self.services, "due", due).await;
         if is_due.and_then(|answer| answer.get("due").and_then(Value::as_bool)) != Some(true) {
-            return not_applicable();
+            return Ok(Next::Pass);
         }
         let transcript = journal.transcript_before(compactable.keep_from);
-        let request = json!({"session": session.id(), "transcript": transcript});
+        let request = json!({"session": session.id().as_str(), "transcript": transcript});
         let summary = ask(&self.services, "summarize", request)
             .await
             .and_then(|answer| {
@@ -97,12 +90,12 @@ impl Operation<Session, Effect> for CompactOperation {
             })
             .filter(|summary| !summary.trim().is_empty());
         let Some(summary) = summary else {
-            return not_applicable();
+            return Ok(Next::Pass);
         };
-        applied(vec![Effect::Compacted {
+        Ok(Next::Continue(vec![Effect::Compacted {
             summary,
             keep_from: compactable.keep_from,
             by: COMPACTION.to_owned(),
-        }])
+        }]))
     }
 }

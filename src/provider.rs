@@ -6,7 +6,13 @@
 //! model between one step and the next. [`provider`] is such a plugin; it can also offer
 //! named models to plugins through the core's [`Models`] registry, which is what the `llm`
 //! capability of WebAssembly plugins reaches.
+//!
+//! A [`Provider`] speaks the harness's own [`Message`]s. Whatever a model's API wants is the
+//! provider's business: `corduroy-providers` converts for the providers it builds, and
+//! [`ScriptedProvider`](crate::scripted::ScriptedProvider) needs no conversion at all.
 
+use std::error::Error;
+use std::fmt;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
@@ -14,14 +20,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use corduroy_core::{
-    Completion, Context, MODELS, Model, ModelError, Models, Plugin, PluginError, Registry, Role,
+    Completion, Context, MODELS, Message, Model, ModelError, Models, Plugin, PluginError, Registry,
+    Role, ToolSpec,
 };
-use oi_kit_provider_types::base::{MessageStream, ModelInfo, Provider};
-use oi_kit_provider_types::conversation::message::Message;
-use oi_kit_provider_types::errors::ProviderError;
-use oi_kit_provider_types::model::ModelConfig;
-use oi_kit_provider_types::retry::RetryConfig;
-use rmcp::model::Tool;
 
 /// Name of the service under which the harness provides the [`Providers`] registry.
 pub const PROVIDERS: &str = "providers";
@@ -32,6 +33,119 @@ pub type Providers = Registry<dyn Provider>;
 /// The provider a harness asks unless told otherwise, and the name
 /// [`Harness::new`](crate::Harness::new) registers its provider under.
 pub const DEFAULT_PROVIDER: &str = "default";
+
+/// One request to a model: what the loop asks at each turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ModelRequest {
+    /// The model to ask, by the provider's name for it.
+    pub model: String,
+    /// The system prompt.
+    pub system: String,
+    /// The conversation as the model sees it, oldest first. It ends with the user (a request
+    /// or tool results), and roles alternate.
+    pub messages: Vec<Message>,
+    /// The tools the model may call.
+    pub tools: Vec<ToolSpec>,
+}
+
+impl ModelRequest {
+    /// A request to `model` with `system` and `messages`, and no tools.
+    #[must_use]
+    pub fn new(
+        model: impl Into<String>,
+        system: impl Into<String>,
+        messages: Vec<Message>,
+    ) -> Self {
+        Self {
+            model: model.into(),
+            system: system.into(),
+            messages,
+            tools: Vec::new(),
+        }
+    }
+
+    /// Offer the model `tools`.
+    #[must_use]
+    pub fn with_tools(mut self, tools: Vec<ToolSpec>) -> Self {
+        self.tools = tools;
+        self
+    }
+}
+
+/// What a model answered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ModelReply {
+    /// The answer: text, thinking and tool calls, from the assistant.
+    pub message: Message,
+    /// What the request cost.
+    pub usage: Usage,
+}
+
+impl ModelReply {
+    /// The answer `message`, at a cost of `usage`.
+    #[must_use]
+    pub const fn new(message: Message, usage: Usage) -> Self {
+        Self { message, usage }
+    }
+}
+
+/// What one model request cost, as far as the provider says.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Usage {
+    /// Tokens read: the system prompt, the conversation and the tools.
+    pub input_tokens: Option<u64>,
+    /// Tokens written.
+    pub output_tokens: Option<u64>,
+}
+
+impl Usage {
+    /// `input` tokens read and `output` tokens written.
+    #[must_use]
+    pub const fn new(input: Option<u64>, output: Option<u64>) -> Self {
+        Self {
+            input_tokens: input,
+            output_tokens: output,
+        }
+    }
+}
+
+/// Why a model gave no answer. The run that asked ends as failed, with this as its reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderError(String);
+
+impl ProviderError {
+    /// An error saying `why`.
+    #[must_use]
+    pub fn new(why: impl Into<String>) -> Self {
+        Self(why.into())
+    }
+}
+
+impl fmt::Display for ProviderError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl Error for ProviderError {}
+
+/// A model the loop can ask.
+///
+/// A provider retries what is worth retrying itself (a rate limit, a dropped connection);
+/// an error it returns ends the run. The loop may stop waiting for an answer, when a person
+/// stops the run, so a provider must not rely on being awaited to the end.
+#[async_trait]
+pub trait Provider: Send + Sync {
+    /// Answer `request`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ProviderError`] if the model could not be reached or did not answer.
+    async fn complete(&self, request: &ModelRequest) -> Result<ModelReply, ProviderError>;
+}
 
 /// A plugin that registers a model provider under a name, and optionally offers some of its
 /// models to plugins. See [`provider`].
@@ -44,8 +158,8 @@ pub struct ProviderPlugin {
     models: Vec<String>,
 }
 
-impl std::fmt::Debug for ProviderPlugin {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for ProviderPlugin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ProviderPlugin")
             .field("name", &self.name)
             .field("models", &self.models)
@@ -120,12 +234,11 @@ impl Model for Bridged {
             .messages
             .iter()
             .map(|turn| match turn.role {
-                Role::User => Message::user().with_text(&turn.text),
-                Role::Assistant => Message::assistant().with_text(&turn.text),
+                Role::User => Message::user().text(&turn.text),
+                Role::Assistant => Message::assistant().text(&turn.text),
             })
             .collect();
-        let system = request.system.clone();
-        let config = ModelConfig::new(&self.model);
+        let request = ModelRequest::new(&self.model, &request.system, messages);
         let provider = Arc::clone(&self.provider);
         let (answer, answered) = mpsc::channel();
         // Plugins are called from blocking threads and from inside the loop's runtime alike,
@@ -138,8 +251,8 @@ impl Model for Bridged {
                 .map_err(|error| ModelError::Failed(error.to_string()))
                 .and_then(|runtime| {
                     runtime
-                        .block_on(provider.complete(&config, &system, &messages, &[]))
-                        .map(|(message, _usage)| message.as_concat_text())
+                        .block_on(provider.complete(&request))
+                        .map(|reply| reply.message.text_content())
                         .map_err(|error| ModelError::Failed(error.to_string()))
                 });
             // The caller may have stopped waiting.
@@ -148,64 +261,5 @@ impl Model for Bridged {
         answered
             .recv_timeout(timeout)
             .map_err(|_| ModelError::TimedOut(timeout))?
-    }
-}
-
-/// The provider the loop talks to: whichever is registered under `name` when it is asked.
-///
-/// It reports `name` as its own, so oi-kit takes everything registered under one name for
-/// one provider: signed thinking and provider sessions are kept across a swap. Register a
-/// different kind of provider under a different name and point the harness at it.
-pub(crate) struct Routed {
-    pub(crate) providers: Arc<Providers>,
-    pub(crate) name: String,
-}
-
-impl Routed {
-    fn current(&self) -> Result<Arc<dyn Provider>, ProviderError> {
-        self.providers.get(&self.name).ok_or_else(|| {
-            ProviderError::ExecutionError(format!(
-                "no model provider is registered as `{}`",
-                self.name
-            ))
-        })
-    }
-}
-
-#[async_trait]
-impl Provider for Routed {
-    fn get_name(&self) -> &str {
-        &self.name
-    }
-
-    fn provider_session_id(&self) -> Option<String> {
-        self.current().ok()?.provider_session_id()
-    }
-
-    async fn resume(&self, session_id: &str) -> Result<(), ProviderError> {
-        self.current()?.resume(session_id).await
-    }
-
-    async fn stream(
-        &self,
-        model_config: &ModelConfig,
-        system: &str,
-        messages: &[Message],
-        tools: &[Tool],
-    ) -> Result<MessageStream, ProviderError> {
-        self.current()?
-            .stream(model_config, system, messages, tools)
-            .await
-    }
-
-    fn retry_config(&self) -> RetryConfig {
-        self.current().map_or_else(
-            |_| RetryConfig::default(),
-            |provider| provider.retry_config(),
-        )
-    }
-
-    async fn fetch_model_info(&self, model_name: &str) -> Result<ModelInfo, ProviderError> {
-        self.current()?.fetch_model_info(model_name).await
     }
 }

@@ -8,7 +8,6 @@ use corduroy_harness::core::{
     Draft, EventStream, Gate, Pattern, Scope, SessionId, Source, TOOLS, ToolError, ToolSpec, Tools,
     Verdict, plugin_fn, tool_fn,
 };
-use corduroy_harness::oi_kit_provider_types::conversation::message::MessageContent;
 use corduroy_harness::scripted::{ScriptedProvider, call, say};
 use corduroy_harness::wasm::WasmRuntime;
 use corduroy_harness::{Answer, Harness, MAIN, SIGNAL, Status};
@@ -56,21 +55,9 @@ fn results(harness: &Harness, session: &str) -> Vec<String> {
     journal
         .session()
         .conversation()
-        .messages()
         .iter()
-        .flat_map(|message| message.content.clone())
-        .filter_map(|content| match content {
-            MessageContent::ToolResponse(response) => response.tool_result.ok(),
-            _ => None,
-        })
-        .map(|result| {
-            let texts: Vec<String> = result
-                .content
-                .iter()
-                .filter_map(|block| block.as_text().map(|text| text.text.clone()))
-                .collect();
-            texts.join("\n")
-        })
+        .flat_map(|message| message.tool_results().cloned().collect::<Vec<_>>())
+        .map(|result| result.output.to_text())
         .collect()
 }
 
