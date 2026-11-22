@@ -488,6 +488,8 @@ version = "0.1.0"
 dependencies = [
  "corduroy-core",
  "corduroy-test-support",
+ "getrandom 0.3.4",
+ "serde_json",
  "wasmtime",
  "wit-component",
 ]

@@ -18,6 +18,8 @@ workspace = true
 corduroy-core = { workspace = true }
 wasmtime = { workspace = true }
 wit-component = { workspace = true }
+getrandom = { workspace = true }
 
 [dev-dependencies]
 corduroy-test-support = { workspace = true }
+serde_json = { workspace = true }

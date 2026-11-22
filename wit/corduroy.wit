@@ -115,6 +115,52 @@ interface events {
     emit: func(topic: string, payload: string) -> result<_, host-error>;
 }
 
+/// Capability `log`: diagnostic output, recorded on the event stream as `plugin/log` under the
+/// plugin's name. Scoped by level: `debug`, `info`, `warn`, `error`. This is where a guest
+/// language's `print` and `console.log` belong.
+interface log {
+    use types.{host-error};
+
+    enum level {
+        debug,
+        info,
+        warn,
+        error,
+    }
+
+    /// Record `message` at `level`. Messages longer than 16 KiB are cut short. Delivered once
+    /// the current call into the plugin returns.
+    write: func(level: level, message: string) -> result<_, host-error>;
+}
+
+/// Capability `clock`: read the time. Scoped by clock: `wall` and `monotonic`.
+interface clock {
+    use types.{host-error};
+
+    /// A point in wall-clock time.
+    record datetime {
+        /// Whole seconds since 1970-01-01T00:00:00Z.
+        seconds: u64,
+        /// Nanoseconds past `seconds`, below one billion.
+        nanoseconds: u32,
+    }
+
+    /// The current wall-clock time. It can jump, backwards included.
+    now: func() -> result<datetime, host-error>;
+    /// Nanoseconds since an unspecified point fixed for the life of this instance. Never goes
+    /// backwards; use it to measure durations.
+    monotonic: func() -> result<u64, host-error>;
+}
+
+/// Capability `random`: random bytes from the host's cryptographically secure generator.
+/// Scoped by source: `secure`.
+interface random {
+    use types.{host-error};
+
+    /// `len` random bytes; at most 65536 per call.
+    get-bytes: func(len: u32) -> result<list<u8>, host-error>;
+}
+
 /// A plugin. Every import is a capability the host must grant before the plugin is
 /// instantiated; a plugin that imports nothing can only compute.
 world plugin {
@@ -124,6 +170,9 @@ world plugin {
     import fs-write;
     import kernel;
     import events;
+    import log;
+    import clock;
+    import random;
 
     /// Called once per instantiation with the plugin's configuration as JSON text.
     export activate: func(config: string) -> result<plugin-info, string>;

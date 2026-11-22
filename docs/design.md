@@ -182,8 +182,9 @@ user gets from Goose out of the box should be reachable here with shipped plugin
 
 ## Capabilities
 
-The plugin world in `wit/corduroy.wit` imports four host interfaces and nothing else. There is
-no WASI in the linker, so a plugin has no clock, environment, filesystem or network of its own.
+The plugin world in `wit/corduroy.wit` imports seven host interfaces and nothing else. There
+is no WASI in the linker, so a plugin has no clock, environment, filesystem or network of its
+own beyond what these give it.
 
 | Capability | Grants | Scoped by |
 | --- | --- | --- |
@@ -191,6 +192,13 @@ no WASI in the linker, so a plugin has no clock, environment, filesystem or netw
 | `fs-write` | create, replace and delete files | absolute path |
 | `kernel` | run code in a host kernel | kernel name |
 | `events` | publish to the event stream | topic |
+| `log` | diagnostic lines, recorded as `plugin/log` under the plugin's name (16 KiB each) | level: `debug`, `info`, `warn`, `error` |
+| `clock` | wall-clock time; a monotonic clock that starts with the instance | clock: `wall`, `monotonic` |
+| `random` | bytes from the host's secure generator (64 KiB per call) | source: `secure` |
+
+Every capability is scoped, even where there is one obvious resource, so that `Scope::none()`
+keeps meaning "linked but lets nothing through", which is how a script-host automation is
+denied a capability its interpreter imports.
 
 - **Declared by imports.** A plugin's requirements are its component's imports;
   `WasmPlugin::requires` reports them, and there is no separate manifest to fall out of step.
@@ -226,14 +234,14 @@ Everything else is a plugin, and a plugin may itself offer primitives to other p
 
 | Primitive | Status | Target |
 | --- | --- | --- |
-| Plugin tree (`App`, `Context`, effects, `inject`) | built | Add a restart limit so a plugin that keeps faulting is suspended, not retried forever. A trapped WebAssembly plugin is re-instantiated on its next use and counts against that limit; in Python a stray `print` is a trap, so this is not a rare path. |
+| Plugin tree (`App`, `Context`, effects, `inject`) | built | Built for WebAssembly: a call that traps kills the instance, and the next call makes a new one and activates it again, keeping the plugin's registrations; after `Limits::restarts` restarts (default 3) the next trap stops the plugin until it is reloaded (`plugin/trapped`, `plugin/restarted`, `plugin/stopped`). Still to do: the same limit in the plugin tree itself, so a stopped plugin shows as suspended in `App` rather than only refusing calls. |
 | Event log | built | A fallible `Log` trait. A step's events are one atomic commit, stored before any listener or the model sees them. The core has the trait and the in-memory stream; stores are separate crates. |
 | Sessions | built | Many sessions, each with an id and an optional parent. Every event of a run names its session; events about the plugin tree name none. Still to do: events a plugin emits while serving a tool call do not carry that call's session. |
 | Tool lifecycle | partly built | Built: `tool/call`, `tool/start` and `tool/result` are each committed as they happen, per call; `ToolSpec::replay_safe` says whether a call that was running at a crash may be repeated, and `read_only` whether it changes anything. Still to do: results as content blocks rather than one string, progress and cancellation. |
 | Gates | built for `tool/call` | A fourth registry. A gate is asked at a named decision point before something happens and answers allow, deny or ask; the strictest answer wins and is recorded. Reachable from WebAssembly through the `gate` export. Still to do: more decision points (`plugin/load` first). See [Events, gates and hooks](#events-gates-and-hooks). |
 | Waits and signals | built for a gate's ask | A run whose tool call a gate asked about waits for `Harness::answer`; the ask and the answer are events, so the wait survives a restart. Still to do: the general form, a step that waits for any named signal (a child session finishing, a timer). |
 | Services | native only | Calls between plugins across the WebAssembly boundary, as a capability scoped by service name. |
-| Capabilities | four | The mechanism is settled; the set grows (below). |
+| Capabilities | seven | The mechanism is settled; the set grows (below). |
 | Kernels | built | The trait and registry stay. `ShellKernel` is an implementation, not a primitive, and moves out to a plugin crate. |
 | Conversation projection | messages only | Understands a `compaction` event (a summary and the first message kept). Producing the summary is a plugin's job. |
 | Model access | constructor argument | A `provider` service that a plugin supplies, so the model is swappable like everything else. |
@@ -251,9 +259,6 @@ Capabilities to add, each a WIT interface with a scope:
 | `plugins` | load, unload and list plugins | plugin name | an extension manager |
 | `http` | make a request | host | web fetch, remote MCP |
 | `secret` | read a named credential | secret name | providers, MCP servers |
-| `clock` | read the time | (none) | schedulers, timestamps in output, every JavaScript and Python plugin |
-| `random` | random bytes | (none) | identifiers, tokens |
-| `log` | write a diagnostic line to the event stream under the plugin's name | (none) | every plugin; where a guest's `print` goes |
 | `tools` | call a registered tool, through the gates | tool name | automations, code mode |
 
 Two rules follow from adding these:
@@ -548,7 +553,10 @@ the step it waits on is done.
    cancellation.
 5. Services across the WebAssembly boundary; `state`; `tools`. Also `log`, `clock` and
    `random`, brought forward from step 7 because JavaScript and Python plugins cannot do
-   without them, and re-instantiating a trapped plugin under the restart limit.
+   without them, and re-instantiating a trapped plugin under the restart limit. *Done:*
+   `log`, `clock`, `random` (checked from JavaScript and Python, see
+   [Guest languages](guest-languages.md#host-calls-log-clock-and-random)) and restarting a
+   trapped WebAssembly plugin. *Still to do:* services, `state`, `tools`.
 6. Loading plugins safely: `plugins` with no amplification, the `plugin/load` decision
    point, protected paths, the cascade limit. With it, the compiled-code cache: a component
    compiled once per process, wasmtime's `cache` and `parallel-compilation` features switched

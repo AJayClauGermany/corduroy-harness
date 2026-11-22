@@ -317,3 +317,141 @@ fn bytes_that_are_not_a_plugin_are_rejected() {
             .starts_with("cannot read `/no/such/plugin.wasm`")
     );
 }
+
+/// The output of the testbed's `probe`, as JSON.
+fn probe(host: &Host) -> Result<serde_json::Value, Box<dyn Error>> {
+    Ok(serde_json::from_str(&host.tools.call("probe", "{}")?)?)
+}
+
+#[test]
+fn log_clock_and_random_answer_within_their_grants() {
+    let dir = scratch("host-calls");
+    let mut host = host(&dir).unwrap();
+    let testbed = load("testbed", &dir)
+        .unwrap()
+        .grant("log", Scope::any())
+        .grant("clock", Scope::any())
+        .grant("random", Scope::any());
+    assert_eq!(testbed.requires(), ["log", "clock", "random"]);
+    host.app.plugin(testbed);
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let first = probe(&host).unwrap();
+    let second = probe(&host).unwrap();
+
+    assert_eq!(first["logged"], true);
+    let seconds = first["now"][0].as_u64().unwrap();
+    assert!((before..before + 60).contains(&seconds), "{first}");
+    assert_eq!(first["monotonic"], true);
+    let random = first["random"].as_str().unwrap();
+    assert_eq!(random.len(), 32);
+    assert_ne!(first["random"], second["random"]);
+    // The log line is on the stream under the plugin's name.
+    let logged = host.app.events().matching(&Pattern::new("plugin/log"));
+    assert_eq!(logged.len(), 2);
+    assert_eq!(logged[0].source.to_string(), "plugin:testbed");
+    assert_eq!(
+        logged[0].payload,
+        r#"{"level":"info","message":"probing the host","truncated":false}"#
+    );
+}
+
+#[test]
+fn log_clock_and_random_are_scoped_like_any_capability() {
+    let dir = scratch("host-calls-denied");
+    let mut host = host(&dir).unwrap();
+    let testbed = load("testbed", &dir)
+        .unwrap()
+        .grant("log", Scope::none().allow("error"))
+        .grant("clock", Scope::none().allow("monotonic"))
+        .grant("random", Scope::none());
+    host.app.plugin(testbed);
+
+    let probed = probe(&host).unwrap();
+
+    assert_eq!(
+        probed["logged"]["denied"],
+        "capability `log` does not cover `info`"
+    );
+    assert_eq!(
+        probed["now"]["denied"],
+        "capability `clock` does not cover `wall`"
+    );
+    assert_eq!(probed["monotonic"], true);
+    assert_eq!(
+        probed["random"]["denied"],
+        "capability `random` does not cover `secure`"
+    );
+    assert_eq!(topics(&host.app, "plugin/log").len(), 0);
+    assert_eq!(topics(&host.app, "capability/denied").len(), 3);
+}
+
+fn restartable(dir: &Path, restarts: u32) -> Result<WasmPlugin, WasmError> {
+    Ok(WasmRuntime::new()?
+        .with_root(dir)
+        .with_limits(Limits {
+            restarts,
+            ..Limits::default()
+        })
+        .load(plugin("testbed"))?
+        .grant("log", Scope::any())
+        .grant("clock", Scope::any())
+        .grant("random", Scope::any()))
+}
+
+#[test]
+fn a_trapped_plugin_starts_again_from_fresh_memory_on_its_next_call() {
+    let dir = scratch("restart");
+    let mut host = host(&dir).unwrap();
+    host.app.plugin(restartable(&dir, 3).unwrap());
+    assert_eq!(host.tools.call("count", "{}").unwrap(), "1");
+    assert_eq!(host.tools.call("count", "{}").unwrap(), "2");
+
+    let trapped = host.tools.call("trap", "{}");
+
+    assert!(
+        matches!(&trapped, Err(ToolError::Failed(reason)) if reason.contains("trapped")),
+        "{trapped:?}"
+    );
+    assert_eq!(topics(&host.app, "plugin/restarted").len(), 0);
+    // The next call finds a new instance, with its registrations intact and its memory new.
+    assert_eq!(host.tools.call("count", "{}").unwrap(), "1");
+    assert_eq!(
+        topics(&host.app, "plugin/restarted"),
+        [r#"{"plugin":"testbed","attempt":1}"#]
+    );
+    assert_eq!(
+        topics(&host.app, "plugin/trapped").len(),
+        1,
+        "{:?}",
+        topics(&host.app, "plugin/trapped")
+    );
+}
+
+#[test]
+fn a_plugin_that_keeps_trapping_is_stopped_until_reloaded() {
+    let dir = scratch("restart-limit");
+    let mut host = host(&dir).unwrap();
+    let id = host.app.plugin(restartable(&dir, 1).unwrap());
+
+    host.tools.call("trap", "{}").unwrap_err();
+    host.tools.call("trap", "{}").unwrap_err();
+    let stopped = host.tools.call("count", "{}").unwrap_err();
+
+    assert_eq!(
+        stopped.to_string(),
+        "tool failed: plugin `testbed` was stopped after trapping 2 times and must be reloaded"
+    );
+    assert_eq!(topics(&host.app, "plugin/restarted").len(), 1);
+    assert_eq!(
+        topics(&host.app, "plugin/stopped"),
+        [r#"{"plugin":"testbed","traps":2}"#]
+    );
+
+    // Reloading applies the plugin afresh, with a new count of traps.
+    host.app.reload(id).unwrap();
+    assert_eq!(host.tools.call("count", "{}").unwrap(), "1");
+}

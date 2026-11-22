@@ -14,7 +14,7 @@ oi-kit's state machine. `docs/design.md` explains where each idea comes from and
 | `crates/corduroy-wasm` | wasmtime host. Loads components built against `wit/corduroy.wit` as `Plugin`s; links only granted interfaces. |
 | `src/` (`corduroy-harness`) | Assembles the loop from oi-kit: `Harness` (sessions, `run_in`, `continue_run`, `answer`), `Journal` (one step's effects to one commit), `GateOperation`, `PluginTools`, `ScriptedProvider`. Async (tokio). |
 | `wit/corduroy.wit` | The typed plugin boundary. Each imported interface is one capability. |
-| `plugins/` | **Separate workspace**, built for `wasm32-unknown-unknown`: `pi-tools` (read, write, edit, bash), `skills` and `approval` (a gate: permission modes). |
+| `plugins/` | **Separate workspace**, built for `wasm32-unknown-unknown`: `pi-tools` (read, write, edit, bash), `skills`, `approval` (a gate: permission modes) and `testbed` (for the host's tests only: host calls and traps on demand). |
 | `crates/corduroy-test-support` | Test-only helpers: finds built plugins, makes scratch directories. |
 
 ## Commands
@@ -91,6 +91,10 @@ as design guidance, not noise.
   resource against the grant's scope before acting. Do not add WASI to the linker. A new host
   ability means a new interface in `wit/corduroy.wit`, a `Host` impl in
   `crates/corduroy-wasm/src/plugin/host.rs` and an entry in `CAPABILITIES`.
+- **A trap kills an instance, not the plugin.** The next call re-instantiates it from its
+  `Blueprint` and activates it again, up to `Limits::restarts`; then it is stopped until
+  reloaded. A plugin must not rely on memory surviving a trap: durable state goes through the
+  host.
 - **Never call back into a plugin while it is running.** Events a plugin raises are queued and
   delivered after its call returns (`Instance::call`).
 - **The event stream is the record.** The conversation is a projection of `message` events

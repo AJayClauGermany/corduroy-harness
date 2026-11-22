@@ -9,7 +9,6 @@ use corduroy_core::{
     Verdict,
 };
 use wasmtime::component::{Component, HasSelf, Linker};
-use wasmtime::{Store, StoreLimitsBuilder};
 
 use crate::runtime::{WasmError, WasmRuntime};
 
@@ -18,15 +17,17 @@ mod host;
 mod instance;
 mod paths;
 
-use bindings::corduroy::plugin::{events, fs_read, fs_write, kernel, types};
+use bindings::corduroy::plugin::{clock, events, fs_read, fs_write, kernel, log, random, types};
 use host::HostState;
-use instance::Instance;
+use instance::{Blueprint, Instance};
 
 /// The package every host interface belongs to.
 const PACKAGE: &str = "corduroy:plugin/";
 
 /// The host interfaces that are capabilities, by the name they are granted under.
-const CAPABILITIES: [&str; 4] = ["fs-read", "fs-write", "kernel", "events"];
+const CAPABILITIES: [&str; 7] = [
+    "fs-read", "fs-write", "kernel", "events", "log", "clock", "random",
+];
 
 /// A plugin implemented as a WebAssembly component.
 ///
@@ -127,6 +128,9 @@ impl WasmPlugin {
                 "fs-write" => fs_write::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state),
                 "kernel" => kernel::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state),
                 "events" => events::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state),
+                "log" => log::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state),
+                "clock" => clock::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state),
+                "random" => random::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state),
                 _ => Ok(()),
             }
             .map_err(|error| link_error(&error))?;
@@ -150,10 +154,6 @@ impl WasmPlugin {
             )));
         }
 
-        let engine = self.runtime.engine();
-        let linker = self.linker()?;
-
-        let limits = self.runtime.limits();
         let kernels = if self
             .requires
             .iter()
@@ -163,31 +163,19 @@ impl WasmPlugin {
         } else {
             None
         };
-        let mut store = Store::new(
-            engine,
-            HostState {
-                plugin: self.name.clone(),
-                grants: self.grants.clone(),
-                root: self.runtime.root().to_owned(),
-                kernels,
-                outbox: Vec::new(),
-                limits: StoreLimitsBuilder::new()
-                    .memory_size(limits.memory_bytes)
-                    .build(),
-            },
-        );
-        store.limiter(|state| &mut state.limits);
-        store
-            .set_fuel(limits.fuel_per_call)
-            .map_err(|error| link_error(&error))?;
-        let exports = bindings::Plugin::instantiate(&mut store, &self.component, &linker)
-            .map_err(|error| link_error(&error))?;
-        Ok(Instance::new(
-            store,
-            exports,
-            ctx.events(),
-            limits.fuel_per_call,
-        ))
+        let blueprint = Blueprint {
+            name: self.name.clone(),
+            engine: self.runtime.engine().clone(),
+            component: self.component.clone(),
+            linker: self.linker()?,
+            grants: self.grants.clone(),
+            root: self.runtime.root().to_owned(),
+            kernels,
+            limits: self.runtime.limits(),
+            config: self.config.clone(),
+        };
+        let inner = blueprint.instantiate().map_err(PluginError::new)?;
+        Ok(Instance::new(blueprint, inner, ctx.events()))
     }
 }
 

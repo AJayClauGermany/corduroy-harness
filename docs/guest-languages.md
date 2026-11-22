@@ -95,6 +95,7 @@ processes. Instantiating an already compiled component is milliseconds.
   plugin reaches for and gets a trap or a wrong answer. `log` is diagnostic output that goes
   to the event stream under the plugin's name; `clock` and a `random` source are host calls
   so that their results can be recorded. All three are trivial `Host` implementations.
+  *Done;* see [Host calls](#host-calls-log-clock-and-random).
 - **Guest SDKs are required, not a convenience.** One package per language that: wraps the
   generated bindings; routes `console`/`sys.stdout` and `print` to `log`; replaces the clock
   and the random source with the host's; turns an uncaught exception in `call-tool` into
@@ -113,7 +114,7 @@ processes. Instantiating an already compiled component is milliseconds.
 - **A restart policy for trapped plugins matters more.** In Rust a trap is a bug. In Python
   it is one stray `print`. The restart limit planned for the plugin tree should count traps,
   and a trapped plugin should be re-instantiated on its next use rather than stay dead until
-  someone reloads it.
+  someone reloads it. *Done* for WebAssembly plugins (`Limits::restarts`).
 - **Memory is per instance.** Each JavaScript or Python instance holds 9 to 13 MB before it
   does anything, so twenty automations are a few hundred megabytes. Acceptable; worth
   knowing before sub-agents multiply instances.
@@ -143,6 +144,40 @@ Two consequences:
   but the `request` a gate receives is JSON text and keeps its kebab-case keys, so a gate
   reads `request['read-only']`. The host keeps every JSON key it defines in the same case as
   the WIT, so there is one spelling per name.
+
+## Host calls: log, clock and random
+
+Checked in November 2026 when the three interfaces were added. One JavaScript and one Python
+plugin called `log.write`, `clock.now`, `clock.monotonic` twice and `random.get-bytes(16)`
+from a tool, built WASI-free against the world with all seven imports and loaded by the host
+with each granted. The wall clock was the real time, the monotonic clock went forward,
+consecutive calls drew different bytes (unlike the build-time seed of the WASI-free
+`Math.random`), and the log lines were on the stream as `plugin/log`.
+
+| | JavaScript | Python |
+| --- | --- | --- |
+| Import | `import { write } from 'corduroy:plugin/log@0.1.0'` | `from wit_world.imports import log, clock, random` |
+| A `level` | `'info'` | `log.Level.INFO` |
+| `now()` | `{seconds: bigint, nanoseconds: number}` | `clock.Datetime(seconds, nanoseconds)` |
+| `monotonic()` | `bigint` | `int` |
+| `get-bytes` | `Uint8Array` | `bytes` |
+| A host error | throws `ComponentError` with `payload` `{tag, val}`; not `instanceof Error` | raises `Err` with `value` a `HostError_Denied` / `HostError_Failed` |
+
+The random function was first called `bytes`, which in Python hid the built-in of that name
+inside the generated module; it is `get-bytes`. The interface is still `random`, so a Python
+plugin imports it under another name (`from wit_world.imports import random as host_random`)
+to keep the standard library's.
+
+**What an SDK can patch, and what it cannot.** Assigning the language's own entry points at
+module top level survives the build and routes them to the host:
+
+| Works | Still wrong without more work |
+| --- | --- |
+| JavaScript: `console.log`/`warn`, `Date.now`, `Math.random`, `performance.now` | `new Date()` (frozen at build time), `crypto.getRandomValues` (build-time seed) |
+| Python: `builtins.print`, `sys.stdout`, `time.time`, `time.time_ns`, `time.monotonic`, seeding `random` | `datetime.datetime.now()` and `os.urandom` still trap, uncatchably |
+
+So the SDKs patch more than the obvious names: JavaScript's `Date` constructor and `crypto`,
+Python's `datetime` and `os.urandom`.
 
 ## Not tested
 

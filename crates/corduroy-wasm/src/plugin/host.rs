@@ -7,17 +7,25 @@
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime};
 
 use corduroy_core::{Draft, Grants, Kernels, Source, json};
 use wasmtime::StoreLimits;
 
 use super::bindings::corduroy::plugin::types::HostError;
-use super::bindings::corduroy::plugin::{events, fs_read, fs_write, kernel, types};
+use super::bindings::corduroy::plugin::{
+    clock, events, fs_read, fs_write, kernel, log, random, types,
+};
 use super::paths;
 
 /// Largest file `fs-read` will hand to a plugin, in bytes.
 const MAX_FILE: u64 = 8 << 20;
+
+/// Longest message `log` records, in bytes. Longer ones are cut short.
+const MAX_LOG: usize = 16 << 10;
+
+/// Most bytes `random` hands out per call.
+const MAX_RANDOM: u32 = 64 << 10;
 
 /// Everything the host knows about one plugin instance. Lives in the instance's store.
 pub(super) struct HostState {
@@ -31,6 +39,8 @@ pub(super) struct HostState {
     /// once could re-enter the instance that is still running.
     pub(super) outbox: Vec<Draft>,
     pub(super) limits: StoreLimits,
+    /// When the instance was made: the zero of its monotonic clock.
+    pub(super) started: Instant,
 }
 
 impl HostState {
@@ -137,5 +147,64 @@ impl events::Host for HostState {
         let source = Source::Plugin(self.plugin.clone());
         self.outbox.push(Draft::new(source, topic).payload(payload));
         Ok(())
+    }
+}
+
+impl log::Host for HostState {
+    fn write(&mut self, level: log::Level, mut message: String) -> Result<(), HostError> {
+        let level = match level {
+            log::Level::Debug => "debug",
+            log::Level::Info => "info",
+            log::Level::Warn => "warn",
+            log::Level::Error => "error",
+        };
+        self.check("log", level)?;
+        let truncated = message.len() > MAX_LOG;
+        if truncated {
+            message.truncate(message.floor_char_boundary(MAX_LOG));
+        }
+        let payload = format!(
+            "{{\"level\":{},\"message\":{},\"truncated\":{truncated}}}",
+            json::string(level),
+            json::string(&message)
+        );
+        let source = Source::Plugin(self.plugin.clone());
+        self.outbox
+            .push(Draft::new(source, "plugin/log").payload(payload));
+        Ok(())
+    }
+}
+
+impl clock::Host for HostState {
+    fn now(&mut self) -> Result<clock::Datetime, HostError> {
+        self.check("clock", "wall")?;
+        let since = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_err(|error| HostError::Failed(format!("the clock is before 1970: {error}")))?;
+        Ok(clock::Datetime {
+            seconds: since.as_secs(),
+            nanoseconds: since.subsec_nanos(),
+        })
+    }
+
+    fn monotonic(&mut self) -> Result<u64, HostError> {
+        self.check("clock", "monotonic")?;
+        // Saturates after some 584 years of one instance.
+        Ok(u64::try_from(self.started.elapsed().as_nanos()).unwrap_or(u64::MAX))
+    }
+}
+
+impl random::Host for HostState {
+    fn get_bytes(&mut self, len: u32) -> Result<Vec<u8>, HostError> {
+        self.check("random", "secure")?;
+        if len > MAX_RANDOM {
+            return Err(HostError::Failed(format!(
+                "{len} bytes is over the {MAX_RANDOM} byte limit"
+            )));
+        }
+        let mut bytes = vec![0; usize::try_from(len).unwrap_or(0)];
+        getrandom::fill(&mut bytes)
+            .map_err(|error| HostError::Failed(format!("no random bytes: {error}")))?;
+        Ok(bytes)
     }
 }

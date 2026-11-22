@@ -19,6 +19,9 @@ pub struct Limits {
     pub fuel_per_call: u64,
     /// Most linear memory an instance may grow to, in bytes.
     pub memory_bytes: usize,
+    /// How many times a plugin is started again after a call traps. The trap after the last
+    /// restart stops it until it is reloaded. Counted from when the plugin was applied.
+    pub restarts: u32,
 }
 
 impl Default for Limits {
@@ -26,6 +29,7 @@ impl Default for Limits {
         Self {
             fuel_per_call: 2_000_000_000,
             memory_bytes: 64 << 20,
+            restarts: 3,
         }
     }
 }
