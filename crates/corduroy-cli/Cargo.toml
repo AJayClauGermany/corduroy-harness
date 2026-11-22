@@ -19,7 +19,7 @@ name = "corduroy"
 path = "src/main.rs"
 
 [dependencies]
-corduroy-harness = { workspace = true }
+corduroy-harness = { workspace = true, features = ["wasm", "shell", "jsonl"] }
 corduroy-http = { workspace = true }
 corduroy-mcp = { workspace = true }
 corduroy-providers = { workspace = true }

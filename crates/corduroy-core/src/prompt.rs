@@ -4,6 +4,8 @@
 //! state (the skills it knows, the kernels that are running) rather than a snapshot.
 
 use crate::registry::Registry;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 /// Name of the service under which the host provides the [`Prompts`] registry.
 pub const PROMPTS: &str = "prompts";
@@ -42,7 +44,8 @@ impl Registry<dyn PromptPart> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use alloc::borrow::ToOwned;
+    use alloc::sync::Arc;
 
     use super::*;
 

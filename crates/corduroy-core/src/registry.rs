@@ -4,11 +4,16 @@
 //! name, plugins inject it and [`register`](Registry::register) entries, and each entry is
 //! removed again when the plugin that added it is unloaded.
 
-use std::collections::BTreeMap;
-use std::collections::btree_map::Entry;
-use std::error::Error;
-use std::fmt;
-use std::sync::{Arc, PoisonError, RwLock};
+use alloc::collections::BTreeMap;
+use alloc::collections::btree_map::Entry;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::error::Error;
+use core::fmt;
+
+use crate::sync::Lock;
 
 use crate::context::{Context, PluginError};
 
@@ -32,13 +37,13 @@ impl From<Duplicate> for PluginError {
 
 /// A thread-safe map from names to shared entries.
 pub struct Registry<T: ?Sized> {
-    entries: RwLock<BTreeMap<String, Arc<T>>>,
+    entries: Lock<BTreeMap<String, Arc<T>>>,
 }
 
 impl<T: ?Sized> Default for Registry<T> {
     fn default() -> Self {
         Self {
-            entries: RwLock::new(BTreeMap::new()),
+            entries: Lock::new(BTreeMap::new()),
         }
     }
 }
@@ -62,58 +67,40 @@ impl<T: ?Sized> Registry<T> {
     ///
     /// Returns [`Duplicate`] if `name` is taken.
     pub fn insert(&self, name: impl Into<String>, entry: Arc<T>) -> Result<(), Duplicate> {
-        match self
-            .entries
-            .write()
-            .unwrap_or_else(PoisonError::into_inner)
-            .entry(name.into())
-        {
-            Entry::Occupied(taken) => Err(Duplicate(taken.key().clone())),
-            Entry::Vacant(free) => {
-                free.insert(entry);
-                Ok(())
-            }
-        }
+        self.entries
+            .with(|entries| match entries.entry(name.into()) {
+                Entry::Occupied(taken) => Err(Duplicate(taken.key().clone())),
+                Entry::Vacant(free) => {
+                    free.insert(entry);
+                    Ok(())
+                }
+            })
     }
 
     /// Remove an entry, returning it if it existed.
     pub fn remove(&self, name: &str) -> Option<Arc<T>> {
-        self.entries
-            .write()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(name)
+        self.entries.with(|entries| entries.remove(name))
     }
 
     /// Look an entry up.
     #[must_use]
     pub fn get(&self, name: &str) -> Option<Arc<T>> {
         self.entries
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(name)
-            .map(Arc::clone)
+            .with(|entries| entries.get(name).map(Arc::clone))
     }
 
     /// The registered names, sorted.
     #[must_use]
     pub fn names(&self) -> Vec<String> {
         self.entries
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .keys()
-            .cloned()
-            .collect()
+            .with(|entries| entries.keys().cloned().collect())
     }
 
     /// Every entry, sorted by name.
     #[must_use]
     pub fn entries(&self) -> Vec<Arc<T>> {
         self.entries
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .values()
-            .map(Arc::clone)
-            .collect()
+            .with(|entries| entries.values().map(Arc::clone).collect())
     }
 }
 

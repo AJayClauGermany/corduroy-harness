@@ -13,8 +13,10 @@
 //! provider's power to whoever may call it; the caller's own grant decides which services
 //! it may call, and the provider is told the caller's name and may refuse.
 
-use std::error::Error;
-use std::fmt;
+use alloc::format;
+use alloc::string::String;
+use core::error::Error;
+use core::fmt;
 
 use crate::registry::Registry;
 
@@ -93,7 +95,9 @@ impl Registry<dyn Service> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use alloc::borrow::ToOwned;
+    use alloc::string::ToString;
+    use alloc::sync::Arc;
 
     use super::*;
 

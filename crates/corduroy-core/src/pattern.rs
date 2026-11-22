@@ -1,6 +1,7 @@
 //! Glob patterns shared by capability scopes and event subscriptions.
 
-use std::fmt;
+use alloc::string::String;
+use core::fmt;
 
 /// A glob in which `*` matches any run of characters, including none.
 ///

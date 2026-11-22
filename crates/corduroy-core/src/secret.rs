@@ -7,6 +7,8 @@
 //! enters the event stream: what is recorded is that the secret was used, by name.
 
 use crate::registry::Registry;
+use alloc::format;
+use alloc::string::String;
 
 /// Name of the service under which the host provides the [`Secrets`] registry.
 pub const SECRETS: &str = "secrets";
@@ -48,7 +50,8 @@ impl Registry<dyn Secret> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use alloc::borrow::ToOwned;
+    use alloc::sync::Arc;
 
     use super::*;
 

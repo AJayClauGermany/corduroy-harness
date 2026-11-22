@@ -184,7 +184,7 @@ in [`examples/local-model/`](examples/local-model/corduroy.toml) against Liquid 
 
 | Path | Purpose |
 | --- | --- |
-| `crates/corduroy-core` | Dependency-free core: plugin contexts, capabilities, event stream with sessions and a `Log` trait, the registries plugins contribute to (tools, prompts, kernels, gates, services, models, secrets, HTTP clients) |
+| `crates/corduroy-core` | Dependency-free core, `no_std` with an allocator (microcontrollers included; the default `std` feature adds what needs an OS): plugin contexts, capabilities, event stream with sessions and a `Log` trait, the registries plugins contribute to (tools, prompts, kernels, gates, services, models, secrets, HTTP clients) |
 | `crates/corduroy-cli` | The `corduroy` command: an agent file (providers, kernels, secrets, extensions, plugins and their grants) run in a terminal; a library, so a binary can add extension kinds |
 | `crates/corduroy-mcp` | MCP servers (stdio, through a kernel, or streamable HTTP) as plugins |
 | `crates/corduroy-providers` | Model providers from `oi-kit-providers` (Anthropic, OpenAI, Ollama and the providers Goose knows), converted to the harness's own messages at the boundary |

@@ -37,6 +37,8 @@
 
 use crate::model::Role;
 use crate::tool::ToolOutput;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 /// One part of a [`Message`].
 ///
@@ -231,6 +233,7 @@ impl Message {
 mod tests {
     use super::*;
     use crate::tool::Content;
+    use alloc::vec;
 
     #[test]
     fn a_message_says_what_it_is_made_of() {

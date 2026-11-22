@@ -15,8 +15,12 @@
 //! gate that names one is a mistake its host can catch (a WebAssembly gate is refused), so a
 //! policy never silently guards a point that is never asked.
 
-use std::fmt;
-use std::sync::Arc;
+use alloc::borrow::ToOwned;
+use alloc::format;
+use alloc::string::String;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::fmt;
 
 use crate::context::Context;
 use crate::registry::{Duplicate, Registry};
@@ -289,6 +293,7 @@ impl Gates {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::string::ToString;
 
     fn always(verdict: Verdict) -> Arc<dyn Gate> {
         Arc::new(move |point: &str, _: &str| (point == TOOL_CALL).then(|| verdict.clone()))

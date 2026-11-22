@@ -25,11 +25,17 @@
 //! commit at the same moment each deliver their own commit, so a listener may hear the later
 //! of the two first; what a listener must not get wrong it reads from the log, by id.
 
-use std::error::Error;
-use std::fmt;
-use std::str::FromStr;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::{SystemTime, UNIX_EPOCH};
+use alloc::borrow::ToOwned;
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::String;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::error::Error;
+use core::fmt;
+use core::str::FromStr;
+
+use crate::sync::Lock;
 
 use crate::pattern::Pattern;
 
@@ -307,12 +313,21 @@ type Listener = Arc<dyn Fn(&Event) + Send + Sync>;
 type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
 
 /// The system clock, in milliseconds since the Unix epoch.
+#[cfg(feature = "std")]
 fn system_clock() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| {
             u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
         })
+}
+
+/// Without the standard library there is no system clock: the epoch, until a clock is given
+/// with [`EventStream::with_clock`]. Commits still never go back in time.
+#[cfg(not(feature = "std"))]
+const fn system_clock() -> u64 {
+    0
 }
 
 /// A committed event and the listeners that should hear about it.
@@ -383,15 +398,17 @@ impl Inner {
 /// An append-only log of [`Event`]s that notifies listeners as events arrive.
 #[derive(Default)]
 pub struct EventStream {
-    inner: Mutex<Inner>,
+    inner: Lock<Inner>,
 }
 
 impl fmt::Debug for EventStream {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let inner = self.lock();
+        let (events, listeners) = self
+            .inner
+            .with(|inner| (inner.log.len(), inner.subscriptions.len()));
         f.debug_struct("EventStream")
-            .field("events", &inner.log.len())
-            .field("listeners", &inner.subscriptions.len())
+            .field("events", &events)
+            .field("listeners", &listeners)
             .finish()
     }
 }
@@ -412,7 +429,7 @@ impl EventStream {
         let next_event = log.iter().map(|event| event.id.get()).max().unwrap_or(0);
         let last_time = log.iter().map(|event| event.time).max().unwrap_or(0);
         Self {
-            inner: Mutex::new(Inner {
+            inner: Lock::new(Inner {
                 log,
                 next_event,
                 last_time,
@@ -425,7 +442,8 @@ impl EventStream {
     /// than from the system clock: for tests, and for hosts that keep time themselves.
     #[must_use]
     pub fn with_clock(self, clock: impl Fn() -> u64 + Send + Sync + 'static) -> Self {
-        self.lock().clock = Some(Arc::new(clock));
+        let clock: Clock = Arc::new(clock);
+        self.inner.with(|inner| inner.clock = Some(clock));
         self
     }
 
@@ -435,7 +453,8 @@ impl EventStream {
     /// to one [`replay`](Self::replay)ed from that same log.
     #[must_use]
     pub fn with_log(self, log: impl Log + 'static) -> Self {
-        self.lock().store = Some(Box::new(log));
+        let log: Box<dyn Log> = Box::new(log);
+        self.inner.with(|inner| inner.store = Some(log));
         self
     }
 
@@ -454,7 +473,8 @@ impl EventStream {
         &self,
         drafts: impl IntoIterator<Item = Draft>,
     ) -> Result<Vec<EventId>, LogError> {
-        let committed = self.lock().commit(drafts.into_iter().collect())?;
+        let drafts = drafts.into_iter().collect();
+        let committed = self.inner.with(|inner| inner.commit(drafts))?;
         // The lock is released, so listeners are free to commit or subscribe.
         Ok(committed
             .into_iter()
@@ -485,107 +505,113 @@ impl EventStream {
         topics: impl Into<Pattern>,
         listener: impl Fn(&Event) + Send + Sync + 'static,
     ) -> ListenerId {
-        let mut inner = self.lock();
-        inner.next_listener += 1;
-        let id = ListenerId(inner.next_listener);
-        inner.subscriptions.push(Subscription {
-            id,
-            topics: topics.into(),
-            listener: Arc::new(listener),
-        });
-        id
+        let topics = topics.into();
+        let listener: Listener = Arc::new(listener);
+        self.inner.with(|inner| {
+            inner.next_listener += 1;
+            let id = ListenerId(inner.next_listener);
+            inner.subscriptions.push(Subscription {
+                id,
+                topics,
+                listener,
+            });
+            id
+        })
     }
 
     /// Stop delivering to a listener. Unknown ids are ignored.
     pub fn unsubscribe(&self, id: ListenerId) {
-        self.lock()
-            .subscriptions
-            .retain(|subscription| subscription.id != id);
+        self.inner.with(|inner| {
+            inner
+                .subscriptions
+                .retain(|subscription| subscription.id != id);
+        });
     }
 
     /// A copy of every event so far, oldest first.
     #[must_use]
     pub fn events(&self) -> Vec<Event> {
-        self.lock().log.clone()
+        self.inner.with(|inner| inner.log.clone())
     }
 
     /// A copy of the event `id`, if the stream holds it.
     #[must_use]
     pub fn get(&self, id: EventId) -> Option<Event> {
-        let inner = self.lock();
-        inner
-            .log
-            .binary_search_by_key(&id, |event| event.id)
-            .ok()
-            .and_then(|position| inner.log.get(position).cloned())
+        self.inner.with(|inner| {
+            inner
+                .log
+                .binary_search_by_key(&id, |event| event.id)
+                .ok()
+                .and_then(|position| inner.log.get(position).cloned())
+        })
     }
 
     /// How many causes lead up to the event `id`: zero for an event nothing caused. Stops
     /// counting at `limit`, so a long chain costs no more than that.
     #[must_use]
     pub fn depth(&self, id: EventId, limit: usize) -> usize {
-        let inner = self.lock();
-        let mut depth = 0;
-        let mut current = id;
-        while depth < limit {
-            let cause = inner
-                .log
-                .binary_search_by_key(&current, |event| event.id)
-                .ok()
-                .and_then(|position| inner.log.get(position))
-                .and_then(|event| event.cause);
-            let Some(cause) = cause else {
-                break;
+        self.inner.with(|inner| {
+            let cause_of = |id: EventId| {
+                inner
+                    .log
+                    .binary_search_by_key(&id, |event| event.id)
+                    .ok()
+                    .and_then(|position| inner.log.get(position))
+                    .and_then(|event| event.cause)
             };
-            depth += 1;
-            current = cause;
-        }
-        drop(inner);
-        depth
+            core::iter::successors(cause_of(id), |&cause| cause_of(cause))
+                .take(limit)
+                .count()
+        })
     }
 
     /// A copy of the first `limit` events with an id above `after` for which `keep` holds,
     /// oldest first.
     #[must_use]
     pub fn after(&self, after: EventId, limit: usize, keep: impl Fn(&Event) -> bool) -> Vec<Event> {
-        let inner = self.lock();
-        let start = inner.log.partition_point(|event| event.id <= after);
-        inner
-            .log
-            .iter()
-            .skip(start)
-            .filter(|event| keep(event))
-            .take(limit)
-            .cloned()
-            .collect()
+        self.inner.with(|inner| {
+            let start = inner.log.partition_point(|event| event.id <= after);
+            inner
+                .log
+                .iter()
+                .skip(start)
+                .filter(|event| keep(event))
+                .take(limit)
+                .cloned()
+                .collect()
+        })
     }
 
     /// A copy of every event whose topic matches `topics`, oldest first.
     #[must_use]
     pub fn matching(&self, topics: &Pattern) -> Vec<Event> {
-        self.lock()
-            .log
-            .iter()
-            .filter(|event| topics.matches(&event.topic))
-            .cloned()
-            .collect()
+        self.inner.with(|inner| {
+            inner
+                .log
+                .iter()
+                .filter(|event| topics.matches(&event.topic))
+                .cloned()
+                .collect()
+        })
     }
 
     /// A copy of every event that belongs to `session`, oldest first.
     #[must_use]
     pub fn session(&self, session: &SessionId) -> Vec<Event> {
-        self.lock()
-            .log
-            .iter()
-            .filter(|event| event.session.as_ref() == Some(session))
-            .cloned()
-            .collect()
+        self.inner.with(|inner| {
+            inner
+                .log
+                .iter()
+                .filter(|event| event.session.as_ref() == Some(session))
+                .cloned()
+                .collect()
+        })
     }
 
     /// How many events have been emitted.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.lock().log.len()
+        self.inner.with(|inner| inner.log.len())
     }
 
     /// Whether nothing has been emitted yet.
@@ -593,17 +619,14 @@ impl EventStream {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
-
-    fn lock(&self) -> MutexGuard<'_, Inner> {
-        // A listener that panicked cannot leave the log half-written: every mutation above
-        // completes before listeners run. Recover the guard rather than propagate the poison.
-        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
-    }
 }
 
 #[cfg(test)]
 mod tests {
+    use alloc::string::ToString;
+    use alloc::vec;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Mutex, PoisonError};
 
     use super::*;
 

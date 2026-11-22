@@ -1,6 +1,7 @@
 [toolchain]
 channel = "stable"
 components = ["clippy", "rustfmt"]
-# Guest plugins in plugins/ compile to WebAssembly.
-targets = ["wasm32-unknown-unknown"]
+# Guest plugins in plugins/ compile to WebAssembly; the core also builds for a microcontroller
+# without the standard library (scripts/check.sh).
+targets = ["wasm32-unknown-unknown", "thumbv7em-none-eabihf"]
 profile = "minimal"

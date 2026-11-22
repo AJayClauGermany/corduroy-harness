@@ -414,6 +414,44 @@ kinds (`corduroy_cli::command::main_with` and `extension::Extensions`), rebuilt.
 file still decides which are loaded. Add-ons are listed under `[[plugins]]`, each with its
 grants.
 
+## Without the standard library
+
+The core is to an agent what Rust's `core` and `alloc` are to a program: what every build
+has, down to a microcontroller with an allocator and no operating system. What needs an
+operating system sits over it, as Rust's `std` does; like `std` it is what most people get by
+default, and like `std` a device can do without it and bring its own.
+
+**The core** (`corduroy-core`) is `no_std` and needs only `alloc`. Its `std` feature, on by
+default and still free of dependencies, adds the standard library's locks, a call scope per
+thread, the system clock, and kernels. Without `std`:
+
+- Its lock comes from the `critical-section` feature, whose implementation the device's HAL
+  (or the extension made for the device) supplies, so the core needs no `unsafe` and does not
+  choose for the device. A critical section may mask interrupts. The core holds it only for
+  its own bookkeeping and while the stream's `Log` stores a commit, never while calling a
+  plugin or a listener, so a log for a device stores a commit quickly or hands it on.
+- The call scope (`corduroy_core::call`) is one for the program rather than one per thread:
+  right for a single-threaded executor.
+- There is no system clock. The host gives the stream one (`EventStream::with_clock`); until
+  it does, commits are stamped with the epoch, and never go back in time.
+- There are no kernels: `Kernel::spawn` and `Process` are processes and pipes.
+- The target needs atomic compare-and-swap, which `Arc` does: Cortex-M3 and up, RISC-V with
+  the A extension, Xtensa; not Cortex-M0+ (RP2040) or the ESP32-C3. CI builds and lints the
+  core for `thumbv7em-none-eabihf`.
+
+**The standard extensions** are what the shipped command carries over the core: the loop
+(`corduroy-harness`, on tokio), the WebAssembly host, the shell kernel, the JSON Lines log,
+the HTTP client, MCP and the providers. Each is chosen where the harness is put together.
+`corduroy-harness`'s features `wasm`, `shell` and `jsonl` are on by default; without them
+the harness carries no WebAssembly runtime, starts no shell and writes no file, and runs
+extensions only. A device swaps in its own: a log on flash, a kernel that is an embedded
+interpreter, an HTTP client over its network stack. Without `wasm` the core tier has no
+WebAssembly host, and the agent has no add-ons.
+
+*Planned.* The loop needs `std` and tokio, so a microcontroller can run the plugin tree, the
+registries, the gates and the event stream, but not yet `Harness`. A loop for one needs an
+executor it does not choose, and tool calls that do not run on a thread pool.
+
 ## What is stable
 
 Four contracts are meant to hold, so that extensions and add-ons written against them keep
@@ -422,7 +460,7 @@ working. Everything else may move.
 | Contract | Where | Rule for change |
 | --- | --- | --- |
 | The plugin world | `wit/corduroy.wit` | Adding an import interface (a capability) breaks nobody: a plugin that does not import it is unaffected, and a host without it refuses, at load, a plugin that does. Changing an export, or a type a guest sees, changes the package version, and guests are rebuilt against it; so exports and shared types change only together, rarely, and never to add what an import could add. |
-| The core's traits and registries | `corduroy-core`, and the loop's own that extensions implement or register in: `Operation`, `Operations`, `Provider`, `Providers` (`corduroy-harness`) | New trait methods come with defaults (as `Kernel::spawn` did). Types that grow are `#[non_exhaustive]` with constructors (`ToolSpec`, tool results), so a new field breaks no extension. |
+| The core's traits and registries | `corduroy-core`, and the loop's own that extensions implement or register in: `Operation`, `Operations`, `Provider`, `Providers` (`corduroy-harness`) | New trait methods come with defaults (as `Kernel::spawn` did). Types that grow are `#[non_exhaustive]` with constructors (`ToolSpec`, tool results), so a new field breaks no extension. What the core offers without `std` only grows: something that needs an operating system is added behind `std`. |
 | The log | `corduroy-jsonl`, the topic table in `src/session.rs` | The header's schema version changes when a line's shape does, and older versions stay readable. Events gain fields; they do not lose or repurpose them. Readers ignore topics and fields they do not know. |
 | The agent file | `crates/corduroy-cli` | Keys are added, not renamed; an unknown key is an error, so a typo is never a silently ignored grant. |
 

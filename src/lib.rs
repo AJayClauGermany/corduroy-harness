@@ -84,9 +84,13 @@ pub mod tools;
 pub use children::SESSIONS;
 pub use compact::CompactOperation;
 pub use corduroy_core as core;
+#[cfg(feature = "jsonl")]
 pub use corduroy_jsonl as jsonl;
+#[cfg(feature = "shell")]
 pub use corduroy_shell as shell;
+#[cfg(feature = "shell")]
 pub use corduroy_shell::shell_kernel;
+#[cfg(feature = "wasm")]
 pub use corduroy_wasm as wasm;
 pub use gates::GateOperation;
 pub use harness::{Harness, HarnessError, OPERATIONS, Operations, Outcome, Status, Stepped};

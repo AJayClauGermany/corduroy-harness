@@ -23,17 +23,23 @@
 //! is applied the next time the tree settles, and in the meantime the new plugin already has
 //! its [`FiberId`].
 
-use std::any::Any;
-use std::collections::{BTreeMap, BTreeSet};
-use std::error::Error;
-use std::fmt;
-use std::mem;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use alloc::borrow::ToOwned;
+use alloc::boxed::Box;
+use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::format;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::any::Any;
+use core::error::Error;
+use core::fmt;
+use core::mem;
 
 use crate::event::{Draft, Event, EventId, EventStream, ListenerId, LogError, Source};
 use crate::json;
 use crate::pattern::Pattern;
+use crate::sync::Lock;
 
 /// Names no plugin may have: they are how the other sources of events, and the harness as
 /// a caller of services, are written.
@@ -279,9 +285,9 @@ enum Request {
 /// changes it, or [`App::apply_requests`]).
 #[derive(Clone, Default)]
 pub struct Requests {
-    queue: Arc<Mutex<Vec<Request>>>,
+    queue: Arc<Lock<Vec<Request>>>,
     /// Shared with the app, so that a plugin asked for has its id at once.
-    next_fiber: Arc<AtomicU64>,
+    next_fiber: Arc<Lock<u64>>,
 }
 
 impl fmt::Debug for Requests {
@@ -314,25 +320,22 @@ impl Requests {
     /// How many requests wait to be applied.
     #[must_use]
     pub fn pending(&self) -> usize {
-        self.queue
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .len()
+        self.queue.with(|queue| queue.len())
     }
 
     fn fiber_id(&self) -> FiberId {
-        FiberId(self.next_fiber.fetch_add(1, Ordering::Relaxed) + 1)
+        self.next_fiber.with(|next| {
+            *next += 1;
+            FiberId(*next)
+        })
     }
 
     fn push(&self, request: Request) {
-        self.queue
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(request);
+        self.queue.with(|queue| queue.push(request));
     }
 
     fn take(&self) -> Vec<Request> {
-        mem::take(&mut *self.queue.lock().unwrap_or_else(PoisonError::into_inner))
+        self.queue.with(mem::take)
     }
 }
 
@@ -869,6 +872,7 @@ impl Context<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     type Journal = Arc<Mutex<Vec<String>>>;
 

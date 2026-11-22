@@ -17,7 +17,8 @@ keywords = ["agent", "llm", "harness", "wasm", "plugins"]
 categories = ["development-tools"]
 
 [workspace.dependencies]
-corduroy-harness = { path = ".", version = "0.1.0" }
+# Members pick the parts they use; the command takes them all.
+corduroy-harness = { path = ".", version = "0.1.0", default-features = false }
 corduroy-core = { path = "crates/corduroy-core", version = "0.1.0" }
 corduroy-wasm = { path = "crates/corduroy-wasm", version = "0.1.0" }
 corduroy-jsonl = { path = "crates/corduroy-jsonl", version = "0.1.0" }
@@ -26,6 +27,8 @@ corduroy-http = { path = "crates/corduroy-http", version = "0.1.0" }
 corduroy-mcp = { path = "crates/corduroy-mcp", version = "0.1.0" }
 corduroy-providers = { path = "crates/corduroy-providers", version = "0.1.0" }
 corduroy-test-support = { path = "crates/corduroy-test-support", version = "0.1.0" }
+# The core's lock when it is built without the standard library: the device supplies it.
+critical-section = "1.2.0"
 # Synchronous embedding: no async runtime, and no WASI, so plugins get no ambient authority.
 wasmtime = { version = "51.0.0", default-features = false, features = ["component-model", "cranelift", "runtime", "cache", "parallel-compilation"] }
 wit-component = "0.263.0"
@@ -70,11 +73,21 @@ categories.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["wasm", "shell", "jsonl"]
+# Add-ons: WebAssembly plugins, through wasmtime (`corduroy_harness::wasm`). Without it the
+# harness runs extensions only and carries no WebAssembly runtime.
+wasm = ["dep:corduroy-wasm"]
+# The persistent POSIX shell kernel (`corduroy_harness::shell`).
+shell = ["dep:corduroy-shell"]
+# The event log in a JSON Lines file (`corduroy_harness::jsonl`).
+jsonl = ["dep:corduroy-jsonl"]
+
 [dependencies]
 corduroy-core = { workspace = true }
-corduroy-wasm = { workspace = true }
-corduroy-jsonl = { workspace = true }
-corduroy-shell = { workspace = true }
+corduroy-wasm = { workspace = true, optional = true }
+corduroy-jsonl = { workspace = true, optional = true }
+corduroy-shell = { workspace = true, optional = true }
 base64 = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
@@ -83,6 +96,40 @@ tokio = { workspace = true }
 
 [dev-dependencies]
 corduroy-test-support = { workspace = true }
+
+# The demo and the tests that load add-ons, run the shell or keep a log in a file.
+[[bin]]
+name = "corduroy-harness"
+path = "src/main.rs"
+required-features = ["wasm", "shell"]
+
+[[test]]
+name = "baseline"
+required-features = ["wasm"]
+
+[[test]]
+name = "compaction"
+required-features = ["wasm"]
+
+[[test]]
+name = "durable"
+required-features = ["jsonl"]
+
+[[test]]
+name = "gates"
+required-features = ["jsonl"]
+
+[[test]]
+name = "plugins"
+required-features = ["wasm", "shell"]
+
+[[test]]
+name = "providers"
+required-features = ["wasm"]
+
+[[test]]
+name = "subagents"
+required-features = ["wasm"]
 
 # Plugins are compiled to machine code when they are loaded. With the compiler itself
 # unoptimised that takes seconds per plugin and dominates test time, so the crates on that

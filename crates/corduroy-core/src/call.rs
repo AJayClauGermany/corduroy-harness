@@ -21,10 +21,17 @@
 //! * **Stopping.** When a person stops a run, whatever is still working for it can find out
 //!   ([`stopping`]) and finish early: a kernel ends the cell it is running, a long tool
 //!   returns what it has.
+//!
+//! With the `std` feature each thread has a scope of its own. Without it there is one for the
+//! whole program, which is right for a single-threaded executor and wrong for anything that
+//! serves two sessions at once.
 
-use std::cell::RefCell;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use alloc::borrow::ToOwned;
+use alloc::string::String;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::mem;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::event::SessionId;
 
@@ -45,8 +52,25 @@ struct Serving {
     stop: Option<Arc<AtomicBool>>,
 }
 
-thread_local! {
-    static SERVING: RefCell<Vec<Serving>> = const { RefCell::new(Vec::new()) };
+#[cfg(feature = "std")]
+std::thread_local! {
+    static SERVING: core::cell::RefCell<Vec<Serving>> =
+        const { core::cell::RefCell::new(Vec::new()) };
+}
+
+/// Run `work` with this thread's stack of scopes, innermost last.
+#[cfg(feature = "std")]
+fn serving<R>(work: impl FnOnce(&mut Vec<Serving>) -> R) -> R {
+    SERVING.with(|serving| work(&mut serving.borrow_mut()))
+}
+
+#[cfg(not(feature = "std"))]
+static SERVING: crate::sync::Lock<Vec<Serving>> = crate::sync::Lock::new(Vec::new());
+
+/// Run `work` with the program's stack of scopes, innermost last.
+#[cfg(not(feature = "std"))]
+fn serving<R>(work: impl FnOnce(&mut Vec<Serving>) -> R) -> R {
+    SERVING.with(work)
 }
 
 /// A description of what a thread is about to do for a session. Build it, then
@@ -101,8 +125,8 @@ impl Serve {
     /// Scopes nest: work that serves another call inside this one serves the inner call
     /// until it returns, then this one again.
     pub fn run<R>(self, serve: impl FnOnce() -> R) -> (R, Vec<String>) {
-        SERVING.with(|serving| {
-            serving.borrow_mut().push(Serving {
+        serving(|serving| {
+            serving.push(Serving {
                 scope: self.scope,
                 waits: Vec::new(),
                 stop: self.stop,
@@ -111,8 +135,12 @@ impl Serve {
         // Popped even if `serve` panics, so a later call on this thread is not misattributed.
         let guard = Pop;
         let result = serve();
+        let waits = serving(|serving| {
+            serving
+                .last_mut()
+                .map(|served| mem::take(&mut served.waits))
+        });
         drop(guard);
-        let waits = SERVING.with(|serving| serving.borrow_mut().pop().map(|served| served.waits));
         (result, waits.unwrap_or_default())
     }
 }
@@ -125,29 +153,26 @@ pub fn within<R>(session: SessionId, call: String, serve: impl FnOnce() -> R) ->
     Serve::session(session).call(call).run(serve)
 }
 
-/// Pops the innermost scope on drop, unless [`Serve::run`] already did.
+/// Pops the innermost scope on drop: when [`Serve::run`] returns, or its work panics.
 struct Pop;
 
 impl Drop for Pop {
     fn drop(&mut self) {
-        if std::thread::panicking() {
-            SERVING.with(|serving| drop(serving.borrow_mut().pop()));
-        }
+        drop(serving(Vec::pop));
     }
 }
 
 /// What this thread is serving, if anything.
 #[must_use]
 pub fn current() -> Option<Scope> {
-    SERVING.with(|serving| serving.borrow().last().map(|served| served.scope.clone()))
+    serving(|serving| serving.last().map(|served| served.scope.clone()))
 }
 
 /// Say that the tool call this thread is serving waits for `signal`: its result will be the
 /// signal's payload. Returns `false`, and does nothing, if no tool call is being served.
 #[must_use = "a call that cannot wait must answer now"]
 pub fn wait_for(signal: &str) -> bool {
-    SERVING.with(|serving| {
-        let mut serving = serving.borrow_mut();
+    serving(|serving| {
         let Some(served) = serving
             .last_mut()
             .filter(|served| served.scope.call.is_some())
@@ -165,9 +190,9 @@ pub fn wait_for(signal: &str) -> bool {
 /// `false` when nothing is being served, or whoever serves it cannot be stopped.
 #[must_use]
 pub fn stopping() -> bool {
-    SERVING.with(|serving| {
+    serving(|serving| {
         // A call made for an outer call stops with it.
-        serving.borrow().iter().any(|served| {
+        serving.iter().any(|served| {
             served
                 .stop
                 .as_ref()

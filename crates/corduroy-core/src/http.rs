@@ -6,7 +6,10 @@
 //! serve (`http`, `https`). A client is a plugin, so a proxying, caching or recording client
 //! replaces the plain one without the core changing.
 
-use std::time::Duration;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::fmt;
+use core::time::Duration;
 
 use crate::registry::Registry;
 
@@ -29,9 +32,9 @@ pub struct HttpRequest {
     pub body: Option<Vec<u8>>,
 }
 
-impl std::fmt::Debug for HttpRequest {
+impl fmt::Debug for HttpRequest {
     // Header values may hold secrets, so they are left out.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let names: Vec<&str> = self.headers.iter().map(|(name, _)| name.as_str()).collect();
         f.debug_struct("HttpRequest")
             .field("method", &self.method)
