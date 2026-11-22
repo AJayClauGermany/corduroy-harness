@@ -4,6 +4,7 @@ use std::error::Error;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use wasmtime::component::Component;
 use wasmtime::{Config, Engine};
@@ -22,6 +23,10 @@ pub struct Limits {
     /// How many times a plugin is started again after a call traps. The trap after the last
     /// restart stops it until it is reloaded. Counted from when the plugin was applied.
     pub restarts: u32,
+    /// How long a call made from inside another plugin's call waits for the plugin it calls
+    /// to finish a call on another thread. Bounding it means two chains of calls that wait on
+    /// each other give up instead of deadlocking.
+    pub nested_wait: Duration,
 }
 
 impl Default for Limits {
@@ -30,6 +35,7 @@ impl Default for Limits {
             fuel_per_call: 2_000_000_000,
             memory_bytes: 64 << 20,
             restarts: 3,
+            nested_wait: Duration::from_secs(30),
         }
     }
 }

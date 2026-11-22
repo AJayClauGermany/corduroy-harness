@@ -57,6 +57,30 @@ interface types {
         deny(string),
     }
 
+    /// Why a call to another plugin's service failed.
+    variant call-error {
+        /// No plugin provides the service, or the service has no such method.
+        unknown(string),
+        /// The service rejected the payload.
+        invalid-input(string),
+        /// The service accepted the call but could not complete it.
+        failed(string),
+        /// The caller may not make this call: its grant does not reach the service, or the
+        /// service refused this caller.
+        denied(string),
+    }
+
+    /// A call to a service, as its provider receives it.
+    record service-call {
+        /// The name of the calling plugin.
+        caller: string,
+        /// The service called, one of those the provider listed in `plugin-info.provides`.
+        service: string,
+        method: string,
+        /// JSON text by convention.
+        payload: string,
+    }
+
     /// What a plugin contributes, returned from `activate`.
     record plugin-info {
         name: string,
@@ -66,8 +90,11 @@ interface types {
         subscriptions: list<string>,
         /// Whether the host should call `prompt-part` for each model request.
         prompt: bool,
-        /// Decision points (such as `tool/call`) at which the host should call `gate`.
+        /// Decision points (such as `tool/call`) at which the host should call `gate`. A plugin
+        /// that gates `tool/call` may not import `tools`: it would be asked about its own calls.
         gates: list<string>,
+        /// Services this plugin answers through `handle-call`, by name.
+        provides: list<string>,
     }
 }
 
@@ -161,10 +188,48 @@ interface random {
     get-bytes: func(len: u32) -> result<list<u8>, host-error>;
 }
 
+/// Capability `tools`: call tools other plugins registered, as the model does. Scoped by tool
+/// name. Each call passes the gates first, with the plugin as its caller.
+interface tools {
+    use types.{tool-spec, tool-error};
+
+    /// The tools the plugin's scope reaches, by name.
+    %list: func() -> list<tool-spec>;
+    /// Call `name` with `input`, a JSON object. A gate's deny, and a gate's ask (a plugin's
+    /// call cannot wait for a person), come back as `denied`.
+    call: func(name: string, input: string) -> result<string, tool-error>;
+}
+
+/// Capability `state`: a durable key-value store of the plugin's own. Scoped by key. Values
+/// survive restarts of the plugin and of the process, because they are kept on the event
+/// stream; writes made during a call are stored when the call returns, and dropped if it
+/// traps.
+interface state {
+    use types.{host-error};
+
+    /// The value under `key`, if there is one.
+    get: func(key: string) -> result<option<string>, host-error>;
+    /// Store `value` under `key`. Keys are at most 256 bytes and values at most 64 KiB.
+    set: func(key: string, value: string) -> result<_, host-error>;
+    /// Remove `key`, if it is there.
+    remove: func(key: string) -> result<_, host-error>;
+    /// Every key in the store that the scope reaches, sorted.
+    keys: func() -> result<list<string>, host-error>;
+}
+
+/// Capability `service`: call a service another plugin provides. Scoped by service name. The
+/// provider acts with its own grants and is told who is calling.
+interface service {
+    use types.{call-error};
+
+    /// Call `method` of `service` with `payload`, JSON text by convention.
+    call: func(service: string, method: string, payload: string) -> result<string, call-error>;
+}
+
 /// A plugin. Every import is a capability the host must grant before the plugin is
 /// instantiated; a plugin that imports nothing can only compute.
 world plugin {
-    use types.{plugin-info, tool-error, event, verdict};
+    use types.{plugin-info, tool-error, event, verdict, call-error, service-call};
 
     import fs-read;
     import fs-write;
@@ -173,6 +238,9 @@ world plugin {
     import log;
     import clock;
     import random;
+    import tools;
+    import state;
+    import service;
 
     /// Called once per instantiation with the plugin's configuration as JSON text.
     export activate: func(config: string) -> result<plugin-info, string>;
@@ -184,6 +252,9 @@ world plugin {
     export prompt-part: func() -> option<string>;
     /// Decide whether something may happen at `point`, one of the points listed in
     /// `plugin-info.gates`. `request` is JSON text describing it; for `tool/call` it is
-    /// `{"session", "id", "tool", "input", "read-only"}`.
+    /// `{"session", "id", "tool", "input", "read-only", "caller"}`, where `caller` is `agent`
+    /// for the model and `plugin:<name>` for a plugin using `tools`.
     export gate: func(point: string, request: string) -> verdict;
+    /// Answer a call to one of the services listed in `plugin-info.provides`.
+    export handle-call: func(call: service-call) -> result<string, call-error>;
 }

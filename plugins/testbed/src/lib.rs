@@ -6,6 +6,17 @@
 //! | `probe` | Logs a line, reads both clocks and draws 16 random bytes; returns what each gave, or the error |
 //! | `count` | Adds one to a counter held in the instance's memory and returns it |
 //! | `trap` | Traps, which kills the instance |
+//! | `relay` | Calls a tool (`{"tool", "input"}`) or a service (`{"service", "method", "payload"}`) and returns what it gave, or the error |
+//! | `state` | `{"op": "get" \| "set" \| "remove" \| "keys", "key", "value"}` on its `state` store |
+//!
+//! `state` with `"trap": true` traps after the operation, to show that a trapped call's writes
+//! are not kept.
+//!
+//! Configuration: `{"provides": [..]}` names the services it answers (`echo` returns the call
+//! as JSON; `relay` makes the call its payload describes); `{"prefix": "a."}` puts a prefix
+//! before each tool's name, so that two instances can be loaded side by side; and
+//! `{"gate": true}` asks to gate tool calls, which the host must refuse since this plugin
+//! also imports `tools`.
 
 /// Guest bindings for the `corduroy:plugin/plugin` world.
 #[allow(
@@ -23,16 +34,20 @@ mod bindings {
 }
 
 use std::fmt::Write as _;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bindings::corduroy::plugin::log::Level;
-use bindings::corduroy::plugin::types::{HostError, ToolSpec};
-use bindings::corduroy::plugin::{clock, log, random};
+use bindings::corduroy::plugin::types::{CallError, HostError, ServiceCall, ToolSpec};
+use bindings::corduroy::plugin::{clock, log, random, service, state, tools};
 use bindings::{Event, Guest, PluginInfo, ToolError, Verdict};
 use serde_json::{Value, json};
 
 /// Lives in the instance's memory, so it starts again from zero in a new instance.
 static COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Put before each tool's name.
+static PREFIX: OnceLock<String> = OnceLock::new();
 
 /// A host call's answer, or its error, as JSON.
 fn report<T: Into<Value>>(result: Result<T, HostError>) -> Value {
@@ -59,37 +74,101 @@ fn probe() -> String {
     json!({"logged": logged, "now": now, "monotonic": elapsed, "random": random}).to_string()
 }
 
+/// A string field of `input`, or an empty string.
+fn text<'a>(input: &'a Value, field: &str) -> &'a str {
+    input.get(field).and_then(Value::as_str).unwrap_or_default()
+}
+
+/// Make the tool or service call `input` describes, and say what came of it.
+fn relay(input: &Value) -> String {
+    let outcome = if let Some(tool) = input.get("tool").and_then(Value::as_str) {
+        let arguments = input.get("input").cloned().unwrap_or_else(|| json!({}));
+        tools::call(tool, &arguments.to_string()).map_err(|error| format!("{error:?}"))
+    } else {
+        service::call(
+            text(input, "service"),
+            text(input, "method"),
+            text(input, "payload"),
+        )
+        .map_err(|error| format!("{error:?}"))
+    };
+    match outcome {
+        Ok(output) => json!({"ok": output}),
+        Err(error) => json!({"error": error}),
+    }
+    .to_string()
+}
+
+fn store(input: &Value) -> String {
+    let key = text(input, "key");
+    let done = match text(input, "op") {
+        "get" => report(state::get(key).map(|value| value.map_or(Value::Null, Value::from))),
+        "set" => report(state::set(key, text(input, "value")).map(|()| true)),
+        "remove" => report(state::remove(key).map(|()| true)),
+        _ => report(state::keys()),
+    };
+    if input.get("trap") == Some(&Value::Bool(true)) {
+        std::process::abort();
+    }
+    done.to_string()
+}
+
 struct Testbed;
 
 impl Guest for Testbed {
-    fn activate(_config: String) -> Result<PluginInfo, String> {
-        let spec = |name: &str, description: &str| ToolSpec {
-            name: name.to_owned(),
-            description: description.to_owned(),
+    fn activate(config: String) -> Result<PluginInfo, String> {
+        let config: Value = serde_json::from_str(&config).map_err(|error| error.to_string())?;
+        let prefix = text(&config, "prefix").to_owned();
+        let spec = |name: &str| ToolSpec {
+            name: format!("{prefix}{name}"),
+            description: format!("The testbed's `{name}`."),
             input_schema: r#"{"type":"object"}"#.to_owned(),
             replay_safe: false,
             read_only: false,
         };
+        let provides = config
+            .get("provides")
+            .and_then(Value::as_array)
+            .map(|names| {
+                names
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let gates = if config.get("gate") == Some(&Value::Bool(true)) {
+            vec!["tool/call".to_owned()]
+        } else {
+            Vec::new()
+        };
+        let tools = ["probe", "count", "trap", "relay", "state"]
+            .map(spec)
+            .to_vec();
+        // A restarted instance is activated with the same configuration, so the same prefix.
+        let _ = PREFIX.set(prefix);
         Ok(PluginInfo {
             name: "testbed".to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
-            tools: vec![
-                spec("probe", "Call log, clock and random."),
-                spec("count", "Count calls in memory."),
-                spec("trap", "Trap."),
-            ],
+            tools,
             subscriptions: Vec::new(),
             prompt: false,
-            gates: Vec::new(),
+            gates,
+            provides,
         })
     }
 
-    fn call_tool(name: String, _input: String) -> Result<String, ToolError> {
-        match name.as_str() {
+    fn call_tool(name: String, input: String) -> Result<String, ToolError> {
+        let input: Value = serde_json::from_str(&input)
+            .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
+        let prefix = PREFIX.get().map_or("", String::as_str);
+        match name.strip_prefix(prefix).unwrap_or(&name) {
             "probe" => Ok(probe()),
             "count" => Ok((COUNT.fetch_add(1, Ordering::SeqCst) + 1).to_string()),
             // On WebAssembly an abort is the `unreachable` instruction: a trap.
             "trap" => std::process::abort(),
+            "relay" => Ok(relay(&input)),
+            "state" => Ok(store(&input)),
             _ => Err(ToolError::UnknownTool(name)),
         }
     }
@@ -100,7 +179,24 @@ impl Guest for Testbed {
         None
     }
 
-    /// Never called: this plugin guards no decision point.
+    fn handle_call(call: ServiceCall) -> Result<String, CallError> {
+        match call.method.as_str() {
+            "echo" => Ok(json!({
+                "caller": call.caller,
+                "service": call.service,
+                "payload": call.payload,
+            })
+            .to_string()),
+            "relay" => {
+                let input: Value = serde_json::from_str(&call.payload)
+                    .map_err(|error| CallError::InvalidInput(error.to_string()))?;
+                Ok(relay(&input))
+            }
+            method => Err(CallError::Unknown(format!("method `{method}`"))),
+        }
+    }
+
+    /// Never asked: the host refuses this plugin as a gate, since it imports `tools`.
     fn gate(_point: String, _request: String) -> Verdict {
         Verdict::Allow
     }

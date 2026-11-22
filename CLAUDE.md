@@ -9,7 +9,7 @@ oi-kit's state machine. `docs/design.md` explains where each idea comes from and
 
 | Path | What it is |
 | --- | --- |
-| `crates/corduroy-core` | **Zero dependencies, synchronous.** Plugin contexts (`App`, `Context`, `Plugin`), capabilities (`Grants`, `Scope`), the `EventStream` (commits, `SessionId`, the `Log` trait), and the `Tools` / `Prompts` / `Kernels` / `Gates` registries. |
+| `crates/corduroy-core` | **Zero dependencies, synchronous.** Plugin contexts (`App`, `Context`, `Plugin`), capabilities (`Grants`, `Scope`), the `EventStream` (commits, `SessionId`, the `Log` trait), and the `Tools` / `Prompts` / `Kernels` / `Gates` / `Services` registries. |
 | `crates/corduroy-jsonl` | A store for the event stream: `JsonlLog`, one line per commit under a versioned header. Stores implement `corduroy_core::Log` and live outside the core. |
 | `crates/corduroy-wasm` | wasmtime host. Loads components built against `wit/corduroy.wit` as `Plugin`s; links only granted interfaces. |
 | `src/` (`corduroy-harness`) | Assembles the loop from oi-kit: `Harness` (sessions, `run_in`, `continue_run`, `answer`), `Journal` (one step's effects to one commit), `GateOperation`, `PluginTools`, `ScriptedProvider`. Async (tokio). |
@@ -96,7 +96,13 @@ as design guidance, not noise.
   reloaded. A plugin must not rely on memory surviving a trap: durable state goes through the
   host.
 - **Never call back into a plugin while it is running.** Events a plugin raises are queued and
-  delivered after its call returns (`Instance::call`).
+  delivered after its call returns (`Instance::call`). A call that would re-enter a plugin
+  on the same call chain is refused, and a nested call waits at most `Limits::nested_wait`
+  for a plugin busy elsewhere; never add a wait without a bound inside a plugin's call.
+- **A gate does not make tool calls.** A WebAssembly plugin that gates `tool/call` and
+  imports `tools` is refused at activation; keep the check if either side changes.
+- **Plugin state lives on the stream.** `state` writes are `state/set` / `state/remove`
+  events from the plugin, kept only if the call returns; the store is rebuilt from them.
 - **The event stream is the record.** The conversation is a projection of `message` events
   (`src/session.rs`); do not keep conversation state that cannot be rebuilt from the stream.
   The same goes for sessions (`session/start`) and for whether a run is unfinished.

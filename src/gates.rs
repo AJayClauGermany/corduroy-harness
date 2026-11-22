@@ -65,6 +65,7 @@ impl GateOperation {
             "tool": call.name,
             "input": call.arguments.clone().unwrap_or_default(),
             "read-only": read_only,
+            "caller": "agent",
         });
         self.gates.decide(TOOL_CALL, &request.to_string())
     }

@@ -182,7 +182,7 @@ user gets from Goose out of the box should be reachable here with shipped plugin
 
 ## Capabilities
 
-The plugin world in `wit/corduroy.wit` imports seven host interfaces and nothing else. There
+The plugin world in `wit/corduroy.wit` imports ten host interfaces and nothing else. There
 is no WASI in the linker, so a plugin has no clock, environment, filesystem or network of its
 own beyond what these give it.
 
@@ -195,6 +195,9 @@ own beyond what these give it.
 | `log` | diagnostic lines, recorded as `plugin/log` under the plugin's name (16 KiB each) | level: `debug`, `info`, `warn`, `error` |
 | `clock` | wall-clock time; a monotonic clock that starts with the instance | clock: `wall`, `monotonic` |
 | `random` | bytes from the host's secure generator (64 KiB per call) | source: `secure` |
+| `tools` | list and call tools other plugins registered, through the gates | tool name |
+| `state` | a durable key-value store of the plugin's own | key |
+| `service` | call a service another plugin provides | service name |
 
 Every capability is scoped, even where there is one obvious resource, so that `Scope::none()`
 keeps meaning "linked but lets nothing through", which is how a script-host automation is
@@ -230,7 +233,7 @@ if one of these holds:
    convention between plugins.
 
 Everything else is a plugin, and a plugin may itself offer primitives to other plugins (see
-[Plugins extending plugins](#plugins-extending-plugins-planned)).
+[Plugins extending plugins](#plugins-extending-plugins)).
 
 | Primitive | Status | Target |
 | --- | --- | --- |
@@ -240,8 +243,8 @@ Everything else is a plugin, and a plugin may itself offer primitives to other p
 | Tool lifecycle | partly built | Built: `tool/call`, `tool/start` and `tool/result` are each committed as they happen, per call; `ToolSpec::replay_safe` says whether a call that was running at a crash may be repeated, and `read_only` whether it changes anything. Still to do: results as content blocks rather than one string, progress and cancellation. |
 | Gates | built for `tool/call` | A fourth registry. A gate is asked at a named decision point before something happens and answers allow, deny or ask; the strictest answer wins and is recorded. Reachable from WebAssembly through the `gate` export. Still to do: more decision points (`plugin/load` first). See [Events, gates and hooks](#events-gates-and-hooks). |
 | Waits and signals | built for a gate's ask | A run whose tool call a gate asked about waits for `Harness::answer`; the ask and the answer are events, so the wait survives a restart. Still to do: the general form, a step that waits for any named signal (a child session finishing, a timer). |
-| Services | native only | Calls between plugins across the WebAssembly boundary, as a capability scoped by service name. |
-| Capabilities | seven | The mechanism is settled; the set grows (below). |
+| Services | built | A fifth registry, `Services`: calls between plugins in JSON text, with the caller's name, across the WebAssembly boundary in both directions. See [Plugins extending plugins](#plugins-extending-plugins). |
+| Capabilities | ten | The mechanism is settled; the set grows (below). |
 | Kernels | built | The trait and registry stay. `ShellKernel` is an implementation, not a primitive, and moves out to a plugin crate. |
 | Conversation projection | messages only | Understands a `compaction` event (a summary and the first message kept). Producing the summary is a plugin's job. |
 | Model access | constructor argument | A `provider` service that a plugin supplies, so the model is swappable like everything else. |
@@ -253,13 +256,10 @@ Capabilities to add, each a WIT interface with a scope:
 | --- | --- | --- | --- |
 | `llm` | one model request | model name | compaction, summaries, the skills reviewer |
 | `session` | start a child session and await it | recipe or agent name | sub-agents |
-| `service` | call another plugin's service | service name | plugins extending plugins |
-| `state` | a durable key-value store private to the plugin | (none: always its own) | todo, memory, any counter |
 | `log-read` | read events of other sessions | session and topic | chat recall |
 | `plugins` | load, unload and list plugins | plugin name | an extension manager |
 | `http` | make a request | host | web fetch, remote MCP |
 | `secret` | read a named credential | secret name | providers, MCP servers |
-| `tools` | call a registered tool, through the gates | tool name | automations, code mode |
 
 Two rules follow from adding these:
 
@@ -289,7 +289,7 @@ The core defines a small, fixed set of decision points (`corduroy_core::POINTS`)
 with `tool/call`. Likely additions are `plugin/load`, the user's input and the request about
 to be sent to the model, each added when a plugin needs it. A WebAssembly plugin that lists
 a point the core does not define is refused at activation. A plugin that wants to ask other plugins a question of its own does
-so through a [service](#plugins-extending-plugins-planned), not through the event stream.
+so through a [service](#plugins-extending-plugins), not through the event stream.
 
 A deny or an ask always carries a reason. A denied tool call becomes an error tool result
 holding that reason, so the model learns what was wrong and can try again, as with any other
@@ -382,38 +382,66 @@ The first five points are built; the last two are *planned*.
 - **Crash loops.** Each `continue_run` of an unfinished run is a `run/restart` event; past
   `Harness::with_restart_limit` (default 5) the run ends as `Status::Failed`, recorded in the
   conversation, and the session takes prompts again.
-- **Plugin state** (*planned*). Replayed events are not delivered to listeners, so state a
-  plugin builds from events is lost today. A plugin keeps durable state through the `state`
-  capability, whose writes join the commit of the step that made them. State is explicit so
-  that it is visible in the log and bounded: restoring a plugin reads its current keys, not
-  its history. **Decided against, for now:** journaling every host-call result and rebuilding
-  a plugin by replaying them. It needs nothing from the plugin author, but the log grows with
-  every file read and recovery slows as a session ages. It can be added later without
-  changing `state`.
+- **Plugin state** (built). Replayed events are not delivered to listeners, so state a
+  plugin builds from events is lost on restart. A plugin keeps durable state through the
+  `state` capability instead: each write is a `state/set` or `state/remove` event from the
+  plugin, and the store is what those events add up to, read when the plugin is applied.
+  State is explicit so that it is visible in the log and bounded: restoring a plugin reads
+  its current keys, not its history. The writes of one call into the plugin are kept only if
+  the call returns (a trapped call's writes are dropped) and are committed with the call's
+  other events when it returns. *Changed from the plan:* writes were to join the commit of
+  the loop step that caused them; they are committed when the plugin's call returns instead,
+  which is the same commit whenever the plugin was called from outside the loop and, inside
+  it, at most one commit apart. Values survive a restart of the plugin (they are in the
+  host, not in its memory), a reload and a new process. **Decided against, for now:**
+  journaling every host-call result and rebuilding a plugin by replaying them. It needs
+  nothing from the plugin author, but the log grows with every file read and recovery slows
+  as a session ages. It can be added later without changing `state`.
 - **Kernel state** (*planned*). A kernel's processes do not survive a crash. The `Kernel`
   trait gains optional `snapshot` and `restore` (Prime Agent has both); a kernel without them
   reports on resume that its state was lost, as a timeout does today.
 
-## Plugins extending plugins (*planned*)
+## Plugins extending plugins
 
 Native plugins can already do this: one plugin calls `ctx.provide` with a service, which may
 be a `Registry` of its own, and others list it in `inject` and register into it. Unloading
 the provider suspends its dependents. Nothing in that path knows about tools or prompts, so a
 plugin-defined extension point is as good as a built-in one.
 
-WebAssembly plugins cannot, because the world only exports tools, an event handler and a
-prompt part. The target:
+Typed values cannot cross the WebAssembly boundary, so for WebAssembly plugins (built):
 
-- `plugin-info` gains `provides` and `inject`, each a list of service names, so the fiber
-  tree orders WebAssembly plugins the same way it orders native ones.
-- A `service` interface: `call(service, method, payload) -> result<string, host-error>`, and
-  a matching world export `handle-call`. Payloads are JSON text, like events.
-- The call is queued or refused if it would re-enter a plugin that is already running, in
-  keeping with the rule that a plugin is never called back while it runs.
+- A fifth registry, `Services`, of things called by name with a method and a payload, JSON
+  text by convention, and told the caller's name. Native and WebAssembly plugins both
+  provide and call them.
+- `plugin-info.provides` lists the services a WebAssembly plugin answers, through the
+  `handle-call` export (which receives a `service-call` record: caller, service, method,
+  payload). A `service` capability, scoped by service name, lets a plugin call them.
+- *Changed from the plan:* `plugin-info` was also to gain `inject`, so the plugin tree would
+  order WebAssembly plugins by the services they use. A plugin's info is only known once it
+  has been activated, which is after the tree has decided whether to activate it, so a call
+  to a service nobody provides fails at the time of the call instead (`unknown`).
+- **Never re-entered, never deadlocked.** A call that would enter a plugin already running
+  further up the same call (a plugin calling its own tool or service, or A calling B calling
+  A) is refused at once. A call from inside a plugin to one busy on another thread waits at
+  most `Limits::nested_wait` (30 s by default), so two chains that wait on each other give up
+  rather than hang. Only a call from outside every plugin waits for as long as it takes.
+- **A gate does not make tool calls.** A plugin's own tool calls pass the gates, so a plugin
+  that gated `tool/call` would be asked about its own call while making it. A plugin that
+  lists `tool/call` in `gates` and imports `tools` is refused at activation. The rule is
+  checked from the component's imports, so it holds without trusting the plugin.
 - **Authority does not travel.** A plugin handling a call acts with its own grants, so a
   service is a deliberate grant of some of its power to callers. The host passes the caller's
   name with every call, and the `service` scope decides who may call what. A plugin that
   re-exports the filesystem to all callers is a misconfigured grant, visible in one place.
+
+**Tools from plugins.** The `tools` capability lets a plugin list and call the tools the
+model can (scoped by tool name), which is what automations and code mode need. Each call is
+asked of the gates with `caller` set to `plugin:<name>`, so a policy can treat plugins
+differently from the model; a gate's ask becomes a denial, since a plugin's call cannot wait
+for a person. The call leaves `tool/call`, `gate/decision` and `tool/result` events with the
+plugin as their source, committed when the plugin's own call returns. These calls are not
+durable intent: they carry no session yet, and after a crash the plugin's own call is what
+is repeated or not.
 
 The built-in registries (`tools`, `prompts`, `kernels`, `gates`) are the cases where the loop
 itself is the consumer. A plugin that wants its own extension point (an MCP plugin accepting
@@ -519,7 +547,7 @@ harness.
 | Summon: `load`, `delegate` | `subagents` | WebAssembly | sessions, `session`, waits |
 | Skills | `skills` (exists) | WebAssembly | `llm` for the review fork |
 | Context files (`.goosehints`, `AGENTS.md`) | `hints` | WebAssembly | nothing |
-| Todo | `todo` | WebAssembly | `state` |
+| Todo | `todo` | WebAssembly | nothing (`state` is built) |
 | Memory | `memory` | WebAssembly | nothing (scoped files) |
 | Chat Recall | `recall` | WebAssembly | `log-read` |
 | Summarize | `summarize` | WebAssembly | `llm` |
@@ -556,7 +584,9 @@ the step it waits on is done.
    without them, and re-instantiating a trapped plugin under the restart limit. *Done:*
    `log`, `clock`, `random` (checked from JavaScript and Python, see
    [Guest languages](guest-languages.md#host-calls-log-clock-and-random)) and restarting a
-   trapped WebAssembly plugin. *Still to do:* services, `state`, `tools`.
+   trapped WebAssembly plugin, then services, `state` and `tools`, with re-entry refused and
+   gating kept apart from calling tools (all checked from JavaScript and Python, see
+   [Guest languages](guest-languages.md#between-plugins-tools-state-and-service)).
 6. Loading plugins safely: `plugins` with no amplification, the `plugin/load` decision
    point, protected paths, the cascade limit. With it, the compiled-code cache: a component
    compiled once per process, wasmtime's `cache` and `parallel-compilation` features switched
@@ -588,10 +618,10 @@ the step it waits on is done.
   of another" without changing the log.
 - **Operations from plugins.** Loop steps are native `Operation`s. Letting plugins contribute
   steps needs an async-friendly, effect-returning export.
-- **Gates and plugins calling tools.** A gate is asked from the loop, never while a plugin
-  is running. Once the `tools` capability lets a plugin call a tool through the gates, a
-  plugin that is also a gate would be asked while its own call is in progress; that must be
-  refused or queued, like any other re-entry, rather than deadlock on the instance.
+- **Listeners and re-entry.** An event a native tool emits while a WebAssembly plugin's
+  call is in progress is delivered at once, and a listener in that same plugin is refused
+  (it is running), so it misses the event. Events plugins raise themselves are queued and
+  unaffected. A per-plugin queue of undelivered events would close the gap.
 - **Exports every guest must write.** Each export of the world is mandatory: the
   JavaScript and Python toolchains refuse to build a plugin without `gate`, and Rust's
   bindings will not compile. Plugins that guard nothing carry a stub. The guest SDKs should

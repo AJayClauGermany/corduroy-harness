@@ -34,6 +34,7 @@ mod bindings {
 use std::fmt::Write as _;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
+use bindings::corduroy::plugin::types::{CallError, ServiceCall};
 use bindings::corduroy::plugin::types::{HostError, ToolSpec};
 use bindings::corduroy::plugin::{events, fs_read, fs_write};
 use bindings::{Event, Guest, PluginInfo, ToolError, Verdict};
@@ -116,6 +117,7 @@ impl Guest for Skills {
             subscriptions: vec!["tool/result".to_owned(), "turn/end".to_owned()],
             prompt: true,
             gates: Vec::new(),
+            provides: Vec::new(),
         })
     }
 
@@ -183,6 +185,11 @@ impl Guest for Skills {
     }
 
     /// Never called: this plugin guards no decision point.
+    /// Never called: this plugin provides no service.
+    fn handle_call(call: ServiceCall) -> Result<String, CallError> {
+        Err(CallError::Unknown(format!("service `{}`", call.service)))
+    }
+
     fn gate(_point: String, _request: String) -> Verdict {
         Verdict::Allow
     }

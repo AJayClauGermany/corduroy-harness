@@ -11,10 +11,10 @@
 //! * [`event`]: the append-only event stream that records a run and connects plugins. Events
 //!   are committed in batches to a [`Log`] before anyone sees them, and name the session
 //!   they belong to. The core defines what a log is; stores live in other crates.
-//! * [`registry`], [`tool`], [`prompt`], [`kernel`], [`gate`]: the well-known services
-//!   plugins contribute to: tools the model can call, text for the system prompt, long-lived
-//!   kernels that keep state between calls, and gates that decide whether something may
-//!   happen.
+//! * [`registry`], [`tool`], [`prompt`], [`kernel`], [`gate`], [`service`]: the well-known
+//!   services plugins contribute to: tools the model can call, text for the system prompt,
+//!   long-lived kernels that keep state between calls, gates that decide whether something
+//!   may happen, and services that other plugins call across the WebAssembly boundary.
 //!
 //! Nothing here knows about WebAssembly or about any particular model. `corduroy-wasm` loads
 //! WebAssembly components as [`Plugin`]s, and `corduroy-harness` assembles an agent loop.
@@ -47,6 +47,7 @@ pub mod kernel;
 pub mod pattern;
 pub mod prompt;
 pub mod registry;
+pub mod service;
 pub mod tool;
 
 pub use capability::{Denied, Grants, Scope};
@@ -60,4 +61,5 @@ pub use kernel::{Cell, KERNELS, Kernel, KernelError, Kernels, ShellKernel};
 pub use pattern::Pattern;
 pub use prompt::{PROMPTS, PromptPart, Prompts};
 pub use registry::{Duplicate, Registry};
+pub use service::{CallError, SERVICES, Service, Services};
 pub use tool::{FnTool, TOOLS, Tool, ToolError, ToolSpec, Tools, tool_fn};

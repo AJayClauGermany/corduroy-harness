@@ -32,6 +32,7 @@ mod bindings {
 
 use std::sync::OnceLock;
 
+use bindings::corduroy::plugin::types::{CallError, ServiceCall};
 use bindings::{Event, Guest, PluginInfo, ToolError, Verdict};
 use policy::{Decision, Policy};
 use serde::Deserialize;
@@ -64,6 +65,7 @@ impl Guest for Approval {
             subscriptions: Vec::new(),
             prompt: false,
             gates: vec![TOOL_CALL.to_owned()],
+            provides: Vec::new(),
         })
     }
 
@@ -75,6 +77,11 @@ impl Guest for Approval {
 
     fn prompt_part() -> Option<String> {
         None
+    }
+
+    /// Never called: this plugin provides no service.
+    fn handle_call(call: ServiceCall) -> Result<String, CallError> {
+        Err(CallError::Unknown(format!("service `{}`", call.service)))
     }
 
     fn gate(point: String, request: String) -> Verdict {

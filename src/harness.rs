@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use corduroy_core::{
     App, ContextError, EventStream, FiberId, GATES, Gates, KERNELS, Kernel, Kernels, LogError,
-    PROMPTS, Plugin, Prompts, SessionId, ShellKernel, TOOLS, Tools, plugin_fn,
+    PROMPTS, Plugin, Prompts, SERVICES, Services, SessionId, ShellKernel, TOOLS, Tools, plugin_fn,
 };
 use oi_kit_agent::inference::InferenceRunner;
 use oi_kit_agent::machine::{StateMachine, Step};
@@ -158,8 +158,8 @@ pub struct Outcome {
 /// A harness holds any number of sessions, each a conversation of its own on the one stream.
 /// It starts with the session [`MAIN`], which [`run`](Self::run) uses.
 ///
-/// The harness itself does very little. It provides the four registries plugins contribute
-/// to ([`Tools`], [`Prompts`], [`Kernels`], [`Gates`]), journals the conversation to the event stream,
+/// The harness itself does very little. It provides the registries plugins contribute to
+/// ([`Tools`], [`Prompts`], [`Kernels`], [`Gates`], [`Services`]), journals the conversation to the event stream,
 /// and lines up oi-kit operations into a loop. Tools, prompt text, kernels and reactions to
 /// events all come from plugins.
 pub struct Harness {
@@ -168,6 +168,7 @@ pub struct Harness {
     prompts: Arc<Prompts>,
     kernels: Arc<Kernels>,
     gates: Arc<Gates>,
+    services: Arc<Services>,
     sessions: Arc<Sessions>,
     provider: Arc<dyn Provider>,
     model: ModelConfig,
@@ -216,17 +217,20 @@ impl Harness {
         let prompts = Arc::new(Prompts::new());
         let kernels = Arc::new(Kernels::new());
         let gates = Arc::new(Gates::new());
+        let services = Arc::new(Services::new());
         let mut app = App::with_events(events);
         app.provide(TOOLS, Arc::clone(&tools))?;
         app.provide(PROMPTS, Arc::clone(&prompts))?;
         app.provide(KERNELS, Arc::clone(&kernels))?;
         app.provide(GATES, Arc::clone(&gates))?;
+        app.provide(SERVICES, Arc::clone(&services))?;
         Ok(Self {
             app,
             tools,
             prompts,
             kernels,
             gates,
+            services,
             sessions,
             provider,
             model: ModelConfig::new("default"),
@@ -308,6 +312,12 @@ impl Harness {
     #[must_use]
     pub const fn gates(&self) -> &Arc<Gates> {
         &self.gates
+    }
+
+    /// The services plugins provide to each other.
+    #[must_use]
+    pub const fn services(&self) -> &Arc<Services> {
+        &self.services
     }
 
     /// Start a session called `id`, recording `parent` as the session it came from. The new

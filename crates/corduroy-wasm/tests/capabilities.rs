@@ -6,8 +6,8 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use corduroy_core::{
-    App, FiberState, GATES, Gates, KERNELS, Kernels, PROMPTS, Pattern, Prompts, Scope, ShellKernel,
-    TOOL_CALL, TOOLS, ToolError, Tools, Verdict,
+    App, FiberState, GATES, Gates, KERNELS, Kernels, PROMPTS, Pattern, Prompts, SERVICES, Scope,
+    Services, ShellKernel, TOOL_CALL, TOOLS, ToolError, Tools, Verdict,
 };
 use corduroy_test_support::{plugin, scratch};
 use corduroy_wasm::{Limits, WasmError, WasmPlugin, WasmRuntime};
@@ -33,6 +33,7 @@ fn host(dir: &Path) -> Result<Host, Box<dyn Error>> {
     app.provide(TOOLS, Arc::clone(&tools))?;
     app.provide(PROMPTS, Arc::clone(&prompts))?;
     app.provide(GATES, Arc::clone(&gates))?;
+    app.provide(SERVICES, Arc::new(Services::new()))?;
     app.provide(KERNELS, kernels)?;
     Ok(Host {
         app,
@@ -331,8 +332,14 @@ fn log_clock_and_random_answer_within_their_grants() {
         .unwrap()
         .grant("log", Scope::any())
         .grant("clock", Scope::any())
-        .grant("random", Scope::any());
-    assert_eq!(testbed.requires(), ["log", "clock", "random"]);
+        .grant("random", Scope::any())
+        .grant("tools", Scope::none())
+        .grant("state", Scope::none())
+        .grant("service", Scope::none());
+    assert_eq!(
+        testbed.requires(),
+        ["log", "clock", "random", "tools", "state", "service"]
+    );
     host.app.plugin(testbed);
     let before = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -367,7 +374,10 @@ fn log_clock_and_random_are_scoped_like_any_capability() {
         .unwrap()
         .grant("log", Scope::none().allow("error"))
         .grant("clock", Scope::none().allow("monotonic"))
-        .grant("random", Scope::none());
+        .grant("random", Scope::none())
+        .grant("tools", Scope::none())
+        .grant("state", Scope::none())
+        .grant("service", Scope::none());
     host.app.plugin(testbed);
 
     let probed = probe(&host).unwrap();
@@ -399,7 +409,10 @@ fn restartable(dir: &Path, restarts: u32) -> Result<WasmPlugin, WasmError> {
         .load(plugin("testbed"))?
         .grant("log", Scope::any())
         .grant("clock", Scope::any())
-        .grant("random", Scope::any()))
+        .grant("random", Scope::any())
+        .grant("tools", Scope::none())
+        .grant("state", Scope::none())
+        .grant("service", Scope::none()))
 }
 
 #[test]

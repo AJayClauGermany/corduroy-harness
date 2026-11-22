@@ -16,8 +16,10 @@ use crate::registry::Registry;
 /// Name of the service under which the host provides the [`Gates`] registry.
 pub const GATES: &str = "gates";
 
-/// The decision point asked before a tool call runs. Its request is JSON text:
-/// `{"session", "id", "tool", "input", "read-only"}`.
+/// The decision point asked before a tool call runs.
+///
+/// Its request is JSON text: `{"session", "id", "tool", "input", "read-only", "caller"}`,
+/// where `caller` is `agent` for the model's calls and `plugin:<name>` for a plugin's.
 pub const TOOL_CALL: &str = "tool/call";
 
 /// Every decision point the host asks gates at.

@@ -854,6 +854,7 @@ impl EffectHandler<Session, Effect> for Journal {
                         "verdict": decision.verdict.kind(),
                         "reason": decision.verdict.reason(),
                         "gate": decision.gate,
+                        "caller": "agent",
                     });
                     batch.drafts.push(draft.payload(payload.to_string()));
                     let gated = Gated {

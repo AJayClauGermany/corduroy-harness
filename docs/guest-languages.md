@@ -179,6 +179,35 @@ module top level survives the build and routes them to the host:
 So the SDKs patch more than the obvious names: JavaScript's `Date` constructor and `crypto`,
 Python's `datetime` and `os.urandom`.
 
+## Between plugins: tools, state and service
+
+Checked in November 2026 when `tools`, `state`, `service`, the `call-error` variant and the
+`handle-call` export were added. A JavaScript and a Python plugin, loaded side by side, each
+provided a service and called a native tool, the other's service (JavaScript to Python and
+back) and the other's tool, and kept a value in `state`. The two stores stayed apart under the
+same key, and a plugin calling its own service was refused rather than deadlocked.
+
+| | JavaScript | Python |
+| --- | --- | --- |
+| `handle-call` | `export function handleCall(call)` | `def handle_call(self, call)` |
+| The `service-call` record | a plain object: `caller`, `service`, `method`, `payload` | `types.ServiceCall` with the same fields |
+| Returning a `call-error` | `throw { tag: 'unknown', val: '…' }` | `raise Err(types.CallError_Unknown("…"))` |
+| `state.get` with no value | `undefined` | `None` |
+| `tools.list()` | objects with `name`, `inputSchema`, `replaySafe`, `readOnly`, … | `types.ToolSpec` |
+
+Names in the WIT met each language's own:
+
+- `handle-call` first took the caller, service, method and payload as four strings. In Python
+  a parameter named `service` hid the imported `service` module, and on the host the
+  generated function had too many arguments, so the call is one `service-call` record.
+- The state function to drop a key was first `delete`, a JavaScript keyword (the bindings
+  export it as `_delete`). It is `remove`, as in `fs-write`.
+- Python's generated modules define `tools.list` and `state.set`, which shadow the builtins
+  inside those modules only. Importing the module (`from wit_world.imports import tools`)
+  is safe; importing the function by name is not.
+- A Python error's class name (`ToolError_InvalidInput`) is not its WIT tag
+  (`invalid-input`); an SDK should map one to the other for messages.
+
 ## Not tested
 
 - Async exports, which both toolchains support and which gates, waits and plugin-contributed
