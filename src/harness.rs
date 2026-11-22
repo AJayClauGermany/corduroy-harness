@@ -2,12 +2,12 @@
 
 use std::error::Error;
 use std::fmt;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use corduroy_core::{
-    App, ContextError, EventStream, FiberId, GATES, Gates, KERNELS, Kernel, Kernels, LogError,
-    PROMPTS, Plugin, Prompts, SERVICES, Services, SessionId, ShellKernel, TOOLS, Tools, plugin_fn,
+    App, ContextError, EventStream, FiberId, GATES, Gates, HTTP, HttpClients, KERNELS, Kernels,
+    LogError, MODELS, Models, PROMPTS, Plugin, Prompts, SECRETS, SERVICES, Secrets, Services,
+    SessionId, TOOLS, Tools,
 };
 use oi_kit_agent::inference::InferenceRunner;
 use oi_kit_agent::machine::{StateMachine, Step};
@@ -24,6 +24,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::gates::{GateOperation, SettleOperation};
+use crate::provider::{DEFAULT_PROVIDER, PROVIDERS, Providers, Routed};
 use crate::session::{
     Answer, Ask, Effect, Journal, MAIN, Progress, Session, SessionInfo, Sessions,
 };
@@ -159,8 +160,9 @@ pub struct Outcome {
 /// It starts with the session [`MAIN`], which [`run`](Self::run) uses.
 ///
 /// The harness itself does very little. It provides the registries plugins contribute to
-/// ([`Tools`], [`Prompts`], [`Kernels`], [`Gates`], [`Services`]), journals the conversation to the event stream,
-/// and lines up oi-kit operations into a loop. Tools, prompt text, kernels and reactions to
+/// ([`Tools`], [`Prompts`], [`Kernels`], [`Gates`], [`Services`], [`Providers`], [`Models`],
+/// [`Secrets`], [`HttpClients`]), journals the conversation to the event stream, and lines up
+/// oi-kit operations into a loop. The model, tools, prompt text, kernels and reactions to
 /// events all come from plugins.
 pub struct Harness {
     /// Shared with the step that applies changes plugins asked for while the loop runs.
@@ -171,8 +173,13 @@ pub struct Harness {
     kernels: Arc<Kernels>,
     gates: Arc<Gates>,
     services: Arc<Services>,
+    providers: Arc<Providers>,
+    models: Arc<Models>,
+    secrets: Arc<Secrets>,
+    http: Arc<HttpClients>,
     sessions: Arc<Sessions>,
-    provider: Arc<dyn Provider>,
+    /// The name of the provider the loop asks, looked up in `providers` on every request.
+    provider: String,
     model: ModelConfig,
     system: String,
     max_turns: u32,
@@ -185,6 +192,7 @@ impl fmt::Debug for Harness {
         f.debug_struct("Harness")
             .field("app", &self.app)
             .field("tools", &self.tools)
+            .field("provider", &self.provider)
             .field("model", &self.model.model_name)
             .field("max_turns", &self.max_turns)
             .finish_non_exhaustive()
@@ -192,7 +200,7 @@ impl fmt::Debug for Harness {
 }
 
 impl Harness {
-    /// A harness around `provider` with no plugins and an empty event stream.
+    /// A harness around `provider` with an empty event stream. See [`resume`](Self::resume).
     ///
     /// # Errors
     ///
@@ -206,6 +214,11 @@ impl Harness {
     /// stream holds, and each conversation is whatever that session's `message` events add
     /// up to.
     ///
+    /// `provider` is registered in [`Providers`] as [`DEFAULT_PROVIDER`], which the loop asks
+    /// unless [`with_provider`](Self::with_provider) names another. It belongs to the host
+    /// rather than to a plugin; to have plugins supply the model, start with
+    /// [`open`](Self::open) and load a [`provider`](crate::provider()) plugin.
+    ///
     /// # Errors
     ///
     /// Returns [`HarnessError::Log`] if the stream cannot store the start of the main
@@ -214,18 +227,42 @@ impl Harness {
         provider: Arc<dyn Provider>,
         events: Arc<EventStream>,
     ) -> Result<Self, HarnessError> {
+        let harness = Self::open(events)?;
+        harness
+            .providers
+            .insert(DEFAULT_PROVIDER, provider)
+            .map_err(|duplicate| HarnessError::Run(duplicate.to_string()))?;
+        Ok(harness)
+    }
+
+    /// A harness over `events` with no plugins at all, not even a provider: the model comes
+    /// from a plugin registered in [`Providers`], such as [`provider`](crate::provider()).
+    /// Until one is there, every model request fails and the run ends as [`Status::Failed`].
+    ///
+    /// # Errors
+    ///
+    /// As [`resume`](Self::resume).
+    pub fn open(events: Arc<EventStream>) -> Result<Self, HarnessError> {
         let sessions = Arc::new(Sessions::load(Arc::clone(&events))?);
         let tools = Arc::new(Tools::new());
         let prompts = Arc::new(Prompts::new());
         let kernels = Arc::new(Kernels::new());
         let gates = Arc::new(Gates::new());
         let services = Arc::new(Services::new());
+        let providers = Arc::new(Providers::new());
+        let models = Arc::new(Models::new());
+        let secrets = Arc::new(Secrets::new());
+        let http = Arc::new(HttpClients::new());
         let mut app = App::with_events(Arc::clone(&events));
         app.provide(TOOLS, Arc::clone(&tools))?;
         app.provide(PROMPTS, Arc::clone(&prompts))?;
         app.provide(KERNELS, Arc::clone(&kernels))?;
         app.provide(GATES, Arc::clone(&gates))?;
         app.provide(SERVICES, Arc::clone(&services))?;
+        app.provide(PROVIDERS, Arc::clone(&providers))?;
+        app.provide(MODELS, Arc::clone(&models))?;
+        app.provide(SECRETS, Arc::clone(&secrets))?;
+        app.provide(HTTP, Arc::clone(&http))?;
         Ok(Self {
             app: Arc::new(Mutex::new(app)),
             events,
@@ -234,14 +271,26 @@ impl Harness {
             kernels,
             gates,
             services,
+            providers,
+            models,
+            secrets,
+            http,
             sessions,
-            provider,
+            provider: DEFAULT_PROVIDER.to_owned(),
             model: ModelConfig::new("default"),
             system: String::new(),
             max_turns: 25,
             restart_limit: 5,
             operations: Vec::new(),
         })
+    }
+
+    /// Ask the provider registered as `name` in [`Providers`], rather than
+    /// [`DEFAULT_PROVIDER`].
+    #[must_use]
+    pub fn with_provider(mut self, name: impl Into<String>) -> Self {
+        self.provider = name.into();
+        self
     }
 
     /// Ask the provider for `model`.
@@ -325,6 +374,30 @@ impl Harness {
         &self.services
     }
 
+    /// The model providers plugins have registered. The loop asks one of them.
+    #[must_use]
+    pub const fn providers(&self) -> &Arc<Providers> {
+        &self.providers
+    }
+
+    /// The models plugins may ask for a completion of their own.
+    #[must_use]
+    pub const fn models(&self) -> &Arc<Models> {
+        &self.models
+    }
+
+    /// The secrets plugins may use without seeing.
+    #[must_use]
+    pub const fn secrets(&self) -> &Arc<Secrets> {
+        &self.secrets
+    }
+
+    /// The HTTP clients the `http` capability sends through, by URL scheme.
+    #[must_use]
+    pub const fn http(&self) -> &Arc<HttpClients> {
+        &self.http
+    }
+
     /// Start a session called `id`, recording `parent` as the session it came from. The new
     /// session has an empty conversation of its own.
     ///
@@ -368,8 +441,12 @@ impl Harness {
             Arc::clone(&self.sessions),
         )));
         let prompt = PromptOperation::new(self.system.clone(), Arc::clone(&self.prompts));
+        let routed = Routed {
+            providers: Arc::clone(&self.providers),
+            name: self.provider.clone(),
+        };
         let model: InferenceRunner<'static, Session, Effect> =
-            InferenceRunner::new(Arc::clone(&self.provider), self.model.clone());
+            InferenceRunner::new(Arc::new(routed), self.model.clone());
         let mut steps: Vec<Step<'static, Session, Effect>> = self
             .operations
             .iter()
@@ -606,19 +683,4 @@ fn status_of(session: &Session) -> Status {
         },
         None => Status::Yielded,
     }
-}
-
-/// A plugin that provides a persistent shell as the kernel `name`, working in `dir`.
-///
-/// Unloading the plugin stops the shell and removes the kernel.
-pub fn shell_kernel(name: impl Into<String>, dir: impl Into<PathBuf>) -> impl Plugin + 'static {
-    let name = name.into();
-    let dir = dir.into();
-    plugin_fn(format!("kernel-{name}"), &[KERNELS], move |ctx| {
-        let kernels = ctx.service::<Kernels>(KERNELS)?;
-        let kernel: Arc<Mutex<dyn Kernel>> =
-            Arc::new(Mutex::new(ShellKernel::new().in_dir(dir.clone())));
-        kernels.register(ctx, name.clone(), kernel)?;
-        Ok(())
-    })
 }

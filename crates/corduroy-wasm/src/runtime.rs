@@ -34,6 +34,8 @@ pub struct Limits {
     /// that react to each other's events (automations, say) are stopped at this depth rather
     /// than going on forever; `plugin/cascade` records where.
     pub cascade: usize,
+    /// How long `llm` and `http` wait for an answer before the call fails.
+    pub outbound_wait: Duration,
 }
 
 impl Default for Limits {
@@ -44,6 +46,7 @@ impl Default for Limits {
             restarts: 3,
             nested_wait: Duration::from_secs(30),
             cascade: 16,
+            outbound_wait: Duration::from_secs(120),
         }
     }
 }

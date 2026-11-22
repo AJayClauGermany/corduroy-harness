@@ -81,6 +81,14 @@ interface types {
         payload: string,
     }
 
+    /// A credential the plugin may use without seeing it, from the `secret` capability. Host
+    /// functions that take one, such as `http.send`, write its value into what they send and
+    /// record only its name.
+    resource credential {
+        /// The name the credential was opened under.
+        name: func() -> string;
+    }
+
     /// What a plugin contributes, returned from `activate`.
     record plugin-info {
         name: string,
@@ -265,6 +273,87 @@ interface plugins {
     loaded: func() -> list<string>;
 }
 
+/// Capability `llm`: ask a model for one completion. Scoped by model name.
+interface llm {
+    use types.{host-error};
+
+    enum role {
+        user,
+        assistant,
+    }
+
+    record turn {
+        role: role,
+        text: string,
+    }
+
+    record completion {
+        system: string,
+        /// The conversation, oldest first, ending with the user.
+        messages: list<turn>,
+    }
+
+    /// The text of `model`'s answer to `request`. The call waits for it, up to a limit the
+    /// host sets; the request and the answer are recorded as `llm/request` and `llm/response`.
+    complete: func(model: string, request: completion) -> result<string, host-error>;
+}
+
+/// Capability `secret`: use named credentials without seeing them. Scoped by secret name.
+interface secret {
+    use types.{host-error, credential};
+
+    /// The credential registered as `name`. Its value stays in the host.
+    get: func(name: string) -> result<credential, host-error>;
+}
+
+/// Capability `http`: make HTTP requests. Scoped by host name, such as `api.example.com`.
+interface http {
+    use types.{host-error, credential};
+
+    variant header-value {
+        text(string),
+        /// The credential's value, written in by the host. Needs no `secret` grant beyond
+        /// the one the credential was opened with.
+        secret(borrow<credential>),
+    }
+
+    record header {
+        name: string,
+        value: header-value,
+    }
+
+    record request {
+        /// `GET`, `POST` and so on.
+        method: string,
+        /// An absolute `http` or `https` URL.
+        url: string,
+        headers: list<header>,
+        body: option<list<u8>>,
+    }
+
+    record response {
+        status: u16,
+        headers: list<tuple<string, string>>,
+        body: list<u8>,
+    }
+
+    /// Send `request` and wait for the whole response, up to a limit the host sets. A
+    /// response with an error status is a response. Recorded as `http/request` and
+    /// `http/response`, with secrets named and never shown, and bodies left out.
+    send: func(request: request) -> result<response, host-error>;
+}
+
+/// Capability `log-read`: read the event stream, other sessions' included. Scoped by
+/// `<session>:<topic>`, where the session is empty for events about the harness itself.
+interface log-read {
+    use types.{event, host-error};
+
+    /// Events with an id above `after` whose topic matches `topic` (a glob, `*` for any),
+    /// in `session` if one is given, oldest first: at most `limit`, and never more than
+    /// 1000. Events the scope does not reach are left out.
+    read: func(session: option<string>, topic: string, after: u64, limit: u32) -> result<list<event>, host-error>;
+}
+
 /// A plugin. Every import is a capability the host must grant before the plugin is
 /// instantiated; a plugin that imports nothing can only compute.
 world plugin {
@@ -281,6 +370,10 @@ world plugin {
     import state;
     import service;
     import plugins;
+    import llm;
+    import secret;
+    import http;
+    import log-read;
 
     /// Called once per instantiation with the plugin's configuration as JSON text.
     export activate: func(config: string) -> result<plugin-info, string>;

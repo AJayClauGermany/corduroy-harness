@@ -72,14 +72,18 @@
 
 pub mod gates;
 pub mod harness;
+pub mod provider;
 pub mod scripted;
 pub mod session;
 pub mod tools;
 
 pub use corduroy_core as core;
 pub use corduroy_jsonl as jsonl;
+pub use corduroy_shell as shell;
+pub use corduroy_shell::shell_kernel;
 pub use corduroy_wasm as wasm;
 pub use gates::GateOperation;
-pub use harness::{Harness, HarnessError, Outcome, Status, shell_kernel};
+pub use harness::{Harness, HarnessError, Outcome, Status};
+pub use provider::{DEFAULT_PROVIDER, PROVIDERS, ProviderPlugin, Providers, provider};
 pub use session::{Answer, Ask, Effect, Journal, MAIN, Session, SessionInfo, Sessions};
 pub use {oi_kit_agent, oi_kit_provider_types};

@@ -5,10 +5,10 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use corduroy_core::{
-    CallError, Context, ContextError, Draft, Event, EventStream, GATES, Gate, Gates, Grants,
-    KERNELS, Kernels, PLUGIN_LOAD, POINTS, PROMPTS, Pattern, Plugin, PluginError, PromptPart,
-    Prompts, SERVICES, Scope, Service, Services, Source, TOOL_CALL, TOOLS, Tool, ToolError,
-    ToolSpec, Tools, Verdict,
+    CallError, Context, ContextError, Draft, Event, EventStream, GATES, Gate, Gates, Grants, HTTP,
+    HttpClients, KERNELS, Kernels, MODELS, Models, PLUGIN_LOAD, POINTS, PROMPTS, Pattern, Plugin,
+    PluginError, PromptPart, Prompts, SECRETS, SERVICES, Scope, Secrets, Service, Services, Source,
+    TOOL_CALL, TOOLS, Tool, ToolError, ToolSpec, Tools, Verdict,
 };
 use serde_json::Value;
 use wasmtime::component::{Component, HasSelf, Linker};
@@ -21,7 +21,8 @@ mod instance;
 mod paths;
 
 use bindings::corduroy::plugin::{
-    clock, events, fs_read, fs_write, kernel, log, plugins, random, service, state, tools, types,
+    clock, events, fs_read, fs_write, http, kernel, llm, log, log_read, plugins, random, secret,
+    service, state, tools, types,
 };
 use host::{HostState, Lent, Loader};
 use instance::{Blueprint, Instance};
@@ -30,9 +31,17 @@ use instance::{Blueprint, Instance};
 const PACKAGE: &str = "corduroy:plugin/";
 
 /// The host interfaces that are capabilities, by the name they are granted under.
-const CAPABILITIES: [&str; 11] = [
+const CAPABILITIES: [&str; 15] = [
     "fs-read", "fs-write", "kernel", "events", "log", "clock", "random", "tools", "state",
-    "service", "plugins",
+    "service", "plugins", "llm", "secret", "http", "log-read",
+];
+
+/// The capabilities whose host functions reach a registry the host provides, and its name.
+const LENT: [(&str, &str); 4] = [
+    ("kernel", KERNELS),
+    ("llm", MODELS),
+    ("secret", SECRETS),
+    ("http", HTTP),
 ];
 
 /// For each decision point, the capability whose use is decided there. A plugin may not gate
@@ -156,6 +165,10 @@ impl WasmPlugin {
                 "state" => state::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state),
                 "service" => service::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state),
                 "plugins" => plugins::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state),
+                "llm" => llm::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state),
+                "secret" => secret::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state),
+                "http" => http::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state),
+                "log-read" => log_read::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state),
                 _ => Ok(()),
             }
             .map_err(|error| link_error(&error))?;
@@ -206,6 +219,10 @@ impl WasmPlugin {
                 None
             },
             services: self.lends("service", || ctx.service::<Services>(SERVICES))?,
+            models: self.lends("llm", || ctx.service::<Models>(MODELS))?,
+            secrets: self.lends("secret", || ctx.service::<Secrets>(SECRETS))?,
+            http: self.lends("http", || ctx.service::<HttpClients>(HTTP))?,
+            events: self.imports("log-read").then(|| ctx.events()),
             state: Arc::new(Mutex::new(stored_state(&ctx.events(), &self.name))),
             loader: self.imports("plugins").then(|| Loader {
                 runtime: self.runtime.clone(),
@@ -245,12 +262,11 @@ impl Plugin for WasmPlugin {
             GATES.to_owned(),
             SERVICES.to_owned(),
         ];
-        if self
-            .requires
-            .iter()
-            .any(|capability| capability == "kernel")
-        {
-            services.push(KERNELS.to_owned());
+        // And so is each registry a capability it imports reaches.
+        for (capability, service) in LENT {
+            if self.imports(capability) {
+                services.push(service.to_owned());
+            }
         }
         services
     }
@@ -409,17 +425,7 @@ fn deliver(instance: &Instance, event: &Event) {
         return;
     }
     let cause = event.id;
-    let event = types::Event {
-        id: event.id.get(),
-        session: event
-            .session
-            .as_ref()
-            .map(|session| session.as_str().to_owned()),
-        source: event.source.to_string(),
-        cause: event.cause.map(corduroy_core::EventId::get),
-        topic: event.topic.clone(),
-        payload: event.payload.clone(),
-    };
+    let event = host::event_of(event);
     // A trap is already on the event stream as `plugin/trapped`; a listener has nobody to
     // return it to.
     drop(instance.call_caused(Some(cause), |plugin, store| {

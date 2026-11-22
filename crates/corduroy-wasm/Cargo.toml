@@ -23,5 +23,6 @@ sha2 = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
+corduroy-shell = { workspace = true }
 corduroy-test-support = { workspace = true }
 serde_json = { workspace = true }

@@ -232,6 +232,29 @@ With the compiled-code cache and `parallel-compilation` on (four cores):
 
 The disk cache took 25 MB for both.
 
+## Reaching out: llm, secret, http and log-read
+
+Checked in November 2026 with step 7. A JavaScript and a Python plugin each asked a model
+through `llm` (and were refused one their grant did not name), opened a credential through
+`secret`, sent it as a header through `http` to a fake client the host registered for
+`https`, and read the event stream through `log-read`, getting back only the session its
+grant reached. In both, the client received the secret's value, the plugin did not, and the
+value appeared nowhere on the event stream.
+
+The `credential` resource is the first resource in the world, and the first `borrow`. Both
+languages handle it without help:
+
+| | JavaScript | Python |
+| --- | --- | --- |
+| `secret.get` returns | an object with a `name()` method | `types.Credential`, with `name()` |
+| A borrowed handle in a variant | `{ tag: 'secret', val: credential }` | `http.HeaderValue_Secret(credential)` |
+| `option<list<u8>>` body | a `Uint8Array`, or `undefined` | `bytes`, or `None` |
+| `u64` (`after`, an event's `id`) | a `BigInt` (`0n`) | `int` |
+
+A guest must keep the credential alive until the request that borrows it is sent; a
+dropped handle is refused with `failed`. `llm.complete` and `http.send` block the plugin's
+call until the answer comes back, up to `Limits::outbound_wait` (two minutes by default).
+
 ## Not tested
 
 - Async exports, which both toolchains support and which gates, waits and plugin-contributed

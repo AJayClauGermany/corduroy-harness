@@ -6,9 +6,11 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use corduroy_core::{
-    App, FiberState, GATES, Gates, KERNELS, Kernels, PROMPTS, Pattern, Prompts, SERVICES, Scope,
-    Services, ShellKernel, TOOL_CALL, TOOLS, ToolError, Tools, Verdict,
+    App, FiberState, GATES, Gates, HTTP, HttpClients, KERNELS, Kernels, MODELS, Models, PROMPTS,
+    Pattern, Prompts, SECRETS, SERVICES, Scope, Secrets, Services, TOOL_CALL, TOOLS, ToolError,
+    Tools, Verdict,
 };
+use corduroy_shell::ShellKernel;
 use corduroy_test_support::{plugin, scratch};
 use corduroy_wasm::{Limits, WasmError, WasmPlugin, WasmRuntime};
 
@@ -35,6 +37,9 @@ fn host(dir: &Path) -> Result<Host, Box<dyn Error>> {
     app.provide(GATES, Arc::clone(&gates))?;
     app.provide(SERVICES, Arc::new(Services::new()))?;
     app.provide(KERNELS, kernels)?;
+    app.provide(MODELS, Arc::new(Models::new()))?;
+    app.provide(SECRETS, Arc::new(Secrets::new()))?;
+    app.provide(HTTP, Arc::new(HttpClients::new()))?;
     Ok(Host {
         app,
         tools,
@@ -337,11 +342,16 @@ fn log_clock_and_random_answer_within_their_grants() {
         .grant("state", Scope::none())
         .grant("service", Scope::none())
         .grant("events", Scope::none())
-        .grant("plugins", Scope::none());
+        .grant("plugins", Scope::none())
+        .grant("llm", Scope::none())
+        .grant("secret", Scope::none())
+        .grant("http", Scope::none())
+        .grant("log-read", Scope::none());
     assert_eq!(
         testbed.requires(),
         [
-            "events", "log", "clock", "random", "tools", "state", "service", "plugins"
+            "events", "log", "clock", "random", "tools", "state", "service", "plugins", "llm",
+            "secret", "http", "log-read"
         ]
     );
     host.app.plugin(testbed);
@@ -383,7 +393,11 @@ fn log_clock_and_random_are_scoped_like_any_capability() {
         .grant("state", Scope::none())
         .grant("service", Scope::none())
         .grant("events", Scope::none())
-        .grant("plugins", Scope::none());
+        .grant("plugins", Scope::none())
+        .grant("llm", Scope::none())
+        .grant("secret", Scope::none())
+        .grant("http", Scope::none())
+        .grant("log-read", Scope::none());
     host.app.plugin(testbed);
 
     let probed = probe(&host).unwrap();
@@ -420,7 +434,11 @@ fn restartable(dir: &Path, restarts: u32) -> Result<WasmPlugin, WasmError> {
         .grant("state", Scope::none())
         .grant("service", Scope::none())
         .grant("events", Scope::none())
-        .grant("plugins", Scope::none()))
+        .grant("plugins", Scope::none())
+        .grant("llm", Scope::none())
+        .grant("secret", Scope::none())
+        .grant("http", Scope::none())
+        .grant("log-read", Scope::none()))
 }
 
 #[test]

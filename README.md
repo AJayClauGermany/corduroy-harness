@@ -88,13 +88,16 @@ demo drive the loop with a scripted provider.
 
 | Path | Purpose |
 | --- | --- |
-| `crates/corduroy-core` | Dependency-free core: plugin contexts, capabilities, event stream with sessions and a `Log` trait, tool / prompt / kernel registries |
+| `crates/corduroy-core` | Dependency-free core: plugin contexts, capabilities, event stream with sessions and a `Log` trait, the registries plugins contribute to (tools, prompts, kernels, gates, services, models, secrets, HTTP clients) |
+| `crates/corduroy-shell` | A persistent POSIX shell as a kernel |
 | `crates/corduroy-jsonl` | A JSON Lines file as the durable log behind an event stream |
 | `crates/corduroy-wasm` | wasmtime host that loads components as capability-gated plugins |
-| `src/` | `corduroy-harness`: the agent loop assembled from oi-kit, journaled to the event stream one commit per step; sessions, and continuing an interrupted run |
+| `src/` | `corduroy-harness`: the agent loop assembled from oi-kit, journaled to the event stream one commit per step; sessions, continuing an interrupted run, waiting for a person, and the model as a service |
 | `wit/corduroy.wit` | The plugin world: host capabilities in, tools / event handlers / prompt text out |
 | `plugins/pi-tools` | read, write, edit, and bash on a persistent kernel |
 | `plugins/skills` | Agent-written `SKILL.md` files with a prompt index and a review nudge |
+| `plugins/approval` | A gate: permission modes with allow and deny lists |
+| `plugins/testbed` | For the host's own tests: exercises every host call |
 | `tests/`, `crates/*/tests/` | Integration tests through the public API |
 
 See [`CLAUDE.md`](CLAUDE.md) for contributor and agent guidelines.

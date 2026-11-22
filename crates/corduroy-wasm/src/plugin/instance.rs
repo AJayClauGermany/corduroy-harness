@@ -53,6 +53,8 @@ impl Blueprint {
                     .memory_size(self.limits.memory_bytes)
                     .build(),
                 started: Instant::now(),
+                wait: self.limits.outbound_wait,
+                credentials: Vec::new(),
             },
         );
         store.limiter(|state| &mut state.limits);

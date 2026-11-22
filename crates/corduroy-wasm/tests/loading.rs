@@ -9,10 +9,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use corduroy_core::{
-    App, Draft, EventStream, FiberState, GATES, Gate, Gates, KERNELS, Kernels, PLUGIN_LOAD,
-    PROMPTS, Pattern, Prompts, SERVICES, Scope, ShellKernel, Source, TOOLS, ToolError, Tools,
-    Verdict,
+    App, Draft, EventStream, FiberState, GATES, Gate, Gates, HTTP, HttpClients, KERNELS, Kernels,
+    MODELS, Models, PLUGIN_LOAD, PROMPTS, Pattern, Prompts, SECRETS, SERVICES, Scope, Secrets,
+    Source, TOOLS, ToolError, Tools, Verdict,
 };
+use corduroy_shell::ShellKernel;
 use corduroy_test_support::{plugin, scratch};
 use corduroy_wasm::{Limits, WasmPlugin, WasmRuntime};
 use serde_json::{Value, json};
@@ -37,6 +38,9 @@ fn host(dir: &Path) -> Result<Host, Box<dyn Error>> {
     app.provide(GATES, Arc::clone(&gates))?;
     app.provide(SERVICES, Arc::new(corduroy_core::Services::new()))?;
     app.provide(KERNELS, kernels)?;
+    app.provide(MODELS, Arc::new(Models::new()))?;
+    app.provide(SECRETS, Arc::new(Secrets::new()))?;
+    app.provide(HTTP, Arc::new(HttpClients::new()))?;
     Ok(Host { app, tools, gates })
 }
 
@@ -60,7 +64,8 @@ fn loader(runtime: &WasmRuntime, work: &Path) -> Result<WasmPlugin, Box<dyn Erro
         .grant("plugins", Scope::none().allow("child-*"))
         .grant("fs-read", readable);
     for capability in [
-        "events", "log", "clock", "random", "tools", "state", "service",
+        "events", "log", "clock", "random", "tools", "state", "service", "llm", "secret", "http",
+        "log-read",
     ] {
         testbed = testbed.grant(capability, Scope::none());
     }
@@ -322,7 +327,8 @@ fn echo(name: &str, on: &str, emit: &str, cascade: usize) -> Result<WasmPlugin, 
         .config(config.to_string())
         .grant("events", Scope::any());
     for capability in [
-        "log", "clock", "random", "tools", "state", "service", "plugins",
+        "log", "clock", "random", "tools", "state", "service", "plugins", "llm", "secret", "http",
+        "log-read",
     ] {
         testbed = testbed.grant(capability, Scope::none());
     }

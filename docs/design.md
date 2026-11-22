@@ -73,9 +73,9 @@ essentially one tool, `python_repl`. The kernel is a subprocess speaking newline
 one namespace persists across cells, with timeouts that interrupt and then kill, an output cap,
 snapshot and restore, and a bridge that lets code in the kernel call back into the host.
 
-**Here.** `corduroy_core::kernel`. `Kernel` is the trait (`exec(code, timeout) -> Cell`),
-`Kernels` the registry, and `ShellKernel` the reference implementation: a persistent POSIX
-shell whose variables and working directory survive between cells. A cell that times out or
+**Here.** `corduroy_core::kernel`. `Kernel` is the trait (`exec(code, timeout) -> Cell`) and
+`Kernels` the registry. Implementations live outside the core: `corduroy-shell` has
+`ShellKernel`, a persistent POSIX shell whose variables and working directory survive between cells. A cell that times out or
 calls `exit` costs the kernel its state, and the error says so, as Prime's reset notice does.
 WebAssembly plugins reach kernels through the `kernel` capability, scoped by kernel name; the
 `bash` tool in `pi-tools` is a thin layer over it. A WebAssembly plugin is also a small kernel
@@ -164,8 +164,11 @@ there is no crate named just `oi-kit`. `oi-kit-provider-types` has `Provider`, `
 effects for the host to persist; inference is the last step.
 
 **Here.** `src/harness.rs` uses those types directly. `Harness::steps` is the pipeline: custom
-operations, the prompt, plugin tools, an answer for calls nobody handled, the turn limit, and
-oi-kit's `InferenceRunner` over any `Provider`. `Harness::machine` hands the state machine to
+operations, the prompt, the gates, plugin tools, an answer for calls nobody handled, the turn
+limit, and oi-kit's `InferenceRunner`. The model is a service (`src/provider.rs`): the loop
+asks whichever `Provider` is registered under its provider name in the `Providers` registry,
+looked up on every request, so a `provider` plugin supplies it and swapping the plugin swaps
+the model. `Harness::machine` hands the state machine to
 callers who want to drive it step by step. This is also the programmable loop: an
 `Operation` placed ahead of the tools can approve, rewrite or refuse what the model asked for.
 
@@ -173,8 +176,8 @@ callers who want to drive it step by step. This is also the programmable loop: a
 pinned to an exact version. That weight is confined to the top crate; `corduroy-core` stays
 synchronous and dependency-free.
 
-**Left out.** Real providers (`oi-kit-providers`), MCP extensions, compaction, tool approval
-and sub-agents. All exist as oi-kit operations and slot into `Harness::with_operation`.
+**Left out.** Real providers (`oi-kit-providers`), MCP extensions, compaction and
+sub-agents. All exist as oi-kit operations and slot into `Harness::with_operation`.
 
 **The baseline.** Goose is also the measure for the plugins shipped with the harness: what a
 user gets from Goose out of the box should be reachable here with shipped plugins alone. See
@@ -182,7 +185,7 @@ user gets from Goose out of the box should be reachable here with shipped plugin
 
 ## Capabilities
 
-The plugin world in `wit/corduroy.wit` imports eleven host interfaces and nothing else. There
+The plugin world in `wit/corduroy.wit` imports fifteen host interfaces and nothing else. There
 is no WASI in the linker, so a plugin has no clock, environment, filesystem or network of its
 own beyond what these give it.
 
@@ -199,6 +202,10 @@ own beyond what these give it.
 | `state` | a durable key-value store of the plugin's own | key |
 | `service` | call a service another plugin provides | service name |
 | `plugins` | load and unload WebAssembly plugins as its children, granting no more than it holds | the loaded plugin's name |
+| `llm` | one completion from a model a provider serves, recorded as `llm/request` and `llm/response` | model name |
+| `secret` | an opaque handle to a named credential, never its value | secret name |
+| `http` | an HTTP request through the client registered for its scheme, with credentials written in by the host | host name |
+| `log-read` | events of any session, by topic, in pages | `<session>:<topic>` (empty session for harness events) |
 
 Two limits hold whatever a grant says. **Protected paths** (the host binary, the compiled-code
 cache and whatever the host adds with `WasmRuntime::protect`, such as the event log and grant
@@ -250,29 +257,33 @@ Everything else is a plugin, and a plugin may itself offer primitives to other p
 | Event log | built | A fallible `Log` trait. A step's events are one atomic commit, stored before any listener or the model sees them. The core has the trait and the in-memory stream; stores are separate crates. |
 | Sessions | built | Many sessions, each with an id and an optional parent. Every event of a run names its session; events about the plugin tree name none. Still to do: events a plugin emits while serving a tool call do not carry that call's session. |
 | Tool lifecycle | partly built | Built: `tool/call`, `tool/start` and `tool/result` are each committed as they happen, per call; `ToolSpec::replay_safe` says whether a call that was running at a crash may be repeated, and `read_only` whether it changes anything. Still to do: results as content blocks rather than one string, progress and cancellation. |
-| Gates | built for `tool/call` | A fourth registry. A gate is asked at a named decision point before something happens and answers allow, deny or ask; the strictest answer wins and is recorded. Reachable from WebAssembly through the `gate` export. Still to do: more decision points (`plugin/load` first). See [Events, gates and hooks](#events-gates-and-hooks). |
+| Gates | built for `tool/call` and `plugin/load` | A fourth registry. A gate is asked at a named decision point before something happens and answers allow, deny or ask; the strictest answer wins and is recorded. Reachable from WebAssembly through the `gate` export. Still to do: more decision points (the user's input, the model request), and letting a person answer an ask at `plugin/load`. See [Events, gates and hooks](#events-gates-and-hooks). |
 | Waits and signals | built for a gate's ask | A run whose tool call a gate asked about waits for `Harness::answer`; the ask and the answer are events, so the wait survives a restart. Still to do: the general form, a step that waits for any named signal (a child session finishing, a timer). |
 | Services | built | A fifth registry, `Services`: calls between plugins in JSON text, with the caller's name, across the WebAssembly boundary in both directions. See [Plugins extending plugins](#plugins-extending-plugins). |
-| Capabilities | eleven | The mechanism is settled; the set grows (below). |
-| Kernels | built | The trait and registry stay. `ShellKernel` is an implementation, not a primitive, and moves out to a plugin crate. |
+| Capabilities | fifteen | The mechanism is settled; the set grows (below). |
+| Kernels | built | The trait and registry. `ShellKernel` is an implementation, not a primitive, and lives in `corduroy-shell`. |
 | Conversation projection | messages only | Understands a `compaction` event (a summary and the first message kept). Producing the summary is a plugin's job. |
-| Model access | constructor argument | A `provider` service that a plugin supplies, so the model is swappable like everything else. |
+| Model access | built | The loop asks the provider registered under a name in `Providers`, on every request, so a plugin supplies the model and unloading it takes the model away. `Harness::new` registers its argument there for convenience. For plugins, the core's `Models` registry: one completion, synchronously, by model name; a `provider` plugin can serve its models there. |
+| Secrets and outbound requests | built | `Secrets` and `HttpClients` registries. The core checks and records; native plugins hold the values and send the requests, so an HTTP client is a plugin like a kernel is. |
 | Versioning | WIT package version, log schema version | Built: a schema version in each log's header. Still to do: a version on each plugin's stored state, and a rule for what a minor version of the world may change. |
 
-Capabilities to add, each a WIT interface with a scope:
+One capability is still to add:
 
 | Capability | Grants | Scoped by | Needed by |
 | --- | --- | --- | --- |
-| `llm` | one model request | model name | compaction, summaries, the skills reviewer |
 | `session` | start a child session and await it | recipe or agent name | sub-agents |
-| `log-read` | read events of other sessions | session and topic | chat recall |
-| `http` | make a request | host | web fetch, remote MCP |
-| `secret` | read a named credential | secret name | providers, MCP servers |
 
-Two rules follow from adding these:
+It waits on the general form of waits and signals (step 4): a parent run awaiting a child
+session should wait in the log, as a run waiting for a person does, rather than block a
+plugin's call for as long as the child runs.
 
-- **Secrets never enter the log.** A secret is handed to a plugin as an opaque value, and host
-  functions that take one (an HTTP header, say) record that it was used, not what it was.
+Two rules came with the capabilities that reach outside:
+
+- **Secrets never enter the log.** A secret is handed to a plugin as an opaque handle (the
+  `credential` resource), and host functions that take one (an HTTP header) write its value
+  into what they send and record its name, not its value. Response bodies are not recorded
+  either, since they may echo what was sent. HTTP clients must not follow redirects: the
+  host checked one host against the grant, and a redirect elsewhere would go around it.
 - **Time and randomness are host calls.** A WebAssembly plugin has no clock of its own, so
   given the same host-call results it computes the same thing. That is what makes
   [replaying a plugin](#durability) possible, and WASI stays out of the linker to
@@ -293,11 +304,12 @@ What other harnesses call hooks are two different things here, and both are plug
   (deny over ask over allow). The outcome does not depend on which plugin loaded first. The
   decision itself is then recorded as an event.
 
-The core defines a small, fixed set of decision points (`corduroy_core::POINTS`), starting
-with `tool/call`. Likely additions are `plugin/load`, the user's input and the request about
-to be sent to the model, each added when a plugin needs it. A WebAssembly plugin that lists
-a point the core does not define is refused at activation. A plugin that wants to ask other plugins a question of its own does
-so through a [service](#plugins-extending-plugins), not through the event stream.
+The core defines a small, fixed set of decision points (`corduroy_core::POINTS`): `tool/call`
+and `plugin/load`. Likely additions are the user's input and the request about to be sent to
+the model, each added when a plugin needs it. A WebAssembly plugin that lists a point the
+core does not define is refused at activation. A plugin that wants to ask other plugins a
+question of its own does so through a [service](#plugins-extending-plugins), not through the
+event stream.
 
 A deny or an ask always carries a reason. A denied tool call becomes an error tool result
 holding that reason, so the model learns what was wrong and can try again, as with any other
@@ -565,19 +577,19 @@ harness.
 | Goose feature | Plugin here | Kind | Waits on |
 | --- | --- | --- | --- |
 | Developer: `write`, `edit`, `shell`, `tree`, `read_image` | `pi-tools`, extended | WebAssembly | content blocks |
-| MCP extensions (stdio, streamable HTTP) | `mcp` | native (`rmcp`) | kernels for subprocesses, `secret` |
-| Providers | `providers` (`oi-kit-providers`) | native | `provider` service, `secret` |
+| MCP extensions (stdio, streamable HTTP) | `mcp` | native (`rmcp`) | kernels for subprocesses |
+| Providers | `providers` (`oi-kit-providers`) | native | nothing (the `provider` service and `Secrets` are built) |
 | Permission modes, per-tool permissions | `approval` (exists: `auto`, `smart`, `approve`, `chat`, allow and deny lists) | WebAssembly | done |
-| Tool inspection, prompt-injection scan | `inspect` | WebAssembly | gates |
-| Auto-compaction | `compact` | WebAssembly | `llm`, compaction event |
+| Tool inspection, prompt-injection scan | `inspect` | WebAssembly | nothing (gates are built) |
+| Auto-compaction | `compact` | WebAssembly | compaction event (`llm` is built) |
 | Summon: `load`, `delegate` | `subagents` | WebAssembly | sessions, `session`, waits |
-| Skills | `skills` (exists) | WebAssembly | `llm` for the review fork |
+| Skills | `skills` (exists) | WebAssembly | nothing (`llm` for the review fork is built) |
 | Context files (`.goosehints`, `AGENTS.md`) | `hints` | WebAssembly | nothing |
 | Todo | `todo` | WebAssembly | nothing (`state` is built) |
 | Memory | `memory` | WebAssembly | nothing (scoped files) |
-| Chat Recall | `recall` | WebAssembly | `log-read` |
-| Summarize | `summarize` | WebAssembly | `llm` |
-| Extension Manager | `plugin-manager` | WebAssembly | `plugins` |
+| Chat Recall | `recall` | WebAssembly | nothing (`log-read` is built) |
+| Summarize | `summarize` | WebAssembly | nothing (`llm` is built) |
+| Extension Manager | `plugin-manager` | WebAssembly | nothing (`plugins` is built) |
 | Code Mode | `code-mode` | WebAssembly + kernel | kernel-to-host bridge |
 | Recipes and sub-recipes | a declarative plugin tree with grants | host configuration | grant files |
 
@@ -618,8 +630,12 @@ the step it waits on is done.
    component compiled once per process, wasmtime's `cache` and `parallel-compilation`
    features switched on, and the cache directory among the protected paths. Checked from
    JavaScript and Python, see [Guest languages](guest-languages.md#loading-plugins).
-7. The remaining capabilities, each when its first plugin needs it; `provider` as a service;
-   `ShellKernel` out of the core.
+7. *Done,* but for `session`. `provider` as a service (`Providers`, the `provider` plugin, a
+   loop that looks its provider up on every request); `ShellKernel` out of the core into
+   `corduroy-shell`; and `llm`, `secret`, `http` and `log-read`, with the `Models`,
+   `Secrets` and `HttpClients` registries behind them. Checked from JavaScript and Python,
+   see [Guest languages](guest-languages.md#reaching-out-llm-secret-http-and-log-read).
+   *Still to do:* `session`, after general waits and signals; an HTTP client plugin.
 8. Guest languages. *Spike done early:* one JavaScript and one Python plugin ran against the
    world, which settled the WASI question (build without it) and showed the script host
    works in both; see [Guest languages](guest-languages.md). *Still to do,* once steps 5 and

@@ -458,6 +458,7 @@ dependencies = [
  "async-trait",
  "corduroy-core",
  "corduroy-jsonl",
+ "corduroy-shell",
  "corduroy-test-support",
  "corduroy-wasm",
  "futures",
@@ -479,6 +480,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "corduroy-shell"
+version = "0.1.0"
+dependencies = [
+ "corduroy-core",
+]
+
+[[package]]
 name = "corduroy-test-support"
 version = "0.1.0"
 
@@ -487,6 +495,7 @@ name = "corduroy-wasm"
 version = "0.1.0"
 dependencies = [
  "corduroy-core",
+ "corduroy-shell",
  "corduroy-test-support",
  "getrandom 0.3.4",
  "serde_json",

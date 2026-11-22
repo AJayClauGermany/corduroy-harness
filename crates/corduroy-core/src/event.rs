@@ -499,6 +499,22 @@ impl EventStream {
         depth
     }
 
+    /// A copy of the first `limit` events with an id above `after` for which `keep` holds,
+    /// oldest first.
+    #[must_use]
+    pub fn after(&self, after: EventId, limit: usize, keep: impl Fn(&Event) -> bool) -> Vec<Event> {
+        let inner = self.lock();
+        let start = inner.log.partition_point(|event| event.id <= after);
+        inner
+            .log
+            .iter()
+            .skip(start)
+            .filter(|event| keep(event))
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
     /// A copy of every event whose topic matches `topics`, oldest first.
     #[must_use]
     pub fn matching(&self, topics: &Pattern) -> Vec<Event> {
@@ -634,6 +650,22 @@ mod tests {
         assert_eq!(restored.len(), 3);
         assert!(!restored.is_empty());
         assert_eq!(Source::Plugin("skills".into()).to_string(), "plugin:skills");
+    }
+
+    #[test]
+    fn events_after_an_id_are_read_in_pages() {
+        let stream = EventStream::new();
+        for topic in ["a", "b", "a", "a"] {
+            stream.emit(user(topic)).unwrap();
+        }
+        let topic_a = |event: &Event| event.topic == "a";
+
+        let first = stream.after(EventId::new(0), 2, topic_a);
+        let ids: Vec<u64> = first.iter().map(|event| event.id.get()).collect();
+        assert_eq!(ids, [1, 3]);
+        let rest = stream.after(EventId::new(3), 10, topic_a);
+        assert_eq!(rest.len(), 1);
+        assert_eq!(rest[0].id.get(), 4);
     }
 
     /// A log that keeps its batches where the test can see them and can be told to fail.

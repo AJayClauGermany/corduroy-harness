@@ -11,15 +11,20 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
 use corduroy_core::{
-    CallError as CoreCallError, Draft, FiberId, Gates, Grants, Kernels, PLUGIN_LOAD, Requests,
-    Scope, Services, Source, TOOL_CALL, ToolError as CoreToolError, Tools, Verdict, json,
+    CallError as CoreCallError, Completion, Draft, Event, EventId, EventStream, FiberId, Gates,
+    Grants, HttpClients, HttpRequest, Kernels, Models, PLUGIN_LOAD, Pattern, Requests, Role, Scope,
+    Secrets, Services, SessionId, Source, TOOL_CALL, ToolError as CoreToolError, Tools, Turn,
+    Verdict, json,
 };
 use serde_json::{Value, json};
 use wasmtime::StoreLimits;
+use wasmtime::component::Resource;
 
+use super::bindings::Credential;
 use super::bindings::corduroy::plugin::types::{CallError, HostError, ToolError, ToolSpec};
 use super::bindings::corduroy::plugin::{
-    clock, events, fs_read, fs_write, kernel, log, plugins, random, service, state, tools, types,
+    clock, events, fs_read, fs_write, http, kernel, llm, log, log_read, plugins, random, secret,
+    service, state, tools, types,
 };
 use super::paths;
 use crate::runtime::WasmRuntime;
@@ -39,6 +44,15 @@ const MAX_KEY: usize = 256;
 /// Longest value `state` stores, in bytes.
 const MAX_VALUE: usize = 64 << 10;
 
+/// Header names and values, in order.
+type Headers = Vec<(String, String)>;
+
+/// Largest response body `http` hands to a plugin, in bytes.
+const MAX_BODY: usize = 8 << 20;
+
+/// Most events one `log-read` call returns.
+const MAX_EVENTS: u32 = 1000;
+
 /// What the host lends a plugin's instances: the registries its capabilities reach, and the
 /// plugin's `state` store. Shared by every instance of one application of the plugin.
 #[derive(Clone, Default)]
@@ -47,6 +61,11 @@ pub(super) struct Lent {
     pub(super) tools: Option<Arc<Tools>>,
     pub(super) gates: Option<Arc<Gates>>,
     pub(super) services: Option<Arc<Services>>,
+    pub(super) models: Option<Arc<Models>>,
+    pub(super) secrets: Option<Arc<Secrets>>,
+    pub(super) http: Option<Arc<HttpClients>>,
+    /// For `log-read`.
+    pub(super) events: Option<Arc<EventStream>>,
     /// The `state` store as of the last call that returned.
     pub(super) state: Arc<Mutex<BTreeMap<String, String>>>,
     /// For `plugins`: where loaded plugins are compiled, how they are queued for the plugin
@@ -98,6 +117,10 @@ pub(super) struct HostState {
     pub(super) limits: StoreLimits,
     /// When the instance was made: the zero of its monotonic clock.
     pub(super) started: Instant,
+    /// How long `llm` and `http` wait for an answer.
+    pub(super) wait: Duration,
+    /// The names of the credentials `secret` handed out, by handle; `None` once dropped.
+    pub(super) credentials: Vec<Option<String>>,
 }
 
 impl HostState {
@@ -145,6 +168,30 @@ fn failed(path: &str, error: &std::io::Error) -> HostError {
 }
 
 impl types::Host for HostState {}
+
+impl HostState {
+    /// The name of the credential behind `handle`.
+    fn credential(&self, handle: &Resource<Credential>) -> Option<&str> {
+        let index = usize::try_from(handle.rep()).ok()?;
+        self.credentials.get(index)?.as_deref()
+    }
+}
+
+impl types::HostCredential for HostState {
+    fn name(&mut self, self_: Resource<Credential>) -> String {
+        self.credential(&self_).unwrap_or_default().to_owned()
+    }
+
+    fn drop(&mut self, rep: Resource<Credential>) -> wasmtime::Result<()> {
+        if let Some(slot) = usize::try_from(rep.rep())
+            .ok()
+            .and_then(|index| self.credentials.get_mut(index))
+        {
+            *slot = None;
+        }
+        Ok(())
+    }
+}
 
 impl fs_read::Host for HostState {
     fn read(&mut self, path: String) -> Result<String, HostError> {
@@ -601,5 +648,233 @@ impl plugins::Host for HostState {
             .as_ref()
             .map(|loader| loader.children().keys().cloned().collect())
             .unwrap_or_default()
+    }
+}
+
+impl llm::Host for HostState {
+    fn complete(&mut self, model: String, request: llm::Completion) -> Result<String, HostError> {
+        self.check("llm", &model)?;
+        let models = self
+            .lent
+            .models
+            .clone()
+            .ok_or_else(|| HostError::Failed(unlent("models")))?;
+        let completion = Completion {
+            system: request.system,
+            messages: request
+                .messages
+                .into_iter()
+                .map(|turn| Turn {
+                    role: match turn.role {
+                        llm::Role::User => Role::User,
+                        llm::Role::Assistant => Role::Assistant,
+                    },
+                    text: turn.text,
+                })
+                .collect(),
+        };
+        let messages: Vec<Value> = completion
+            .messages
+            .iter()
+            .map(|turn| {
+                let role = match turn.role {
+                    Role::User => "user",
+                    Role::Assistant => "assistant",
+                };
+                json!({"role": role, "text": turn.text})
+            })
+            .collect();
+        let asked = json!({"model": model, "system": completion.system, "messages": messages});
+        self.outbox.push(self.draft("llm/request", &asked));
+        let answer = models.complete(&model, &completion, self.wait);
+        let (ok, output) = match &answer {
+            Ok(text) => (true, text.clone()),
+            Err(error) => (false, error.to_string()),
+        };
+        let answered = json!({"model": model, "ok": ok, "output": output});
+        self.outbox.push(self.draft("llm/response", &answered));
+        answer.map_err(|error| HostError::Failed(error.to_string()))
+    }
+}
+
+impl secret::Host for HostState {
+    fn get(&mut self, name: String) -> Result<Resource<Credential>, HostError> {
+        self.check("secret", &name)?;
+        let secrets = self
+            .lent
+            .secrets
+            .as_ref()
+            .ok_or_else(|| HostError::Failed(unlent("secrets")))?;
+        if secrets.get(&name).is_none() {
+            return Err(HostError::Failed(format!(
+                "no secret is registered as `{name}`"
+            )));
+        }
+        let handle = u32::try_from(self.credentials.len())
+            .map_err(|_| HostError::Failed("too many credentials are open".to_owned()))?;
+        self.credentials.push(Some(name));
+        Ok(Resource::new_own(handle))
+    }
+}
+
+/// The scheme and host of an absolute `http` or `https` URL, both in lowercase. URLs with a
+/// user name or password are refused, since they make the host easy to misread.
+fn authority(url: &str) -> Result<(String, String), String> {
+    let (scheme, rest) = url
+        .split_once("://")
+        .ok_or_else(|| format!("`{url}` is not an absolute URL"))?;
+    let scheme = scheme.to_ascii_lowercase();
+    if scheme != "http" && scheme != "https" {
+        return Err(format!("`{url}` is not an http or https URL"));
+    }
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = rest.get(..end).unwrap_or_default();
+    if authority.contains('@') {
+        return Err(format!("`{url}` carries a user name or password"));
+    }
+    // An IPv6 address is bracketed: `[::1]:8080`.
+    let host = authority
+        .strip_prefix('[')
+        .map_or_else(
+            || authority.split(':').next(),
+            |bracketed| bracketed.split_once(']').map(|(host, _)| host),
+        )
+        .unwrap_or_default();
+    if host.is_empty() {
+        return Err(format!("`{url}` names no host"));
+    }
+    Ok((scheme, host.to_ascii_lowercase()))
+}
+
+impl HostState {
+    /// The name of the secret behind `credential`, and its value.
+    fn reveal(&self, credential: &Resource<Credential>) -> Result<(String, String), HostError> {
+        let name = self
+            .credential(credential)
+            .ok_or_else(|| HostError::Failed("the credential was dropped".to_owned()))?;
+        let value = self
+            .lent
+            .secrets
+            .as_ref()
+            .ok_or_else(|| HostError::Failed(unlent("secrets")))?
+            .reveal(name)
+            .map_err(HostError::Failed)?;
+        Ok((name.to_owned(), value))
+    }
+
+    /// `headers` with each credential's value written in, and how to record them: by name,
+    /// and for a credential the secret's name, never its value.
+    fn headers(&self, headers: Vec<http::Header>) -> Result<(Headers, Vec<Value>), HostError> {
+        let mut written = Vec::new();
+        let mut recorded = Vec::new();
+        for header in headers {
+            let value = match header.value {
+                http::HeaderValue::Text(text) => {
+                    recorded.push(json!({"name": header.name}));
+                    text
+                }
+                http::HeaderValue::Secret(credential) => {
+                    let (name, value) = self.reveal(&credential)?;
+                    recorded.push(json!({"name": header.name, "secret": name}));
+                    value
+                }
+            };
+            written.push((header.name, value));
+        }
+        Ok((written, recorded))
+    }
+}
+
+impl http::Host for HostState {
+    fn send(&mut self, request: http::Request) -> Result<http::Response, HostError> {
+        let (scheme, host) = authority(&request.url).map_err(HostError::Failed)?;
+        self.check("http", &host)?;
+        let clients = self
+            .lent
+            .http
+            .clone()
+            .ok_or_else(|| HostError::Failed(unlent("HTTP clients")))?;
+        let client = clients.get(&scheme).ok_or_else(|| {
+            HostError::Failed(format!("the host has no HTTP client for `{scheme}`"))
+        })?;
+        let (headers, recorded) = self.headers(request.headers)?;
+        let body_bytes = request.body.as_ref().map_or(0, Vec::len);
+        let asked = json!({
+            "method": request.method, "url": request.url, "headers": recorded,
+            "body": body_bytes,
+        });
+        self.outbox.push(self.draft("http/request", &asked));
+        let sent = HttpRequest {
+            method: request.method,
+            url: request.url,
+            headers,
+            body: request.body,
+        };
+        let outcome = client.send(&sent, self.wait).and_then(|response| {
+            if response.body.len() > MAX_BODY {
+                Err(format!(
+                    "the response body is over the {MAX_BODY} byte limit"
+                ))
+            } else {
+                Ok(response)
+            }
+        });
+        let answered = match &outcome {
+            Ok(response) => json!({
+                "url": sent.url, "status": response.status, "body": response.body.len(),
+            }),
+            Err(error) => json!({"url": sent.url, "error": error}),
+        };
+        self.outbox.push(self.draft("http/response", &answered));
+        let response = outcome.map_err(HostError::Failed)?;
+        Ok(http::Response {
+            status: response.status,
+            headers: response.headers,
+            body: response.body,
+        })
+    }
+}
+
+/// An event as the plugin sees it.
+pub(super) fn event_of(event: &Event) -> types::Event {
+    types::Event {
+        id: event.id.get(),
+        session: event
+            .session
+            .as_ref()
+            .map(|session| session.as_str().to_owned()),
+        source: event.source.to_string(),
+        cause: event.cause.map(EventId::get),
+        topic: event.topic.clone(),
+        payload: event.payload.clone(),
+    }
+}
+
+impl log_read::Host for HostState {
+    fn read(
+        &mut self,
+        session: Option<String>,
+        topic: String,
+        after: u64,
+        limit: u32,
+    ) -> Result<Vec<types::Event>, HostError> {
+        let events = self
+            .lent
+            .events
+            .clone()
+            .ok_or_else(|| HostError::Failed(unlent("event stream")))?;
+        let topics = Pattern::new(topic);
+        let limit = usize::try_from(limit.min(MAX_EVENTS)).unwrap_or_default();
+        let grants = &self.grants;
+        let found = events.after(EventId::new(after), limit, |event| {
+            let in_session = event.session.as_ref().map(SessionId::as_str);
+            let reached = format!("{}:{}", in_session.unwrap_or_default(), event.topic);
+            session
+                .as_deref()
+                .is_none_or(|wanted| in_session == Some(wanted))
+                && topics.matches(&event.topic)
+                && grants.check("log-read", &reached).is_ok()
+        });
+        Ok(found.iter().map(event_of).collect())
     }
 }

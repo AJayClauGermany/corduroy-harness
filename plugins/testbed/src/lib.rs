@@ -11,6 +11,9 @@
 //! | `load` | Loads a plugin: `{"path", "name", "config", "grants": [{"capability", "allow", "deny"}]}` |
 //! | `unload` | Unloads a plugin it loaded: `{"name"}` |
 //! | `loaded` | Lists the plugins it loaded |
+//! | `ask` | Asks a model: `{"model", "system", "prompt"}` |
+//! | `fetch` | Makes an HTTP request: `{"method", "url", "body", "headers": [{"name", "text"} \| {"name", "secret"}]}`; returns `{"status", "body"}` |
+//! | `read` | Reads the event stream: `{"session", "topic", "after", "limit"}`; returns `[[id, session, topic]]` |
 //!
 //! `state` with `"trap": true` traps after the operation, to show that a trapped call's writes
 //! are not kept.
@@ -44,7 +47,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use bindings::corduroy::plugin::log::Level;
 use bindings::corduroy::plugin::types::{CallError, HostError, ServiceCall, ToolSpec};
-use bindings::corduroy::plugin::{clock, events, log, plugins, random, service, state, tools};
+use bindings::corduroy::plugin::{
+    clock, events, http, llm, log, log_read, plugins, random, secret, service, state, tools,
+};
 use bindings::{Event, Guest, PluginInfo, ToolError, Verdict};
 use serde_json::{Value, json};
 
@@ -162,6 +167,91 @@ fn store(input: &Value) -> String {
     done.to_string()
 }
 
+fn ask(input: &Value) -> String {
+    let request = llm::Completion {
+        system: text(input, "system").to_owned(),
+        messages: vec![llm::Turn {
+            role: llm::Role::User,
+            text: text(input, "prompt").to_owned(),
+        }],
+    };
+    report(llm::complete(text(input, "model"), &request)).to_string()
+}
+
+fn fetch(input: &Value) -> String {
+    // Credentials must outlive the request that borrows them.
+    let mut credentials = Vec::new();
+    let mut named = Vec::new();
+    for header in input
+        .get("headers")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let name = text(header, "name").to_owned();
+        match header.get("secret").and_then(Value::as_str) {
+            Some(secret_name) => match secret::get(secret_name) {
+                Ok(credential) => {
+                    credentials.push(credential);
+                    named.push((name, None));
+                }
+                Err(error) => return report::<Value>(Err(error)).to_string(),
+            },
+            None => named.push((name, Some(text(header, "text").to_owned()))),
+        }
+    }
+    let mut secrets = credentials.iter();
+    let mut headers = Vec::new();
+    for (name, value) in named {
+        let value = match value {
+            Some(text) => http::HeaderValue::Text(text),
+            None => match secrets.next() {
+                Some(credential) => http::HeaderValue::Secret(credential),
+                None => continue,
+            },
+        };
+        headers.push(http::Header { name, value });
+    }
+    let request = http::Request {
+        method: text(input, "method").to_owned(),
+        url: text(input, "url").to_owned(),
+        headers,
+        body: input
+            .get("body")
+            .and_then(Value::as_str)
+            .map(|body| body.as_bytes().to_vec()),
+    };
+    report(http::send(&request).map(|response| {
+        json!({
+            "status": response.status,
+            "body": String::from_utf8_lossy(&response.body),
+        })
+    }))
+    .to_string()
+}
+
+fn read(input: &Value) -> String {
+    let session = input.get("session").and_then(Value::as_str);
+    let after = input
+        .get("after")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let limit = input
+        .get("limit")
+        .and_then(Value::as_u64)
+        .and_then(|limit| u32::try_from(limit).ok())
+        .unwrap_or(u32::MAX);
+    report(
+        log_read::read(session, text(input, "topic"), after, limit).map(|events| {
+            events
+                .into_iter()
+                .map(|event| json!([event.id, event.session, event.topic]))
+                .collect::<Vec<_>>()
+        }),
+    )
+    .to_string()
+}
+
 struct Testbed;
 
 impl Guest for Testbed {
@@ -184,7 +274,8 @@ impl Guest for Testbed {
         };
         let _ = ECHO.set(text(&echo, "emit").to_owned());
         let tools = [
-            "probe", "count", "trap", "relay", "state", "load", "unload", "loaded",
+            "probe", "count", "trap", "relay", "state", "load", "unload", "loaded", "ask", "fetch",
+            "read",
         ]
         .map(spec)
         .to_vec();
@@ -217,6 +308,9 @@ impl Guest for Testbed {
                 Ok(report(plugins::unload(text(&input, "name")).map(|()| true)).to_string())
             }
             "loaded" => Ok(json!(plugins::loaded()).to_string()),
+            "ask" => Ok(ask(&input)),
+            "fetch" => Ok(fetch(&input)),
+            "read" => Ok(read(&input)),
             _ => Err(ToolError::UnknownTool(name)),
         }
     }

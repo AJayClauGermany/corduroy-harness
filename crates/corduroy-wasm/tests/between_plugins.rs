@@ -8,9 +8,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use corduroy_core::{
-    App, CallError, EventStream, FiberState, GATES, Gate, Gates, KERNELS, Kernels, PROMPTS,
-    Pattern, Prompts, SERVICES, Scope, Service, Services, TOOLS, Tool, ToolSpec, Tools, Verdict,
-    tool_fn,
+    App, CallError, EventStream, FiberState, GATES, Gate, Gates, HTTP, HttpClients, KERNELS,
+    Kernels, MODELS, Models, PROMPTS, Pattern, Prompts, SECRETS, SERVICES, Scope, Secrets, Service,
+    Services, TOOLS, Tool, ToolSpec, Tools, Verdict, tool_fn,
 };
 use corduroy_test_support::{plugin, scratch};
 use corduroy_wasm::{Limits, WasmPlugin, WasmRuntime};
@@ -45,6 +45,9 @@ fn host(events: EventStream) -> Result<Host, Box<dyn Error>> {
     app.provide(GATES, Arc::clone(&gates))?;
     app.provide(SERVICES, Arc::clone(&services))?;
     app.provide(KERNELS, Arc::new(Kernels::new()))?;
+    app.provide(MODELS, Arc::new(Models::new()))?;
+    app.provide(SECRETS, Arc::new(Secrets::new()))?;
+    app.provide(HTTP, Arc::new(HttpClients::new()))?;
     Ok(Host {
         app,
         tools,
@@ -73,7 +76,11 @@ fn testbed(
         .grant("state", state)
         .grant("service", service)
         .grant("events", Scope::none())
-        .grant("plugins", Scope::none()))
+        .grant("plugins", Scope::none())
+        .grant("llm", Scope::none())
+        .grant("secret", Scope::none())
+        .grant("http", Scope::none())
+        .grant("log-read", Scope::none()))
 }
 
 /// Call the tool `tool` with `input` and parse what it returns.
@@ -406,7 +413,11 @@ fn impatient_alpha() -> Result<WasmPlugin, Box<dyn Error>> {
         .grant("state", Scope::none())
         .grant("service", Scope::none())
         .grant("events", Scope::none())
-        .grant("plugins", Scope::none()))
+        .grant("plugins", Scope::none())
+        .grant("llm", Scope::none())
+        .grant("secret", Scope::none())
+        .grant("http", Scope::none())
+        .grant("log-read", Scope::none()))
 }
 
 #[test]
