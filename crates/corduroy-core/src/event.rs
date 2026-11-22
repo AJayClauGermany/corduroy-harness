@@ -16,13 +16,20 @@
 //! again. A commit the log refuses closes the stream: every later commit fails with the same
 //! error.
 //!
-//! Delivery is synchronous and in subscription order, so a given log always produces the same
-//! sequence of listener calls.
+//! Every event carries the time its commit was stored, in milliseconds since the Unix epoch.
+//! The stream reads the clock once per commit, so the events of one commit share a time, and
+//! never lets time run backwards: a log's times are in order, like its ids.
+//!
+//! Delivery is synchronous, on the thread that committed, and in subscription order. Commits
+//! made on one thread are therefore delivered in the order they were made. Two threads that
+//! commit at the same moment each deliver their own commit, so a listener may hear the later
+//! of the two first; what a listener must not get wrong it reads from the log, by id.
 
 use std::error::Error;
 use std::fmt;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::pattern::Pattern;
 
@@ -133,6 +140,9 @@ impl FromStr for Source {
 pub struct Event {
     /// Position in the stream.
     pub id: EventId,
+    /// When the event's commit was stored, in milliseconds since the Unix epoch. Events of
+    /// one commit share a time, and times never decrease along a stream.
+    pub time: u64,
     /// The session the event belongs to, if it belongs to one.
     pub session: Option<SessionId>,
     /// Who produced the event.
@@ -216,8 +226,9 @@ impl Draft {
 }
 
 impl Draft {
-    /// Turn the draft into the next event of `batch`, whose first event follows id `last`.
-    fn seal(self, last: u64, batch: &[Event]) -> Result<Event, LogError> {
+    /// Turn the draft into the next event of `batch`, whose first event follows id `last`
+    /// and which is stored at `time`.
+    fn seal(self, last: u64, time: u64, batch: &[Event]) -> Result<Event, LogError> {
         let cause = match self.cause {
             None => None,
             Some(Cause::Event(id)) => Some(id),
@@ -233,6 +244,7 @@ impl Draft {
         };
         Ok(Event {
             id: EventId(last + batch.len() as u64 + 1),
+            time,
             session: self.session,
             source: self.source,
             cause,
@@ -291,6 +303,18 @@ pub struct ListenerId(u64);
 
 type Listener = Arc<dyn Fn(&Event) + Send + Sync>;
 
+/// Where a stream reads the time from: milliseconds since the Unix epoch.
+type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
+
+/// The system clock, in milliseconds since the Unix epoch.
+fn system_clock() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
 /// A committed event and the listeners that should hear about it.
 type Delivery = (Event, Vec<Listener>);
 
@@ -309,6 +333,10 @@ struct Inner {
     subscriptions: Vec<Subscription>,
     next_event: u64,
     next_listener: u64,
+    /// The time of the last commit, below which no later commit is stamped.
+    last_time: u64,
+    /// Read instead of the system clock, if set.
+    clock: Option<Clock>,
 }
 
 impl Inner {
@@ -317,9 +345,15 @@ impl Inner {
         if let Some(error) = &self.failed {
             return Err(error.clone());
         }
+        // One reading per commit, and never an earlier one than the commit before had.
+        let now = self
+            .clock
+            .as_ref()
+            .map_or_else(system_clock, |clock| clock());
+        let time = now.max(self.last_time);
         let mut batch: Vec<Event> = Vec::with_capacity(drafts.len());
         for draft in drafts {
-            let event = draft.seal(self.next_event, &batch)?;
+            let event = draft.seal(self.next_event, time, &batch)?;
             batch.push(event);
         }
         if let Some(store) = &mut self.store
@@ -329,6 +363,7 @@ impl Inner {
             return Err(error);
         }
         self.next_event += batch.len() as u64;
+        self.last_time = time;
         self.log.extend(batch.iter().cloned());
         Ok(batch
             .into_iter()
@@ -375,13 +410,23 @@ impl EventStream {
     pub fn replay(events: impl IntoIterator<Item = Event>) -> Self {
         let log: Vec<Event> = events.into_iter().collect();
         let next_event = log.iter().map(|event| event.id.get()).max().unwrap_or(0);
+        let last_time = log.iter().map(|event| event.time).max().unwrap_or(0);
         Self {
             inner: Mutex::new(Inner {
                 log,
                 next_event,
+                last_time,
                 ..Inner::default()
             }),
         }
+    }
+
+    /// Read the time of each commit from `clock` (milliseconds since the Unix epoch) rather
+    /// than from the system clock: for tests, and for hosts that keep time themselves.
+    #[must_use]
+    pub fn with_clock(self, clock: impl Fn() -> u64 + Send + Sync + 'static) -> Self {
+        self.lock().clock = Some(Arc::new(clock));
+        self
     }
 
     /// Store every future commit in `log` before it is added to the stream.
@@ -650,6 +695,26 @@ mod tests {
         assert_eq!(restored.len(), 3);
         assert!(!restored.is_empty());
         assert_eq!(Source::Plugin("skills".into()).to_string(), "plugin:skills");
+    }
+
+    #[test]
+    fn a_commit_has_one_time_and_time_never_runs_backwards() {
+        let readings = Arc::new(Mutex::new(vec![30_u64, 10, 20]));
+        let clock = Arc::clone(&readings);
+        let stream = EventStream::new().with_clock(move || clock.lock().unwrap().pop().unwrap());
+
+        stream.commit([user("a"), user("b")]).unwrap();
+        stream.emit(user("c")).unwrap();
+        stream.emit(user("d")).unwrap();
+
+        // The clock read 20, then 10, then 30: the second commit keeps the first's time.
+        let times: Vec<u64> = stream.events().iter().map(|event| event.time).collect();
+        assert_eq!(times, [20, 20, 20, 30]);
+
+        // A replayed stream carries on from the latest time it holds.
+        let restored = EventStream::replay(stream.events()).with_clock(|| 5);
+        restored.emit(user("e")).unwrap();
+        assert_eq!(restored.events()[4].time, 30);
     }
 
     #[test]

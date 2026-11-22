@@ -87,7 +87,7 @@ pub use corduroy_shell as shell;
 pub use corduroy_shell::shell_kernel;
 pub use corduroy_wasm as wasm;
 pub use gates::{GateOperation, WaitOperation};
-pub use harness::{Harness, HarnessError, Outcome, Status};
+pub use harness::{Harness, HarnessError, OPERATIONS, Operations, Outcome, Status};
 pub use provider::{DEFAULT_PROVIDER, PROVIDERS, ProviderPlugin, Providers, provider};
 pub use session::{
     Answer, Ask, COMPACTION, Effect, Journal, MAIN, SIGNAL, Session, SessionInfo, Sessions, Wait,

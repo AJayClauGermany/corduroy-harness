@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use corduroy_core::{
     App, ContextError, EventStream, FiberId, GATES, Gates, HTTP, HttpClients, KERNELS, Kernels,
-    LogError, MODELS, Models, PROMPTS, Plugin, Prompts, SECRETS, SERVICES, Secrets, Services,
-    SessionId, TOOLS, Tools,
+    LogError, MODELS, Models, PROMPTS, Plugin, Prompts, Registry, SECRETS, SERVICES, Secrets,
+    Services, SessionId, TOOLS, Tools,
 };
 use oi_kit_agent::inference::InferenceRunner;
 use oi_kit_agent::machine::{StateMachine, Step};
@@ -31,6 +31,25 @@ use crate::session::{
     Answer, Ask, Effect, Journal, MAIN, Progress, Session, SessionInfo, Sessions, Wait, ended,
 };
 use crate::tools::{PluginTools, PromptOperation};
+
+/// Name of the service under which the harness provides the [`Operations`] registry.
+pub const OPERATIONS: &str = "operations";
+
+/// Steps of the loop that native plugins contribute.
+///
+/// A step is an oi-kit [`Operation`]: it looks at the session at the start of a step of the
+/// loop and either declines or returns [`Effect`]s for the journal to store. Registered
+/// steps are tried in name order, after those the host added with
+/// [`Harness::with_operation`] and ahead of the built-in ones, so one can act before tools
+/// run or the model is asked. A step registered through a plugin's context leaves with the
+/// plugin.
+///
+/// The steps are read whenever a run is started or taken on, so a step registered while a
+/// run is going joins the loop from the next time it stops (to wait, or at its end).
+///
+/// Operations are native code and run with the host's authority; a WebAssembly plugin
+/// shapes the loop through gates, tools and events instead.
+pub type Operations = Registry<dyn Operation<Session, Effect>>;
 
 /// Why the harness could not be set up or a run could not complete.
 #[derive(Debug)]
@@ -194,7 +213,10 @@ pub struct Harness {
     system: String,
     max_turns: u32,
     restart_limit: u32,
+    /// Steps the host added, tried first and in the order given.
     operations: Vec<Arc<dyn Operation<Session, Effect>>>,
+    /// Steps plugins registered, tried next and in name order.
+    contributed: Arc<Operations>,
 }
 
 impl fmt::Debug for Harness {
@@ -263,6 +285,7 @@ impl Harness {
         let models = Arc::new(Models::new());
         let secrets = Arc::new(Secrets::new());
         let http = Arc::new(HttpClients::new());
+        let contributed = Arc::new(Operations::new());
         let mut app = App::with_events(Arc::clone(&events));
         app.provide(TOOLS, Arc::clone(&tools))?;
         app.provide(PROMPTS, Arc::clone(&prompts))?;
@@ -273,6 +296,7 @@ impl Harness {
         app.provide(MODELS, Arc::clone(&models))?;
         app.provide(SECRETS, Arc::clone(&secrets))?;
         app.provide(HTTP, Arc::clone(&http))?;
+        app.provide(OPERATIONS, Arc::clone(&contributed))?;
         let children: Arc<dyn corduroy_core::Service> = Arc::new(SessionsService {
             sessions: Arc::clone(&sessions),
         });
@@ -298,6 +322,7 @@ impl Harness {
             max_turns: 25,
             restart_limit: 5,
             operations: Vec::new(),
+            contributed,
         })
     }
 
@@ -342,6 +367,9 @@ impl Harness {
     /// Add a step to the loop, ahead of the built-in ones. Steps are tried in order and the
     /// first that applies wins, so an operation added here can act before tools run or the
     /// model is called: approve calls, compact history, answer a command.
+    ///
+    /// This is for the host. A native plugin registers its steps in [`Operations`] instead
+    /// ([`operations`](Self::operations)), so that they leave with it.
     #[must_use]
     pub fn with_operation(mut self, operation: Arc<dyn Operation<Session, Effect>>) -> Self {
         self.operations.push(operation);
@@ -414,6 +442,12 @@ impl Harness {
         &self.http
     }
 
+    /// The steps of the loop plugins have registered.
+    #[must_use]
+    pub const fn operations(&self) -> &Arc<Operations> {
+        &self.contributed
+    }
+
     /// Start a session called `id`, recording `parent` as the session it came from. The new
     /// session has an empty conversation of its own.
     ///
@@ -448,9 +482,9 @@ impl Harness {
     }
 
     /// The loop, as the ordered steps a [`StateMachine`] walks: applying the plugin changes
-    /// plugins asked for, custom operations, compaction, the prompt, the gates, plugin tools,
-    /// an answer for calls nobody handled, a stop while a call waits for a signal, the turn
-    /// limit and finally the model.
+    /// plugins asked for, the host's operations, the operations plugins registered (in name
+    /// order), compaction, the prompt, the gates, plugin tools, an answer for calls nobody
+    /// handled, a stop while a call waits for a signal, the turn limit and finally the model.
     #[must_use]
     pub fn steps(&self) -> Vec<Step<'static, Session, Effect>> {
         let tools = ToolOperation::new().with_provider(Arc::new(PluginTools::new(
@@ -473,6 +507,7 @@ impl Harness {
             0,
             Step::Operation(Arc::new(SettleOperation(Arc::clone(&self.app)))),
         );
+        steps.extend(self.contributed.entries().into_iter().map(Step::Operation));
         steps.push(Step::Operation(Arc::new(CompactOperation::new(
             Arc::clone(&self.services),
             Arc::clone(&self.sessions),

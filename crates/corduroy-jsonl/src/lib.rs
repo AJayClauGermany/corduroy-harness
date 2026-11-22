@@ -4,12 +4,14 @@
 //! store. The file is plain text so a run can be read, searched and repaired by hand:
 //!
 //! ```text
-//! {"corduroy-log":1}
-//! [{"id":1,"session":"main","source":"user","cause":null,"topic":"message","payload":"..."}]
-//! [{"id":2,"session":"main","source":"agent","cause":null,"topic":"message","payload":"..."},{"id":3,...}]
+//! {"corduroy-log":2}
+//! [{"id":1,"time":1795368645804,"session":"main","source":"user","cause":null,"topic":"message","payload":"..."}]
+//! [{"id":2,"time":1795368647113,"session":"main","source":"agent","cause":null,"topic":"message","payload":"..."},{"id":3,...}]
 //! ```
 //!
-//! The first line is the header and carries the schema version. Every line after it is one
+//! The first line is the header and carries the schema version. Version 2 added `time`
+//! (milliseconds since the Unix epoch) to each event; a version 1 log is still read, its
+//! events having time 0, and is continued as it is. Every line after the header is one
 //! commit: the events of one step, written with a single `write` and flushed to the device
 //! before the stream shows them to anyone. A crash can therefore leave at most one unfinished
 //! last line, which [`JsonlLog::open`] cuts off, so a commit is in the log whole or not at all.
@@ -42,8 +44,11 @@ use std::path::Path;
 use corduroy_core::{Event, EventId, EventStream, Log, LogError, SessionId};
 use serde_json::{Value, json};
 
-/// The schema version this crate writes, and the only one it reads.
-pub const SCHEMA_VERSION: u64 = 1;
+/// The schema version this crate writes.
+pub const SCHEMA_VERSION: u64 = 2;
+
+/// The oldest schema version this crate still reads.
+pub const OLDEST_READ: u64 = 1;
 
 /// The key of the header line, whose value is the schema version.
 const HEADER_KEY: &str = "corduroy-log";
@@ -82,8 +87,8 @@ impl JsonlLog {
     /// # Errors
     ///
     /// Returns a [`LogError`] if the file cannot be opened, read or locked (another writer has
-    /// it), is not a corduroy log, has a schema version other than [`SCHEMA_VERSION`], or
-    /// holds a complete line that is not a valid commit.
+    /// it), is not a corduroy log, has a schema version outside [`OLDEST_READ`] to
+    /// [`SCHEMA_VERSION`], or holds a complete line that is not a valid commit.
     pub fn open(path: impl AsRef<Path>) -> Result<(Self, Vec<Event>), LogError> {
         let path = path.as_ref();
         let fail = |what: &str, error: &dyn fmt::Display| {
@@ -152,6 +157,7 @@ impl Log for JsonlLog {
             last += 1;
             line.push(json!({
                 "id": event.id.get(),
+                "time": event.time,
                 "session": event.session.as_ref().map(SessionId::as_str),
                 "source": event.source.to_string(),
                 "cause": event.cause.map(EventId::get),
@@ -187,11 +193,12 @@ fn check_header(line: &str) -> Result<(), String> {
         .ok()
         .and_then(|header| header.get(HEADER_KEY).and_then(Value::as_u64))
         .ok_or("it is not a corduroy log")?;
-    if version == SCHEMA_VERSION {
+    if (OLDEST_READ..=SCHEMA_VERSION).contains(&version) {
         Ok(())
     } else {
         Err(format!(
-            "it has schema version {version}, and this build reads version {SCHEMA_VERSION}"
+            "it has schema version {version}, and this build reads versions {OLDEST_READ} \
+             to {SCHEMA_VERSION}"
         ))
     }
 }
@@ -217,6 +224,8 @@ fn parse_commit(line: &str, mut last: u64) -> Result<Vec<Event>, String> {
         last = id;
         events.push(Event {
             id: EventId::new(id),
+            // Version 1 had no times.
+            time: entry.get("time").and_then(Value::as_u64).unwrap_or(0),
             session: entry
                 .get("session")
                 .and_then(Value::as_str)
@@ -277,7 +286,7 @@ mod tests {
         let text = fs::read_to_string(&path).unwrap();
         // A header, then one line per commit.
         assert_eq!(text.lines().count(), 4);
-        assert_eq!(text.lines().next(), Some(r#"{"corduroy-log":1}"#));
+        assert_eq!(text.lines().next(), Some(r#"{"corduroy-log":2}"#));
     }
 
     #[test]
@@ -310,11 +319,27 @@ mod tests {
     }
 
     #[test]
+    fn a_version_one_log_is_read_without_times_and_continued() {
+        let path = log_in("jsonl-v1");
+        let old = "{\"corduroy-log\":1}\n[{\"id\":1,\"source\":\"user\",\"topic\":\"a\",\"payload\":\"\"}]\n";
+        fs::write(&path, old).unwrap();
+
+        let stream = open(&path).unwrap();
+        assert_eq!(stream.events()[0].time, 0);
+        stream.emit(user("b")).unwrap();
+        let stored = stream.events()[1].time;
+        drop(stream);
+
+        assert!(stored > 0);
+        assert_eq!(open(&path).unwrap().events()[1].time, stored);
+    }
+
+    #[test]
     fn files_that_are_not_a_readable_log_are_refused_untouched() {
         let cases = [
             ("notes", "shopping list", "not a corduroy log"),
             ("foreign", "{\"other\":1}\n", "not a corduroy log"),
-            ("future", "{\"corduroy-log\":2}\n", "schema version 2"),
+            ("future", "{\"corduroy-log\":3}\n", "schema version 3"),
             ("corrupt", "{\"corduroy-log\":1}\nnot json\n", "line 2 of"),
             (
                 "gap",

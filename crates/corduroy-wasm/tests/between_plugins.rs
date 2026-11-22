@@ -190,6 +190,40 @@ fn a_plugin_that_gates_tool_calls_may_not_make_them() {
 }
 
 #[test]
+fn a_gate_guards_a_point_only_once_something_declares_it() {
+    let dir = scratch("declared-point");
+    let mut host = host(EventStream::new()).unwrap();
+    let scoped = [Scope::none(), Scope::none(), Scope::none()];
+    let config = json!({"gates": ["outbound/request"]});
+
+    let id = host
+        .app
+        .plugin(testbed(&dir, "testbed", &config, scoped).unwrap());
+
+    let Some(FiberState::Failed(reason)) = host.app.state(id) else {
+        panic!("a gate for a point nobody asks at must not start");
+    };
+    assert_eq!(
+        reason,
+        "plugin `testbed` wants to gate `outbound/request`, which is not a declared decision \
+         point; the points are: plugin/load, tool/call"
+    );
+
+    // An extension that asks at a point of its own declares it; then the gate may guard it.
+    host.gates
+        .declare_point("outbound/request", "before a request leaves: {\"url\"}")
+        .unwrap();
+    host.app.reload(id).unwrap();
+
+    assert_eq!(host.app.state(id), Some(&FiberState::Active));
+    let decision = host.gates.decide("outbound/request", "{}").unwrap();
+    assert_eq!(
+        (decision.gate.as_str(), decision.verdict.kind()),
+        ("testbed", "deny")
+    );
+}
+
+#[test]
 fn a_plugin_is_never_called_back_while_it_runs() {
     let dir = scratch("reentry");
     let mut host = host(EventStream::new()).unwrap();

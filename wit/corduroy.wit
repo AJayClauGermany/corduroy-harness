@@ -35,6 +35,9 @@ interface types {
     /// One entry of the harness event stream.
     record event {
         id: u64,
+        /// When the event was stored, in milliseconds since 1970-01-01T00:00:00Z. Times never
+        /// decrease along the stream.
+        time: u64,
         /// The session the event belongs to. Events about the harness itself have none.
         session: option<string>,
         /// `user`, `agent`, `environment`, `host` or `plugin:<name>`.

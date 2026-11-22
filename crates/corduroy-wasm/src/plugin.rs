@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use corduroy_core::{
     CallError, Context, ContextError, Draft, Event, EventStream, GATES, Gate, Gates, Grants, HTTP,
-    HttpClients, KERNELS, Kernels, MODELS, Models, PLUGIN_LOAD, POINTS, PROMPTS, Pattern, Plugin,
+    HttpClients, KERNELS, Kernels, MODELS, Models, PLUGIN_LOAD, PROMPTS, Pattern, Plugin,
     PluginError, PromptPart, Prompts, SECRETS, SERVICES, Scope, Secrets, Service, Services, Source,
     TOOL_CALL, TOOLS, Tool, ToolError, ToolSpec, Tools, Verdict,
 };
@@ -337,15 +337,14 @@ impl WasmPlugin {
         if points.is_empty() {
             return Ok(());
         }
-        if let Some(unknown) = points
-            .iter()
-            .find(|point| !POINTS.contains(&point.as_str()))
-        {
+        let gates = ctx.service::<Gates>(GATES)?;
+        // A gate for a point nobody asks at would guard nothing, and say nothing about it.
+        if let Some(unknown) = points.iter().find(|point| !gates.declared(point)) {
             return Err(PluginError::new(format!(
-                "plugin `{}` wants to gate `{unknown}`, which is not a decision point; \
-                 the points are: {}",
+                "plugin `{}` wants to gate `{unknown}`, which is not a declared decision \
+                 point; the points are: {}",
                 self.name,
-                POINTS.join(", ")
+                gates.points().join(", ")
             )));
         }
         // A plugin's own tool calls and loads pass the gates, so it would be asked about them
@@ -359,7 +358,6 @@ impl WasmPlugin {
                 )));
             }
         }
-        let gates = ctx.service::<Gates>(GATES)?;
         let gate: Arc<dyn Gate> = Arc::new(WasmGate {
             instance: Arc::clone(instance),
             points,

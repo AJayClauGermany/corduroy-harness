@@ -902,6 +902,7 @@ fn escaped(session: &str) -> String {
 pub(super) fn event_of(event: &Event) -> types::Event {
     types::Event {
         id: event.id.get(),
+        time: event.time,
         session: event
             .session
             .as_ref()

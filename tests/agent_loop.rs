@@ -15,7 +15,9 @@ use corduroy_harness::oi_kit_agent::tool_call_state::pending_tool_requests;
 use corduroy_harness::oi_kit_provider_types::conversation::Conversation;
 use corduroy_harness::oi_kit_provider_types::conversation::message::Message;
 use corduroy_harness::scripted::{ScriptedProvider, call, say};
-use corduroy_harness::{Effect, Harness, HarnessError, MAIN, Session, SessionInfo, Status};
+use corduroy_harness::{
+    Effect, Harness, HarnessError, MAIN, OPERATIONS, Operations, Session, SessionInfo, Status,
+};
 use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -243,6 +245,36 @@ async fn a_custom_operation_can_step_in_before_tools_run() {
     assert_eq!(
         tool_results(&harness),
         [r#"{"id":"c1","tool":"add","ok":false,"output":"not allowed here"}"#]
+    );
+}
+
+#[tokio::test]
+async fn a_native_plugin_contributes_a_step_that_leaves_with_it() {
+    let script = [
+        call("c1", "add", &json!({"terms": [1, 1]})),
+        say("refused"),
+        call("c2", "add", &json!({"terms": [2, 2]})),
+        say("four"),
+    ];
+    let (harness, _model) = harness(script).unwrap();
+    let policy = harness.plugin(plugin_fn("policy", &[OPERATIONS], |ctx| {
+        let operations = ctx.service::<Operations>(OPERATIONS)?;
+        operations.register(ctx, "policy/forbid", Arc::new(Forbid("add")))?;
+        Ok(())
+    }));
+    assert_eq!(harness.operations().names(), ["policy/forbid"]);
+
+    harness.run("add").await.unwrap();
+    harness.app().dispose(policy).unwrap();
+    harness.run("add again").await.unwrap();
+
+    assert_eq!(harness.operations().names(), Vec::<String>::new());
+    assert_eq!(
+        tool_results(&harness),
+        [
+            r#"{"id":"c1","tool":"add","ok":false,"output":"not allowed here"}"#,
+            r#"{"id":"c2","tool":"add","ok":true,"output":"4"}"#
+        ]
     );
 }
 

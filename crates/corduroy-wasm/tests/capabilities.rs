@@ -6,9 +6,9 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use corduroy_core::{
-    App, FiberState, GATES, Gates, HTTP, HttpClients, KERNELS, Kernels, MODELS, Models, PROMPTS,
-    Pattern, Prompts, SECRETS, SERVICES, Scope, Secrets, Services, TOOL_CALL, TOOLS, ToolError,
-    Tools, Verdict,
+    App, FiberState, GATES, Gates, HTTP, HttpClients, KERNELS, Kernels, MODELS, Models,
+    PLUGIN_LOAD, PROMPTS, Pattern, Prompts, SECRETS, SERVICES, Scope, Secrets, Services, TOOL_CALL,
+    TOOLS, ToolError, Tools, Verdict,
 };
 use corduroy_shell::ShellKernel;
 use corduroy_test_support::{plugin, scratch};
@@ -270,7 +270,13 @@ fn a_gate_answers_at_its_point_and_leaves_with_its_plugin() {
         verdict("bash", false),
         Some(Verdict::Deny("`bash` is on the deny list".into()))
     );
-    assert_eq!(host.gates.decide("model/request", "{}"), None);
+    // It is asked only at the point it named, and nobody is asked at a point never declared.
+    assert_eq!(host.gates.decide(PLUGIN_LOAD, "{}"), None);
+    let undeclared = host.gates.decide("model/request", "{}");
+    assert_eq!(
+        undeclared.map(|decision| decision.gate),
+        Some("gates".to_owned())
+    );
 
     host.app.dispose(id).unwrap();
     assert_eq!(host.gates.names(), Vec::<String>::new());

@@ -5,12 +5,12 @@
 //!
 //! * [`context`]: the plugin tree. Everything a plugin sets up is an effect that is reverted
 //!   when the plugin is unloaded, and plugins are activated and suspended as the services
-//!   they depend on come and go.
+//!   they depend on come and go. A plugin's name is its identity, and is its alone.
 //! * [`capability`]: what a plugin may do. Plugins start with no authority and are granted
 //!   scoped capabilities.
 //! * [`event`]: the append-only event stream that records a run and connects plugins. Events
-//!   are committed in batches to a [`Log`] before anyone sees them, and name the session
-//!   they belong to. The core defines what a log is; stores live in other crates.
+//!   are committed in batches to a [`Log`] before anyone sees them, carry the time they were
+//!   stored, and name the session they belong to. The core defines what a log is; stores live in other crates.
 //! * [`registry`], [`tool`], [`prompt`], [`kernel`], [`gate`], [`service`], [`model`]: the
 //!   well-known services plugins contribute to: tools the model can call, text for the system
 //!   prompt, long-lived kernels that keep state between calls, gates that decide whether
@@ -62,10 +62,10 @@ pub mod tool;
 pub use capability::{Denied, Grants, Scope};
 pub use context::{
     App, Context, ContextError, FiberId, FiberInfo, FiberState, FnPlugin, Plugin, PluginError,
-    Requests, plugin_fn,
+    RESERVED_NAMES, Requests, plugin_fn,
 };
 pub use event::{Draft, Event, EventId, EventStream, ListenerId, Log, LogError, SessionId, Source};
-pub use gate::{Decision, GATES, Gate, Gates, PLUGIN_LOAD, POINTS, TOOL_CALL, Verdict};
+pub use gate::{Decision, GATES, Gate, Gates, PLUGIN_LOAD, POINTS, TOOL_CALL, UNDECLARED, Verdict};
 pub use http::{HTTP, HttpClient, HttpClients, HttpRequest, HttpResponse};
 pub use kernel::{Cell, KERNELS, Kernel, KernelError, Kernels, MAX_OUTPUT, Process, Spawn};
 pub use model::{Completion, MODELS, Model, ModelError, Models, Role, Turn};
