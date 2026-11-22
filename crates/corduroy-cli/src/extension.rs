@@ -3,9 +3,9 @@
 //! An *extension* is a native plugin: Rust compiled into the command, trusted with the host's
 //! authority, and loaded into the same plugin tree as everything else. It is how an agent
 //! gets what the core deliberately does not have: a kernel that runs in a container, a step
-//! of the loop, a decision point of its own, a service WebAssembly plugins call. Being
-//! compiled in, the extensions an agent file can ask for are the *kinds* its command was
-//! built with:
+//! of the loop, a decision point of its own, a service add-ons call. Being compiled in, the
+//! extensions an agent file can ask for are the *kinds* its command was built with, and a
+//! new kind means rebuilding the command; an add-on (a WebAssembly plugin) needs no rebuild:
 //!
 //! ```toml
 //! [extensions.scratch]
