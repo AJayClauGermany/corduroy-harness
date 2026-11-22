@@ -815,6 +815,12 @@ the step it waits on is done.
   a run; the harness has no cancel of its own, and a tool cannot be told to stop or report
   progress while it runs. Both can be added without changing a contract: a cancel on the
   harness, and call-scope functions (`corduroy_core::call`) behind a new capability.
+- **Which session a plugin serves.** A tool's events carry the session of the call it
+  serves, but the plugin cannot ask which session that is, and a prompt part is rendered
+  with no session at all. Per-session state is therefore out of reach: `todo` keeps one
+  list, which a sub-agent overwrites for its parent. The fix adds and breaks nothing: a
+  new import interface that reports the call scope (`corduroy_core::call::current`), and
+  rendering prompt parts inside that scope.
 - **Scopes below a service.** The `service` capability is scoped by service name, so a
   grant gives all of a service's methods. `service:method` resources would let a grant
   name one.
