@@ -38,7 +38,6 @@ reshapes entries further down.
 
 | Order | Group | Questions |
 | --- | --- | --- |
-| 1 | Why this exists | P1, P2, P3, P4, P5, P8 |
 | 2 | What 1.0 is, and for whom | A1, A2, A7, A8, A9 |
 | 3 | What the record promises | C1, C2, C17, C19 |
 | 4 | What the core is made of | B3, B4, B23, B24 |
@@ -49,84 +48,32 @@ reshapes entries further down.
 
 Everything not in this table is detail that hangs off one of these, or a mechanical choice
 (which types may grow, which names are final) best made in one sitting per section once its
-group is settled. The first group comes first for a reason: a core is frozen *for* something,
-and several technical questions below have no right answer until it is said what.
+group is settled. The first group, why this exists, is decided:
+[What it is for](design.md#what-it-is-for) holds the answer, and every question below is
+read against it.
 
 ## P. Purpose and place
 
 There are many agent harnesses, and this one is assembled from ideas found in six of them.
 These questions ask what it is for, so that the freeze fixes a foundation for something in
 particular. They have no code to point at; where they lean on a claim, it is one the
-project's own pages make.
+project's own pages make. The first of them are decided, in
+[What it is for](design.md#what-it-is-for); the ones left are narrower.
 
-### P1. What is the one sentence?
+### P5. How is an MCP server held to what it was allowed?
 
-[Design](design.md) opens with "a prototype of one idea: an agent harness in which nearly
-everything is a plugin, plugins can be WebAssembly, and a WebAssembly plugin can do only what
-it was granted". That describes a mechanism. It does not say what someone can do with it that
-they cannot do, or cannot do safely, with what already exists.
-[Where the ideas come from](explanation/inspirations.md) comes closer in passing: "what
-corduroy is for: an agent that loads, replaces and drops plugins while it runs, including
-plugins it wrote itself".
+[What it is for](design.md#what-it-is-for) treats a tool from an MCP server and a tool from
+an add-on alike, and lets the agent build either. They are not alike in what they can do: an
+add-on runs with its grants and nothing else, and a stdio MCP server is a process started
+through a kernel, with whatever that kernel can reach. MCP has authorization and a way for a
+server to ask the person for input; whether either can stand where a gate does has not been
+checked.
 
-*Direction.* Write the sentence as an outcome for a named kind of person, with no mechanism
-in it. The candidates the project's pages already imply: an agent that can safely extend
-itself; a harness whose extensions need not be trusted; a small fixed base that keeps
-enforcing the same rules whatever is built on it; a kit for building harnesses. They are
-different products, and the rest of this page reads differently under each.
-
-### P2. Is this a harness people use, or what harnesses are built on?
-
-It is both today: a default agent meant to match another harness feature for feature, and a
-library with a command others rebuild with their own parts. The first competes for a place
-at someone's terminal against agents that ship with the models they are tuned for. The
-second competes with agent SDKs for a place inside someone's product. They are won
-differently and measured differently.
-
-*Direction.* Pick the primary one. The other becomes its proof: a kit needs one good agent
-built on it to be believed; a product needs to be embeddable only as far as its own front
-ends require.
-
-### P3. Who picks this, and instead of what?
-
-[A7](#a7-who-is-10-for) asks which uses 1.0 is measured against. This asks who makes the
-choice and what they give up. A person content with their current agent has no reason to
-move for a plugin system. The people the design could matter to: someone who must run
-extensions they cannot trust (a third party's, or the agent's own); someone embedding an
-agent in a product who needs it bounded and auditable; someone who wants an agent that works
-unattended for days and survives restarts; someone building for a device.
-
-*Direction.* Name one, and name what they use today. If no one can be named who is badly
-served now, that is the answer to act on.
-
-### P4. Which property is this the best at?
-
-The project makes three claims at once: add-ons that can do only what they are granted; runs
-that are durable because the loop is; and plugins that leave nothing behind when unloaded.
-Each is available somewhere on its own. Tools as sandboxed WebAssembly components with
-permissions denied by default already exist behind MCP, for any agent that speaks it
-([Wassette](https://microsoft.github.io/wassette) is one). Durable execution of agent steps
-is a product category of its own. Clean unloading is Cordis's.
-
-*Direction.* Decide whether the value is one of the three or their combination. A
-combination is only a purpose if some task needs all of it together. The one the design
-points at: an agent writes an automation, loads it under grants, and it keeps running
-unattended across restarts. If that is the purpose, then
-[I6](#i6-is-the-agent-extends-itself-part-of-10) is not optional, and it is the thing to
-demonstrate first.
-
-### P5. Why an add-on, when there is MCP?
-
-MCP is how nearly every harness is extended, and an MCP server runs in all of them. An
-add-on runs in this one. Sandboxing alone does not justify that, since the sandbox can be
-had behind MCP. What an add-on can be that an MCP tool cannot: a gate, a part of the system
-prompt, a listener on the event stream, state kept in the record, a service to other
-plugins, a loader of further plugins, and something that unloads completely.
-
-*Direction.* Say that add-ons are for extending the *harness* and MCP is for adding *tools*,
-and hold the design to it. Then decide the traffic between the two: whether an add-on's
-tools are offered to other agents over MCP, and whether components written for an existing
-sandboxed MCP host can be loaded here, so an author is not asked to choose an island.
+*Direction.* Decide what an MCP server the agent wrote runs as (a sandboxed component, a
+process in a confined kernel, see [H9](#h9-is-a-sandboxed-kernel-part-of-the-standard-set),
+or only what a person installed), and read the MCP specification before saying its
+approvals and the gates are one thing. Then the traffic the other way: whether this
+harness's tools are offered to other agents over MCP. Nothing needs it yet.
 
 ### P6. Do six borrowed mechanisms add up to one thesis?
 
@@ -147,15 +94,6 @@ it makes this a follower: always matching, a release behind, a list someone else
 
 *Direction.* Keep parity as the test of expressiveness. State separately what a person gets
 here that the baseline does not give them, and let 1.0 be judged on that.
-
-### P8. What does this refuse to be?
-
-Nothing is ruled out today, so every feature another harness has looks like a gap. Likely
-refusals: a desktop application; a hosted service; an editor; a model vendor's showcase; a
-framework for wiring graphs of agents; an environment for training or evaluating models.
-
-*Direction.* Write the list. It shortens every other section, since a question that only
-serves a refused use can be deleted rather than answered.
 
 ### P9. Is the fixed core itself the offer?
 
@@ -220,9 +158,9 @@ something they already use (an editor, through a protocol editors and agents sha
 inside something someone else ships. [H11](#h11-is-there-a-front-end-other-than-a-rust-program)
 asks about the mechanism; this asks about the intent.
 
-*Direction.* Pick the channel that matches
-[P2](#p2-is-this-a-harness-people-use-or-what-harnesses-are-built-on), and treat the
-terminal as the reference front end unless it is the product.
+*Direction.* The purpose is a harness a person uses, with the command line as its front end
+and adoption not a goal of 1.0 ([What it is for](design.md#what-it-is-for)). Leave this
+until there is someone other than its author to reach.
 
 ### P15. What will show that it is worth having?
 
@@ -972,8 +910,13 @@ report a refusal.
 Today no: these are native. Design's open question ("operations from plugins") needs an
 export, and exports freeze.
 
-*Direction.* Decide now whether the answer is "never", or "through services" (E4), so no
-export has to be added later.
+[What it is for](design.md#what-it-is-for) rules out "never" for the loop: an add-on has to
+be able to say what a run's steps are, so a workflow (a reviewer, two agents taking turns)
+is plugged in without a rebuild.
+
+*Direction.* Decide how, so no export has to be added later: through services (E4), or as a
+description of a loop that a native step carries out. Models and kernels can still be
+"never".
 
 ### E13. When is a value JSON text and when a typed record?
 
@@ -1154,7 +1097,11 @@ configuration.
 Nothing: model, provider, system prompt, loop and tools are the harness's, and a child
 session gets the same. A sub-agent with fewer tools or a cheaper model cannot be expressed.
 
-*Direction.* Decide what `session/start` may carry, since that is in the log.
+[What it is for](design.md#what-it-is-for) needs it: two agents working on one task, each
+with its own loop, its own tools and its own limits on what it can read.
+
+*Direction.* Decide what `session/start` may carry, since that is in the log. At least the
+loop, the tools offered and the grants its tool calls run under.
 
 ### G13. Can a person send more than text?
 
@@ -1396,13 +1343,15 @@ holds 9 to 13 MB for each instance.
 
 *Direction.* Name the first-class ones, and say whether the script host is among them.
 
-### I6. Is "the agent extends itself" part of 1.0?
+### I6. What does "the agent extends itself" need at 1.0?
 
-It is the stated purpose of the plugin system. The pieces exist (`plugin-manager`, off by
+1.0 claims it, and it is the first thing to be shown
+([What it is for](design.md#what-it-is-for)). The pieces exist (`plugin-manager`, off by
 default; the script host; the `tools` capability). Three things it leans on do not: loads
 that survive a restart ([E16](#e16-are-loads-by-a-plugin-durable)), a person approving a
 load ([C15](#c15-can-a-person-answer-an-ask-at-pluginload)), and a scheduler
 ([C16](#c16-is-there-a-timer)).
 
-*Direction.* Decide whether 1.0 claims it. If so, those three stop being later work and
-become conditions of the freeze.
+*Direction.* The first two are conditions of the freeze: something the agent built must
+still be there tomorrow, and the person must be the one who allowed it. The scheduler
+serves unattended work, which 1.0 is not measured by; decide whether it waits.
