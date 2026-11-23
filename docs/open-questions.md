@@ -28,6 +28,27 @@ listed here.
 
 Paths are relative to the repository root; `core/` stands for `crates/corduroy-core/src/`.
 
+## Where to start
+
+The questions are not equally weighty. The ones below set the direction; most of the rest
+become small, or answer themselves, once these are decided. Take a group at a time, decide
+it, then read its sections again before moving on, because an answer here often removes or
+reshapes entries further down.
+
+| Order | Group | Questions |
+| --- | --- | --- |
+| 1 | What 1.0 is, and for whom | A1, A2, A7, A8, A9 |
+| 2 | What the record promises | C1, C2, C17, C19 |
+| 3 | What the core is made of | B3, B4, B23, B24 |
+| 4 | What is safe by default | D7, D8, D9 |
+| 5 | How the plugin world grows | E3, E4, E7, E17 |
+| 6 | What an extension can reach | G1, G2, G4, G12, G18 |
+| 7 | How people meet it | H1, H11, H14, I4 |
+
+Everything not in this table is detail that hangs off one of these, or a mechanical choice
+(which types may grow, which names are final) best made in one sitting per section once its
+group is settled.
+
 ## A. What the freeze is
 
 ### A1. Which contracts are frozen, and which are only stable?
@@ -83,6 +104,64 @@ core bug-fix release may raise that.
 
 *Direction.* State a policy before 1.0 (for example: a raise is a minor release, never a
 patch).
+
+### A7. Who is 1.0 for?
+
+"The extensions cover the general cases of agentic development" needs a list to be tested
+against. What is built is a coding agent at a terminal. A long-lived service holding many
+sessions for many people, an unattended agent woken by events, and a device are each
+claimed somewhere in the design, and each strains the core in a different place
+([C2](#c2-does-the-stream-hold-the-whole-log-in-memory),
+[G18](#g18-what-may-run-at-once-in-one-harness),
+[B18](#b18-is-one-call-scope-for-the-whole-program-acceptable-without-std)).
+
+*Direction.* Name the two or three uses 1.0 is measured against, and call the others
+possible but not promised. Every later answer is judged against that list.
+
+### A8. Is running without the standard library a promise of 1.0?
+
+It shapes the whole core: no 64-bit atomics, a lock of the core's own, synchronous traits,
+no kernels ([B5](#b5-are-there-kernels-without-the-standard-library)), one call scope for
+the program. CI lints a build for a microcontroller; nothing has run on one.
+
+*Direction.* Decide between a promise (then an agent runs on a real device before the
+freeze) and best effort (then it does not get a veto over answers elsewhere on this page).
+
+### A9. What proves the extension tier is enough?
+
+No extension has been written outside this tree, and the design names several that are not
+built: a sandboxed kernel, a scheduler, a keychain for secrets, a store other than the file,
+code mode, kernel snapshots. Until some exist, "enough" is a guess.
+
+*Direction.* A short list of proof extensions, each built as a spike against the surface
+that is about to freeze, without touching the core. The freeze waits on them; what a spike
+could not do becomes a question here.
+
+### A10. What is published, where, and under which names?
+
+Every crate has `publish = false`. Nothing is on crates.io, npm or PyPI, and there is no
+built command to download. The licence is `BSL-1.0`, the Boost licence.
+
+*Direction.* Decide names and channels before 1.0, since a crate's name is the first thing
+to freeze, and confirm the licence is the one meant.
+
+### A11. What may still change after 1.0?
+
+A flaw in a frozen contract that is a security matter
+([D8](#d8-what-does-a-kernel-see-of-the-environment) and
+[D9](#d9-is-the-agent-file-in-a-workspace-trusted) are the kind) cannot wait for 2.0.
+
+*Direction.* Say that a security fix may break, how it is announced, and how long a 1.x
+release is supported.
+
+### A12. Is there a conformance kit?
+
+A store, a kernel, a provider and an HTTP client written by someone else each have rules to
+keep (a store keeps a batch whole or not at all; a client follows no redirects; a kernel
+ends its cell on a stop) and nothing to test themselves against. `corduroy-test-support`
+is internal.
+
+*Direction.* A public test suite per trait an extension implements, in the stable set.
 
 ## B. Core: types and traits
 
@@ -290,6 +369,59 @@ shape has nowhere to record which shape a log holds.
 *Direction.* Decide before the log freezes, since the answer is a field on `state/set` or a
 convention inside the value.
 
+### B23. Is the set of registries closed?
+
+The core has eight: tools, prompt parts, kernels, gates, services, models, secrets and HTTP
+clients. "A new kind of thing plugins contribute" has been the one reason to change the
+core. After the freeze, a new kind is a registry some extension provides, which an add-on
+reaches only as a service.
+
+*Direction.* Declare the eight final, after checking the candidates for a ninth: stored
+bytes ([C20](#c20-where-do-images-and-large-results-live)), search or embeddings, a way to
+ask the person something ([D10](#d10-can-a-tool-ask-the-person-something-other-than-yes-or-no)),
+schedules ([C16](#c16-is-there-a-timer)).
+
+### B24. Does the core know what a model can do?
+
+Nothing describes a model: the size of its context, whether it takes images or tools, what
+it costs. `compact` is told a token count in its configuration, and a request that is too
+large simply fails the run.
+
+*Direction.* Decide whether a model describes itself (a defaulted method on `Model` and on
+the loop's `Provider`) or whether this stays configuration for good.
+
+### B25. Whose job is a tool's input, and the size of its result?
+
+Neither the core nor the loop checks a call's input against the tool's schema, or bounds
+what a result adds to the conversation. Each tool does, or does not.
+
+*Direction.* Say it is the tool's, or give the loop a bound: one runaway result can use up
+a session's context.
+
+### B26. How are tool names kept apart?
+
+There is one flat set of names. An MCP server's tools are `<server>__<tool>`; an add-on's
+are bare, and the second to register a name is refused.
+
+*Direction.* A naming rule before third-party add-ons exist, and a decision on what a clash
+does to the plugin that lost.
+
+### B27. Can code in a kernel call back into the agent?
+
+Code mode ("left for later" in the design) needs it: "the kernel-to-host bridge". Whether
+that is a method on `Kernel`, a service, or a socket the process talks to decides whether
+the core changes. Kernel snapshots (planned as defaulted `snapshot` and `restore`) raise
+the same kind of question.
+
+*Direction.* Spike both before the freeze, to show each is an addition.
+
+### B28. Is there one person?
+
+`Source::User` has no identity. Nothing records who sent a message or who answered an ask.
+
+*Direction.* Decide whether identity is a field the front end puts in the payload of
+`message` and `gate/answer`, and whether that is enough for a host with many users.
+
 ## C. Core: the event stream and the log
 
 ### C1. Is there anything a listener sees that is not logged?
@@ -418,6 +550,42 @@ Design lists "a timer that raises signals" as still to do for the core tier.
 *Direction.* Decide whether it is the core's, the loop's, or an extension's
 ([G4](#g4-how-does-an-extension-raise-a-signal-or-resume-a-run)).
 
+### C17. Can anything ever leave the log?
+
+The log only grows, and an event's id is its position. Deleting a session, keeping events
+for a limited time, erasing what a person asked to have erased, or simply bounding the
+file's size all mean removing events.
+
+*Direction.* Decide whether a store may drop whole sessions (ids keep their numbers, gaps
+are allowed) and nothing smaller, and say what readers must then tolerate.
+
+### C18. How many processes may use one log?
+
+One. A log has one writer, and the file store locks the file when it opens it, so two
+terminals cannot work in the same workspace at once.
+
+*Direction.* Decide whether one process per log is the contract, with a service that owns
+the log and serves the others
+([H11](#h11-is-there-a-front-end-other-than-a-rust-program)), or whether readers may share.
+
+### C19. What exactly is promised about resuming, and is replay promised at all?
+
+Built: an unfinished run is continued from the log, and a tool call whose fate is unknown
+is repeated only if its tool is replay-safe. Decided against for now: rebuilding a plugin
+by replaying its host calls. The core's own docs still say a run "can be resumed or
+replayed".
+
+*Direction.* Promise resumption, with the rule for each case written as a guarantee (never
+run twice unless replay-safe), and say plainly that replay is not promised.
+
+### C20. Where do images and large results live?
+
+In the log, as base64 inside the events that carry them.
+
+*Direction.* Decide whether the core has a reference to stored bytes (a kind of `Content`
+and `Part` that names a blob, and a store beside the log). The kind can be added later, but
+every log written before then holds the bytes.
+
 ## D. Core: gates, capabilities and scopes
 
 ### D1. Is a verdict allow, ask or deny, for good?
@@ -461,6 +629,62 @@ Design's open question on grant files: the agent file grants; a plugin cannot sa
 needs beyond its imports.
 
 *Direction.* Decide whether this belongs in 1.0's agent file contract or after.
+
+### D7. What does 1.0 promise about safety, in one statement?
+
+[Security model](explanation/security-model.md) describes what is built: add-ons are
+sandboxed, extensions and kernels are not, gates are policy. In the default agent that
+means `bash` is held back by the `approval` gate and nothing else.
+
+*Direction.* Freeze a threat model: who is untrusted (the model, add-ons, what tools
+return, what a workspace contains), what is guaranteed against each, and a test for every
+guarantee. Decide whether the default agent's reliance on a gate is acceptable for 1.0
+([H9](#h9-is-a-sandboxed-kernel-part-of-the-standard-set)).
+
+### D8. What does a kernel see of the environment?
+
+The shell kernel starts with the command's own environment
+(`crates/corduroy-shell/src/lib.rs:132`), and that is where the provider's API key is.
+Secrets are kept from add-ons and from the log, but the model can print them with `bash`.
+
+*Direction.* A kernel starts from a cleared environment, and configuration names what is
+passed through. Decide with [H4](#h4-do-all-credentials-go-through-secrets).
+
+### D9. Is the agent file in a workspace trusted?
+
+`<workspace>/corduroy.toml` is read by default. It grants capabilities, names kernels and
+starts MCP servers. So a repository someone else wrote configures the agent that runs on
+your machine the moment you run `corduroy` inside it.
+
+*Direction.* A workspace's file is not used until the person has accepted it (remembered
+by its hash), or defaults come from a file of the user's own
+([H13](#h13-is-there-one-configuration-file-or-layers)).
+
+### D10. Can a tool ask the person something other than yes or no?
+
+A gate's ask is the only question a run puts to a person. A tool that needs a choice or a
+value could wait for a signal, but no front end would know to show the question.
+
+*Direction.* A declared form for a question to the person (an event a front end must
+present, a signal that carries the reply), settled before front ends are written.
+
+### D11. Can a person say something to a run that is under way?
+
+A session with an unfinished run refuses a new prompt (`src/harness.rs:93`). Stopping is
+the only thing a person can do to it.
+
+*Direction.* Decide whether a message may be queued for the run's next step, and how the
+log shows it, since "a run is from its first message to its `turn/end`" is part of the
+record's contract.
+
+### D12. Is there one place that says where an agent may send data?
+
+`http` is scoped by host for add-ons. A kernel, a provider and an MCP server each reach the
+network on their own.
+
+*Direction.* Decide whether 1.0 wants a decision point for outbound requests that
+extensions are expected to ask at, or leaves network policy to the kernel and the
+operating system.
 
 ## E. The plugin world
 
@@ -586,6 +810,15 @@ A plugin loaded by a plugin is gone after a restart unless its loader loads it a
 *Direction.* Decide whether the host owes this (a plugin store), since `plugins.load`'s
 meaning freezes with the interface.
 
+### E17. Does an add-on built today load on a later host?
+
+Freezing the text of the world does not freeze what a built `.wasm` needs from the engine.
+The component format, wasmtime, `wit-component` and the JavaScript and Python toolchains
+all move on their own schedules.
+
+*Direction.* State the promise (a built add-on loads on every 1.x host, or is rebuilt for
+each minor release) and keep a built add-on from each released world as a test fixture.
+
 ## F. The WebAssembly host
 
 ### F1. Can the host's limits and errors grow?
@@ -623,6 +856,15 @@ it, both of which are the core's.
 see a later protection.
 
 *Direction.* Share the list, or document the order.
+
+### F6. Is an add-on one instance for the whole agent?
+
+Yes: one instance serves every session, one call at a time. A slow tool in one session
+holds up that add-on's tools in every other.
+
+*Direction.* Decide whether the host may keep several instances of an add-on (its durable
+state is already in the host, not in its memory). This is part of whether one harness can
+serve many sessions well ([G18](#g18-what-may-run-at-once-in-one-harness)).
 
 ## G. The loop and the extension tier
 
@@ -756,6 +998,51 @@ none (see [B3](#b3-what-does-a-plugin-ask-a-model-and-what-comes-back)).
 
 *Direction.* Decide whether totals are the harness's to keep or a reader's to compute.
 
+### G18. What may run at once in one harness?
+
+`run_in` takes `&self`, so sessions can run side by side. They share one plugin tree behind
+one lock, the kernels ([B7](#b7-is-a-kernel-shared-by-every-session)) and each add-on's
+single instance ([F6](#f6-is-an-add-on-one-instance-for-the-whole-agent)). Within a
+session, tool calls and child sessions run one after another.
+
+*Direction.* Write the concurrency contract for an embedder before one is built on it:
+what is safe to do at once, and what quietly waits its turn.
+
+### G19. Who decides what the model sees?
+
+The loop sends the session's projection, which only a `compaction` event changes. Dropping
+old tool results, trimming images, marking cache points and adding reminders are other ways
+to manage a context, and an extension can do none of them without writing to the log.
+
+*Direction.* Decide whether shaping the request is a contribution of its own (a step
+between the projection and the provider) or always means a custom `Loop`.
+
+### G20. What limits a run besides the number of turns?
+
+`max_turns` and the restart limit. There is no budget of tokens, cost or time, for a run, a
+session or a child.
+
+*Direction.* Decide whether budgets are the loop's own, or policy asked at a decision point
+before each model request ([D3](#d3-which-decision-points-exist-at-10)).
+
+### G21. Who retries, and who falls back?
+
+Retries are inside the provider's adapter (`crates/corduroy-providers/src/adapter.rs:99`).
+A model that still fails ends the run as failed; there is no falling back to another model
+or provider.
+
+*Direction.* Decide whether that is the provider's for good, or the loop's (which needs the
+error kinds of [G10](#g10-why-did-the-model-stop-and-why-did-it-fail)).
+
+### G22. Is the event stream the only way to observe a run?
+
+A front end, a metrics exporter and a tracer would all be listeners. Events carry a time
+and no duration, and a listener runs on the thread that committed
+([C4](#c4-do-listeners-run-on-the-committing-thread)).
+
+*Direction.* Confirm it, and check that a trace exporter can be written as an extension
+from what events hold today.
+
 ## H. The standard set, the command and the agent file
 
 ### H1. Which provider kinds and keys are contract?
@@ -832,6 +1119,47 @@ core and the PowerShell kernel.
 
 *Direction.* Decide whether the full suite on all three is a condition of 1.0.
 
+### H11. Is there a front end other than a Rust program?
+
+Driving a harness means linking it. An editor, a web page or a program in another language
+needs a protocol over a socket or a pipe. The design calls such things front ends that
+"need nothing from the core beyond sessions and signals".
+
+*Direction.* Decide whether 1.0 ships a server front end, and which protocol it speaks. If
+it does, the events and the harness's verbs become a wire format that freezes like the log.
+
+### H12. Is an agent file one agent?
+
+One model, one system prompt, one set of tools. The design leaves "sub-recipes" for later.
+Named agents in one file (a planner, a reviewer) follow from
+[G12](#g12-what-can-differ-between-sessions).
+
+*Direction.* Decide with G12 whether a file may define several, and how a session picks
+one.
+
+### H13. Is there one configuration file or layers?
+
+One: the workspace's, else the built-in default. There is no file of the user's own, so
+nothing says "always this provider" across workspaces.
+
+*Direction.* Decide the layers and their precedence together with
+[D9](#d9-is-the-agent-file-in-a-workspace-trusted).
+
+### H14. What is in the standard set at 1.0?
+
+Shell kernels, the HTTP client, secrets from the environment, MCP, the providers and the
+file log. Not a sandboxed kernel, a scheduler, a keychain or a second store.
+
+*Direction.* Fix the list. Each thing left off is either a proof extension
+([A9](#a9-what-proves-the-extension-tier-is-enough)) or stated to be out.
+
+### H15. Which outside conventions does 1.0 commit to?
+
+MCP, the hint files (`AGENTS.md`, `.goosehints`, `CLAUDE.md`), skills as folders, and APIs
+in OpenAI's and Anthropic's shapes. Each moves on its own schedule.
+
+*Direction.* Name the ones that are part of the promise, and the version of each.
+
 ## I. Add-ons and the guest SDKs
 
 Add-ons may keep changing after 1.0. These are the few things about them that others will
@@ -855,3 +1183,32 @@ package would not have, and their versions are independent of the WIT package's.
 They are in the reference and in the default agent file people will copy.
 
 *Direction.* Say explicitly that they are not, or name the ones that are.
+
+### I4. What is an add-on, as something shipped?
+
+A bare `.wasm` file, and an entry someone writes in the agent file. No name, version,
+description or wanted grants travel with it
+([D6](#d6-does-a-plugin-ship-a-statement-of-what-it-wants)); nothing is signed; there is
+nowhere to fetch one from.
+
+*Direction.* Decide whether 1.0 defines a package (a component and a manifest), even if a
+registry comes later. The hash already asked of the gates at `plugin/load` is the hook.
+
+### I5. Which guest languages are promised?
+
+Rust is the reference; JavaScript, TypeScript and Python have SDKs; the script host runs
+scripts with nothing compiled. A JavaScript or Python add-on is 12 to 19 MB built and
+holds 9 to 13 MB for each instance.
+
+*Direction.* Name the first-class ones, and say whether the script host is among them.
+
+### I6. Is "the agent extends itself" part of 1.0?
+
+It is the stated purpose of the plugin system. The pieces exist (`plugin-manager`, off by
+default; the script host; the `tools` capability). Three things it leans on do not: loads
+that survive a restart ([E16](#e16-are-loads-by-a-plugin-durable)), a person approving a
+load ([C15](#c15-can-a-person-answer-an-ask-at-pluginload)), and a scheduler
+([C16](#c16-is-there-a-timer)).
+
+*Direction.* Decide whether 1.0 claims it. If so, those three stop being later work and
+become conditions of the freeze.
