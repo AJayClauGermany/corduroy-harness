@@ -6,6 +6,10 @@ its system prompt, the kernels it computes in, and the reactions to what happens
 is anything you plug into the core and can unplug again, and comes in two kinds:
 extensions and add-ons.
 
+**New here?** Start with the [documentation](docs/README.md): a tutorial that gets an agent
+running on a folder of yours, one that has you write an add-on, how-to guides, a full
+reference of the command, the agent file and the capabilities, and the ideas behind it.
+
 There are three tiers, from what changes least to what changes most:
 
 | Tier | What | Gets in by | Trust |
@@ -139,8 +143,9 @@ reasoning, and [what is meant to stay stable](docs/design.md#what-is-stable).
 | [OpenHands](https://github.com/OpenHands/software-agent-sdk) | An append-only event stream as the source of truth, and a loop you can program | `corduroy-core::event`, `src/session.rs` |
 | [Goose](https://github.com/aaif-goose/goose) | A loop of steps, each reading the persisted conversation and returning effects; and its oi-kit providers, kept behind our own `Provider` | `src/harness.rs`, `crates/corduroy-providers` |
 
-[`docs/design.md`](docs/design.md) has the research behind each, what was borrowed, and what
-is deliberately left for later.
+[Where the ideas come from](docs/explanation/inspirations.md) explains each idea and the
+project it comes from, for a reader new to them; [`docs/design.md`](docs/design.md) has the
+research behind each, what was borrowed, and what is deliberately left for later.
 
 ## Quick start
 
