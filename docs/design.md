@@ -56,7 +56,21 @@ together:
 | A plugin leaves nothing behind when unloaded | The undo. Something the agent built wrongly is unplugged, and it tries again from a clean state. |
 | The run is durable | The safety net. When something goes wrong the run can be stopped, read, and recovered, in the same run or another. |
 
-An agent working unattended for days follows from these. It is not what 1.0 is measured by.
+**What 1.0 is measured against.** Two uses, and every other answer is judged by them:
+
+1. *An agent at a terminal that extends itself.* One person, one machine. The agent writes
+   the add-ons, automations and connections its task needs, keeps them, and uses them again.
+2. *One agent growing into several that cooperate.* Starting from the first use, the agent
+   builds what it takes for more than one agent to work on a task, each with its own loop,
+   its own tools and its own limits on what it can see, and they coordinate. It shows that
+   the harness changes shape and not only gains tools, and it tests the capabilities: the
+   agents are trusted to build what the goal needs because none can give itself more than
+   it was allowed. The test-driven pair described below is the case.
+
+Possible, and not promised by 1.0: an agent working unattended for days and woken by events,
+a long-lived service holding many sessions for many people, and a device without an
+operating system. Each follows from the design and is welcome as a trial of it. None
+decides a question before 1.0.
 
 **A harness to use, not a kit.** The primary thing is the agent a person sits at. That
 others can rebuild the command with their own parts is how it is made, not what it is for.
@@ -505,6 +519,18 @@ has, down to a microcontroller with an allocator and no operating system. What n
 operating system sits over it, as Rust's `std` does; like `std` it is what most people get by
 default, and like `std` a device can do without it and bring its own.
 
+**A direction, not a promise of 1.0.** Nothing 1.0 is [measured against](#what-it-is-for)
+needs a device, and no agent has to run on one before the freeze. Building without the
+standard library is kept because of what it does to the core: a core that assumes no
+operating system stays small, has few constraints of its own, and leaves the most room for
+things to grow around it, and one frozen with such an assumption could not lose it later.
+So the core and the loop keep building this way, CI keeps checking it, and whatever needs an
+operating system goes behind `std` or into an extension. It is where the design steers, not
+a veto: when a requirement cannot be met by an extension over the core as it is, the core
+changes, and it changes before 1.0. What is not yet known is whether a small, synchronous
+core forces a design that an extension cannot work around; the extensions
+[the freeze waits on](#what-the-freeze-waits-on) are how that is found out.
+
 **The core** (`corduroy-core`) is `no_std` and needs only `alloc`. Its `std` feature, on by
 default and still free of dependencies, adds the standard library's locks, a call scope per
 thread, the system clock, and kernels. Without `std`:
@@ -588,20 +614,63 @@ itself is replaced.
 
 ## What is stable
 
-Four contracts are meant to hold, so that extensions and add-ons written against them keep
-working. Everything else may move.
+Contracts hold at one of two levels, so that extensions and add-ons written against them
+keep working.
 
-| Contract | Where | Rule for change |
-| --- | --- | --- |
-| The plugin world | `wit/corduroy.wit` | Adding an import interface (a capability) breaks nobody: a plugin that does not import it is unaffected, and a host without it refuses, at load, a plugin that does. Changing an export, or a type a guest sees, changes the package version, and guests are rebuilt against it; so exports and shared types change only together, rarely, and never to add what an import could add. |
-| The core's traits and registries | `corduroy-core`, and the loop's own that extensions implement or register in: `Operation`, `Operations`, `Loop`, `Loops`, `Provider`, `Providers` (`corduroy-harness`) | New trait methods come with defaults (as `Kernel::spawn` did). Types that grow are `#[non_exhaustive]` with constructors (`ToolSpec`, tool results), so a new field breaks no extension. What the core offers without `std` only grows: something that needs an operating system is added behind `std`. |
-| The log | `corduroy-jsonl`, the topic table in `src/session.rs` | The header's schema version changes when a line's shape does, and older versions stay readable. Events gain fields; they do not lose or repurpose them. Readers ignore topics and fields they do not know. |
-| The agent file | `crates/corduroy-cli` | Keys are added, not renamed; an unknown key is an error, so a typo is never a silently ignored grant. |
+- **Frozen**: the primitives are closed. After 1.0 a frozen contract gains no new concept:
+  no new registry, no new trait, no new kind of thing a plugin contributes. It gets bug
+  fixes, and it grows only at places marked for growth before 1.0 (a `#[non_exhaustive]`
+  type gaining a field, a trait gaining a method with a default, a message gaining a kind
+  of part). What is not marked is closed for good. The marked places are few on purpose,
+  since each is an exception to "read it once and it stays true", and the set of primitives
+  has to be complete before 1.0 because it cannot be added to after.
+- **Stable**: changes only by adding. New things arrive, and nothing written against what
+  was there breaks.
+
+What is frozen is what things are built from; what makes building easier sits on top, in
+extensions, and is stable.
+
+| Contract | Where | At 1.0 | Rule for change |
+| --- | --- | --- | --- |
+| The core | `corduroy-core`: the plugin tree, capabilities, the event stream, the registries and their traits | frozen | New trait methods come with defaults (as `Kernel::spawn` did). Types that grow are `#[non_exhaustive]` with constructors (`ToolSpec`, tool results), so a new field breaks no extension. Both only where growth was marked before 1.0. What the core offers without `std` only grows: something that needs an operating system is added behind `std`. |
+| The plugin world: exports and shared types | `wit/corduroy.wit` | frozen | Changing an export, or a type a guest sees, changes the package version, and guests are rebuilt against it; so exports and shared types change only together, rarely, and never to add what an import could add. |
+| The plugin world: imports (the capabilities) | `wit/corduroy.wit` | stable | Adding an import interface breaks nobody: a plugin that does not import it is unaffected, and a host without it refuses, at load, a plugin that does. So the set of capabilities grows after 1.0. |
+| The loop's traits and registries | `corduroy-harness`: what extensions implement or register in (`Operation`, `Operations`, `Loop`, `Loops`, `Provider`, `Providers`) | stable | As for the core: defaults for new methods, `#[non_exhaustive]` for types that grow. |
+| The WebAssembly host's Rust API | `corduroy-wasm` | stable | Added to, not changed. |
+| The log | `corduroy-jsonl`, the topic table in `src/session.rs` | stable | The header's schema version changes when a line's shape does. Events gain fields; they do not lose or repurpose them. A log written by 1.0 or later is read by every later version. The other way round is not promised: an older program is helped with a newer log only by the rule that readers ignore topics and fields they do not know. |
+| The standard extensions and the agent file | `corduroy-std`, `crates/corduroy-cli` | stable | What a kind does and how it is configured stays; kinds and keys are added, not renamed. An unknown key is an error, so a typo is never a silently ignored grant. |
+
+Everything else may move. That includes the shipped add-ons: their tools and configuration
+keep changing after 1.0, as what the agent builds does.
+
+**Before 1.0 nothing is frozen.** The levels are where each contract is heading, and
+everything may still change on the way. The core is meant to get there first, possibly
+ahead of 1.0. The log in particular starts from a clean baseline: shapes that only
+unreleased versions wrote (the first schema, without times, and messages in oi-kit's shape)
+are read today and need not be read by 1.0.
+
+### What the freeze waits on
+
+Whether the extension tier is enough cannot be argued, only tried. Four things are built
+before the freeze, each against the surface as it then stands and without changing the
+core. What one of them cannot do becomes a change to the core, made before 1.0, or an
+entry in [Open questions](open-questions.md). There is no 1.0 until each has passed or its
+failure has been dealt with.
+
+| Proof | What it shows |
+| --- | --- |
+| A sandboxed kernel | That what the agent starts (an MCP server it wrote included) can be confined through the kernel trait alone. |
+| Another harness connected as a plugin | That a long-lived connection exchanging messages fits over a synchronous core. The hardest test of whether the small core forces a design. |
+| A second store for the log | That the `Log` trait is enough for a store that is not the file. |
+| The test-driven pair, end to end | The second [measured use](#what-it-is-for): two agents with different loops, tools and views finishing one task. It needs an add-on to define a loop and sessions to differ. |
+
+Not waited on: a scheduler and kernel snapshots, which serve unattended work and come after
+1.0; secrets from a keychain and code mode, which may be built before it and need not be.
 
 The `message` event's payload is the core's `Message` (`{"role", "parts"}`, see
 `corduroy_core::message`), part of the log contract like the rest: parts gain kinds, and a
 reader keeps what it knows and skips the rest. Logs written while the payload was oi-kit's
-message are still read, so they resume.
+message are still read today, so they resume.
 
 Two rules came with the capabilities that reach outside:
 

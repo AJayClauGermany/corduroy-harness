@@ -38,7 +38,6 @@ reshapes entries further down.
 
 | Order | Group | Questions |
 | --- | --- | --- |
-| 2 | What 1.0 is, and for whom | A1, A2, A7, A8, A9 |
 | 3 | What the record promises | C1, C2, C17, C19 |
 | 4 | What the core is made of | B3, B4, B23, B24 |
 | 5 | What is safe by default | D7, D8, D9 |
@@ -48,9 +47,13 @@ reshapes entries further down.
 
 Everything not in this table is detail that hangs off one of these, or a mechanical choice
 (which types may grow, which names are final) best made in one sitting per section once its
-group is settled. The first group, why this exists, is decided:
-[What it is for](design.md#what-it-is-for) holds the answer, and every question below is
-read against it.
+group is settled. The first two groups are decided, and every question below is read
+against them. Why this exists, and the two uses 1.0 is measured against, are in
+[What it is for](design.md#what-it-is-for). What freezes, what is only stable and what
+"frozen" allows are in [What is stable](design.md#what-is-stable), with the four proofs
+[the freeze waits on](design.md#what-the-freeze-waits-on). Running without the standard
+library is a direction and not a promise:
+[Without the standard library](design.md#without-the-standard-library).
 
 ## P. Purpose and place
 
@@ -169,8 +172,9 @@ something should show the purpose is real: a task done here that cannot be done,
 be done safely, elsewhere; an extension written by someone who is not us; a user who stayed.
 
 *Direction.* One demonstration that is the thesis made runnable, chosen before 1.0 and
-passed before it, beside the proof extensions of
-[A9](#a9-what-proves-the-extension-tier-is-enough).
+passed before it. The test-driven pair among the proofs
+[the freeze waits on](design.md#what-the-freeze-waits-on) is the candidate; decide whether it
+is the demonstration or only a proof that the surface is enough.
 
 ### P16. Who keeps it going after 1.0?
 
@@ -183,34 +187,9 @@ maintainers or a foundation changes what "stable" is worth to someone building o
 
 ## A. What the freeze is
 
-### A1. Which contracts are frozen, and which are only stable?
-
-[Design](design.md#three-tiers-core-extensions-add-ons) puts four things in the core tier:
-`corduroy-core`, the WIT world, the WebAssembly host that enforces it, and the loop
-(`corduroy-harness`). They are not equally ready, and they do not all need the same promise.
-
-*Direction.* Two levels. **Frozen** (nothing changes but bug fixes): `corduroy-core`, the
-exports and shared types of the WIT world, the log's format. **Stable** (changes only by
-adding): the WIT imports, the loop's traits and registries, the host's Rust API,
-`corduroy-std`, the agent file. Say for each crate and file which level it is.
-
-### A2. Does "frozen" allow additions?
-
-[What is stable](design.md#what-is-stable) says contracts "change by adding": a new trait
-method with a default, a new field on a `#[non_exhaustive]` type. The bar set for 1.0 is
-stricter: nothing new is added to the core. Under the strict reading the growth markers are
-pointless; under the loose one the core is not really frozen.
-
-*Direction.* Frozen means no new concepts, and additions only at growth points marked before
-1.0. That makes sections B to E a list of which growth points to leave open.
-
-### A3. Is the set of capabilities closed at 1.0?
-
-Design says "the mechanism is settled; the set grows". Each capability is an import
-interface of the world, which A1 would call stable rather than frozen.
-
-*Direction.* New interfaces may be added after 1.0; an existing interface never changes
-(see [E7](#e7-may-an-existing-interface-gain-a-function)).
+[What is stable](design.md#what-is-stable) says which contracts are frozen and which stable,
+and that a frozen one grows only where growth was marked before 1.0. Sections B to E are
+therefore a list of which places to mark. What is left here is how the freeze is kept.
 
 ### A4. What enforces the freeze?
 
@@ -219,7 +198,9 @@ recorded baseline.
 
 *Direction.* `cargo-semver-checks` (or a public-API snapshot) on `corduroy-core` and
 `corduroy-harness`; a snapshot of `wit/corduroy.wit`'s exports and shared types; a log file
-of every schema version kept as a fixture and read back in a test.
+of every schema version from 1.0 on kept as a fixture and read back in a test. The same
+check can hold the list of places marked for growth, so that an addition anywhere else
+fails.
 
 ### A5. What carries the version 1.0, and are the versions tied?
 
@@ -236,38 +217,6 @@ core bug-fix release may raise that.
 
 *Direction.* State a policy before 1.0 (for example: a raise is a minor release, never a
 patch).
-
-### A7. Who is 1.0 for?
-
-"The extensions cover the general cases of agentic development" needs a list to be tested
-against. What is built is a coding agent at a terminal. A long-lived service holding many
-sessions for many people, an unattended agent woken by events, and a device are each
-claimed somewhere in the design, and each strains the core in a different place
-([C2](#c2-does-the-stream-hold-the-whole-log-in-memory),
-[G18](#g18-what-may-run-at-once-in-one-harness),
-[B18](#b18-is-one-call-scope-for-the-whole-program-acceptable-without-std)).
-
-*Direction.* Name the two or three uses 1.0 is measured against, and call the others
-possible but not promised. Every later answer is judged against that list.
-
-### A8. Is running without the standard library a promise of 1.0?
-
-It shapes the whole core: no 64-bit atomics, a lock of the core's own, synchronous traits,
-no kernels ([B5](#b5-are-there-kernels-without-the-standard-library)), one call scope for
-the program. CI lints a build for a microcontroller; nothing has run on one.
-
-*Direction.* Decide between a promise (then an agent runs on a real device before the
-freeze) and best effort (then it does not get a veto over answers elsewhere on this page).
-
-### A9. What proves the extension tier is enough?
-
-No extension has been written outside this tree, and the design names several that are not
-built: a sandboxed kernel, a scheduler, a keychain for secrets, a store other than the file,
-code mode, kernel snapshots. Until some exist, "enough" is a guess.
-
-*Direction.* A short list of proof extensions, each built as a spike against the surface
-that is about to freeze, without touching the core. The freeze waits on them; what a spike
-could not do becomes a question here.
 
 ### A10. What is published, where, and under which names?
 
@@ -346,8 +295,15 @@ or say why it stopped, and none of the three types can grow.
 `Kernel::exec` all block the calling thread. Concurrency is therefore threads, and on a
 device with one thread a tool that waits holds up everything, a stop included.
 
-*Direction.* Confirm it, and write down how an asynchronous form would be added without
-breaking (a defaulted method, or a second trait), so that it is known to be possible.
+Whether that forces a design an extension cannot work around is not known. Connecting
+another harness as a plugin, one of the proofs
+[the freeze waits on](design.md#what-the-freeze-waits-on), is the test: a long-lived
+connection that exchanges messages, over these traits.
+
+*Direction.* Build that proof before answering. If it fits, confirm the traits and write
+down how an asynchronous form would be added without breaking (a defaulted method, or a
+second trait), marked as a place for growth. If it does not, the change is to the core and
+is made before 1.0.
 
 ### B5. Are there kernels without the standard library?
 
@@ -357,8 +313,11 @@ kernel that is an embedded interpreter"
 ([Without the standard library](design.md#without-the-standard-library)), which the core
 cannot express.
 
-*Direction.* Either split the trait (`exec` and `reset` everywhere; `spawn` and `Process`
-with `std`) and take the standard mutex out of the registry's type, or withdraw the promise.
+*Direction.* A device is not promised by 1.0, so this cannot hold the freeze up, but the
+shape of `Kernels` freezes with the core. Either split the trait (`exec` and `reset`
+everywhere; `spawn` and `Process` with `std`) and take the standard mutex out of the
+registry's type, or say that kernels need an operating system and take the sentence out of
+Design.
 
 ### B6. What does a cell return, and what can a spawned process be given?
 
@@ -469,7 +428,9 @@ thread loses the session, the waits and the stop flag, and there is no way to ca
 Without `std` there is one scope, "wrong for anything that serves two sessions at once"
 (`core/call.rs:25-27`).
 
-*Direction.* Confirm it as the contract for devices, or decide what replaces it.
+*Direction.* A device serving two sessions at once is not something 1.0 is measured against.
+Confirm it as the contract for devices, unless the answer to
+[G18](#g18-what-may-run-at-once-in-one-harness) gives a better one for nothing.
 
 ### B19. Is polling the only way to learn of a stop?
 
@@ -574,8 +535,11 @@ provider before choosing.
 can only be written to (`core/event.rs:293-304`). A long-lived host with many sessions, or
 a device, cannot let old events go.
 
-*Direction.* Decide what `events()`, `session()` and `matching()` promise (everything, or a
-window), and leave a defaulted read side on `Log` so a store can serve what memory dropped.
+*Direction.* Neither of those hosts is promised by 1.0, but the stream is in the frozen
+core, so the room for them has to be left now. Decide what `events()`, `session()` and
+`matching()` promise (everything, or a window), and leave a defaulted read side on `Log` so
+a store can serve what memory dropped. The second store among the proofs
+[the freeze waits on](design.md#what-the-freeze-waits-on) is where to try it.
 
 ### C3. In what order are commits from two threads delivered?
 
@@ -629,14 +593,6 @@ Another store (a database, flash) implements `Log` and never writes that file.
 
 *Direction.* Freeze the event and its topics as the contract; the JSON Lines file is one
 store's format with its own schema version.
-
-### C10. How long are older shapes read?
-
-Schema 1 (no time) and `message` payloads in oi-kit's shape are still read. Both predate
-1.0.
-
-*Direction.* Decide whether 1.0 carries readers for shapes no released version wrote, or
-starts clean.
 
 ### C11. Which topics and payload fields are frozen, and where is the one list?
 
@@ -1146,7 +1102,9 @@ one lock, the kernels ([B7](#b7-is-a-kernel-shared-by-every-session)) and each a
 single instance ([F6](#f6-is-an-add-on-one-instance-for-the-whole-agent)). Within a
 session, tool calls and child sessions run one after another.
 
-*Direction.* Write the concurrency contract for an embedder before one is built on it:
+*Direction.* A service holding many people's sessions is not promised by 1.0; several
+agents cooperating on one task is what 1.0 is measured against, and they are sessions of one
+harness or harnesses connected to it. Write the concurrency contract for that case first:
 what is safe to do at once, and what quietly waits its turn.
 
 ### G19. Who decides what the model sees?
@@ -1251,7 +1209,10 @@ Protected paths bind `fs-read` and `fs-write`; "protecting paths from a kernel i
 kernel's job". The shipped shell kernel is not sandboxed, so an agent with `bash` can read
 its own log and agent file.
 
-*Direction.* Decide whether 1.0 needs one, or says plainly that it has none.
+*Direction.* One is built before 1.0 either way, as a proof
+[the freeze waits on](design.md#what-the-freeze-waits-on). Decide whether what comes out of
+it ships in the standard set and is the default agent's kernel, or stays a proof and 1.0
+says plainly that the shipped kernel is not confined.
 
 ### H10. Which platforms does 1.0 promise?
 
@@ -1291,8 +1252,9 @@ nothing says "always this provider" across workspaces.
 Shell kernels, the HTTP client, secrets from the environment, MCP, the providers and the
 file log. Not a sandboxed kernel, a scheduler, a keychain or a second store.
 
-*Direction.* Fix the list. Each thing left off is either a proof extension
-([A9](#a9-what-proves-the-extension-tier-is-enough)) or stated to be out.
+*Direction.* Fix the list. A sandboxed kernel and a second store are built as proofs
+([What the freeze waits on](design.md#what-the-freeze-waits-on)); decide for each whether it
+then ships. A scheduler and a keychain are stated to be out, or added.
 
 ### H15. Which outside conventions does 1.0 commit to?
 
@@ -1318,12 +1280,6 @@ Both read `wit/corduroy.wit` from a path relative to this repository, which a pu
 package would not have, and their versions are independent of the WIT package's.
 
 *Direction.* Embed the world in each SDK and tie the versions.
-
-### I3. Are the shipped add-ons' tool names and configuration stable?
-
-They are in the reference and in the default agent file people will copy.
-
-*Direction.* Say explicitly that they are not, or name the ones that are.
 
 ### I4. What is an add-on, as something shipped?
 
