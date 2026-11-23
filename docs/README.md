@@ -1,0 +1,80 @@
+# corduroy documentation
+
+corduroy is an agent harness in which nearly everything is a plugin: the model, the tools,
+the text of the system prompt, the shells the agent works in, and the rules that decide what
+it may do. Plugins are either compiled in (**extensions**) or dropped in as WebAssembly files
+that can do only what they are granted (**add-ons**). Every step of a run is written to a log
+before anyone sees it, so a run survives a crash and can be read back afterwards.
+
+These pages follow [Diátaxis](https://diataxis.fr): four kinds of documentation for four
+different needs. Pick the one that matches what you are doing right now.
+
+| You want to… | Read | |
+| --- | --- | --- |
+| **learn** by doing, from nothing | [Tutorials](#tutorials) | step by step, every command shown, nothing to decide |
+| **get a task done** you already understand | [How-to guides](#how-to-guides) | recipes for one goal each |
+| **look something up** | [Reference](#reference) | every key, command, capability and event |
+| **understand** why it works the way it does | [Explanation](#explanation) | the ideas, the trade-offs, where they came from |
+
+New here? Do the two tutorials in order (about half an hour together), then read
+[Concepts](explanation/concepts.md).
+
+## Tutorials
+
+1. [Your first agent](tutorials/first-agent.md): build corduroy, run the default agent on a
+   folder, approve what it wants to do, leave a question unanswered and come back to it, and
+   read the log.
+2. [Your first add-on](tutorials/first-add-on.md): write a tool in Rust, build it to
+   WebAssembly, plug it into your agent, and see its grant hold.
+
+## How-to guides
+
+Using the `corduroy` command:
+
+- [Connect a model](how-to/connect-a-model.md): Anthropic, OpenAI, Ollama, any compatible
+  endpoint, or a small model on your own machine.
+- [Grant an add-on what it needs](how-to/grant-capabilities.md), and find out why one did not
+  start or was refused.
+- [Decide what runs without asking](how-to/control-approval.md): permission modes, allow and
+  deny lists, unattended runs.
+- [Stop, resume and recover runs](how-to/recover-runs.md): Ctrl-C, `continue`, `stop`,
+  sessions.
+- [Add an MCP server](how-to/add-an-mcp-server.md).
+- [Give an add-on a secret](how-to/use-secrets-and-http.md) and let it make HTTP requests.
+
+Extending corduroy:
+
+- [Write an add-on in JavaScript, TypeScript or Python](how-to/write-add-ons-in-js-and-python.md).
+- [Write a gate](how-to/write-a-gate.md): a plugin that allows, asks about or refuses tool
+  calls.
+- [Share a service between plugins](how-to/share-a-service.md).
+- [Add an extension kind](how-to/add-an-extension-kind.md): a command of your own with native
+  plugins compiled in.
+- [Embed the harness in a Rust program](how-to/embed-the-harness.md), and test it without a
+  model.
+
+Working on corduroy itself:
+
+- [Develop corduroy](how-to/develop-corduroy.md): build, test, lint and what CI runs.
+
+## Reference
+
+- [The `corduroy` command](reference/cli.md): commands, options, chat commands, files, exit
+  codes, environment variables.
+- [The agent file](reference/agent-file.md): every key of `corduroy.toml`.
+- [Capabilities and the plugin world](reference/capabilities.md): what an add-on can import,
+  how each is scoped, and what it exports.
+- [Shipped add-ons](reference/shipped-add-ons.md): tools, configuration and grants of each.
+- [Events](reference/events.md): the topics on the log and what each payload holds.
+- [`wit/corduroy.wit`](../wit/corduroy.wit), the plugin world itself, and the API docs
+  (`cargo doc --open`) for the Rust crates.
+
+## Explanation
+
+- [Concepts](explanation/concepts.md): the mental model in one page, with a glossary.
+- [Security model](explanation/security-model.md): what is trusted, what is sandboxed, and
+  what is not.
+- [Design](design.md): the full design record, the six harnesses each idea comes from, what
+  is stable, and what is planned.
+- [Guest languages](guest-languages.md): how JavaScript and Python plugins were made to work
+  without WASI, with measurements.

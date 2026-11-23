@@ -6,6 +6,10 @@ its system prompt, the kernels it computes in, and the reactions to what happens
 is anything you plug into the core and can unplug again, and comes in two kinds:
 extensions and add-ons.
 
+**New here?** Start with the [documentation](docs/README.md): a tutorial that gets an agent
+running on a folder of yours, one that has you write an add-on, how-to guides, a full
+reference of the command, the agent file and the capabilities, and the ideas behind it.
+
 There are three tiers, from what changes least to what changes most:
 
 | Tier | What | Gets in by | Trust |
