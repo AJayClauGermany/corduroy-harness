@@ -1,8 +1,12 @@
 # Design
 
-corduroy-harness is a prototype of one idea: an agent harness in which nearly everything is a
-plugin, plugins can be WebAssembly, and a WebAssembly plugin can do only what it was granted.
-It takes one mechanism from each of six existing harnesses. This document records what each
+corduroy-harness is a small harness you can trust to build and maintain itself, with only the
+capabilities you allow it, growing into the helper your own work needs. [What it is
+for](#what-it-is-for) says for whom, and what follows from it.
+
+The means is one idea: an agent harness in which nearly everything is a plugin, plugins can
+be WebAssembly, and a WebAssembly plugin can do only what it was granted. It takes one
+mechanism from each of six existing harnesses. This document records what each
 of those mechanisms is (checked against the projects' sources in November 2026), what was
 borrowed, where it lives here, and what was left out.
 
@@ -22,6 +26,62 @@ stable](#what-is-stable) which contracts are meant to hold from here on.
 
 The second half records where the design is going. Sections and table rows marked *planned*
 describe that target, not the code as it is.
+
+## What it is for
+
+**A small harness you can trust to build and maintain itself, with only the capabilities you
+allow it, growing into the helper your own work needs.**
+
+**Who it is for.** Someone who has used several harnesses and is tired of wiring each one up:
+installing the pieces, connecting them, writing what is missing. The harnesses that do more
+of this themselves show too little of how they work to be controlled. This one is for the
+place between: the person gives a goal and the limits, and the agent builds the structure
+around the task (tools, automations, connections), keeps it, and uses it again. It is
+written first for its author's own use. Wide adoption is not a goal of 1.0, and a question
+that only serves adoption can wait.
+
+**Growth is the point; trust and little effort are its conditions.** What the agent builds
+is code, and code it has written takes the place of model calls it used to make: what was
+once reasoned through each time is afterwards just run (see [Automations](#automations)).
+The same tokens then go further, and a smaller model can do more, because less is asked of
+it each time. So "the agent extends itself" is a claim of 1.0, and the first thing to be
+demonstrated.
+
+**Which property leads.** Three properties serve that, and the value is in having them
+together:
+
+| Property | What it is for here |
+| --- | --- |
+| An add-on can do only what it was granted | The reason growth can be allowed at all. The person approves *what a thing may do*, not how it works, so the agent can give itself only what the person would have given it. This one leads. |
+| A plugin leaves nothing behind when unloaded | The undo. Something the agent built wrongly is unplugged, and it tries again from a clean state. |
+| The run is durable | The safety net. When something goes wrong the run can be stopped, read, and recovered, in the same run or another. |
+
+An agent working unattended for days follows from these. It is not what 1.0 is measured by.
+
+**A harness to use, not a kit.** The primary thing is the agent a person sits at. That
+others can rebuild the command with their own parts is how it is made, not what it is for.
+What it should be able to do is reach *other* harnesses (one running in the cloud, another on
+this machine) as plugins: each behind the same boundary as any plugin, able to exchange
+messages with the rest and reachable through this harness's one interface, without having
+the run of it. That is something the flexibility allows, and the agent should be able to
+grow such a connection itself. A manager of many harnesses is not the product.
+
+**Tools come over MCP; add-ons change the harness.** MCP is the standard other harnesses
+share, so a tool is as welcome from an MCP server as from an add-on, and the agent may build
+either. An add-on is for what a tool cannot be: a gate, a part of the prompt, a listener,
+state in the record, a service, and the shape of the loop itself. The case to hold the design
+to: two agents doing test-driven development, one writing tests without being able to see
+the code, the other writing code without being able to see the tests, passing work back and
+forth until it is done. Each has its own loop, its own tools and its own limits on what it
+can see, and either may be another harness. Expressing that needs an add-on to be able to
+define a loop and sessions to be able to differ; neither is possible yet, and
+[Open questions](open-questions.md) holds both (E12, G12).
+
+**What is left out.** Nothing is refused for good. The test for anything proposed is whether
+it serves the agent adapting itself, for this use; what does not is neither built in nor
+promised. The command line is the front end, and enough. An editor (through a protocol
+editors and agents share), a terminal interface, or a page in a browser showing what the
+agent has built and been granted, may grow from it; none is a condition of 1.0.
 
 ## The shape
 
