@@ -143,8 +143,9 @@ reasoning, and [what is meant to stay stable](docs/design.md#what-is-stable).
 | [OpenHands](https://github.com/OpenHands/software-agent-sdk) | An append-only event stream as the source of truth, and a loop you can program | `corduroy-core::event`, `src/session.rs` |
 | [Goose](https://github.com/aaif-goose/goose) | A loop of steps, each reading the persisted conversation and returning effects; and its oi-kit providers, kept behind our own `Provider` | `src/harness.rs`, `crates/corduroy-providers` |
 
-[`docs/design.md`](docs/design.md) has the research behind each, what was borrowed, and what
-is deliberately left for later.
+[Where the ideas come from](docs/explanation/inspirations.md) explains each idea and the
+project it comes from, for a reader new to them; [`docs/design.md`](docs/design.md) has the
+research behind each, what was borrowed, and what is deliberately left for later.
 
 ## Quick start
 

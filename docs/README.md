@@ -74,6 +74,9 @@ Working on corduroy itself:
 - [Concepts](explanation/concepts.md): the mental model in one page, with a glossary.
 - [Security model](explanation/security-model.md): what is trusted, what is sandboxed, and
   what is not.
+- [Where the ideas come from](explanation/inspirations.md): the one mechanism taken from each
+  of Cordis, Prime Intellect, Hermes, Pi, OpenHands and Goose, how it works here, and what
+  was left behind.
 - [Design](design.md): the full design record, the six harnesses each idea comes from, what
   is stable, and what is planned.
 - [Guest languages](guest-languages.md): how JavaScript and Python plugins were made to work

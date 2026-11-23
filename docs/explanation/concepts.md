@@ -1,8 +1,8 @@
 # Concepts
 
 This page is the mental model: what the parts of corduroy are, how they fit, and why it is
-built that way. The [design record](../design.md) goes deeper on each point, with where every
-idea comes from.
+built that way. [Where the ideas come from](inspirations.md) explains the projects each idea
+is borrowed from, and the [design record](../design.md) goes deeper on each point.
 
 ## A small core, and everything else plugged in
 
@@ -46,8 +46,8 @@ Every registration a plugin makes (a tool, a prompt part, a listener, a service)
 **effect** recorded on that plugin. Unloading it runs the effects backwards, so it leaves
 nothing behind. A plugin that depends on a service another provides is suspended when that
 service goes and applied again when it comes back. This comes from
-[Cordis](https://github.com/cordiverse/cordis), and it is what lets plugins be loaded and
-unloaded while an agent runs.
+[Cordis](inspirations.md#cordis-plugins-that-clean-up-after-themselves), and it is what lets
+plugins be loaded and unloaded while an agent runs.
 
 ## Capabilities
 

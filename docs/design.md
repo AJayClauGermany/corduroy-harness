@@ -52,6 +52,9 @@ event stream: it implements the core's `Log` trait over a file.
 
 ## The six inspirations
 
+[Where the ideas come from](explanation/inspirations.md) explains each of these at more
+length, for a reader new to the projects.
+
 ### Cordis: spatio-temporal composability
 
 **What it is.** [Cordis](https://github.com/cordiverse/cordis) is the TypeScript plugin
