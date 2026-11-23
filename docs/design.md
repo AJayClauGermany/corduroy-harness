@@ -627,8 +627,9 @@ keep working.
 - **Stable**: changes only by adding. New things arrive, and nothing written against what
   was there breaks.
 
-What is frozen is what things are built from; what makes building easier sits on top, in
-extensions, and is stable.
+The idea being worked to is that what is frozen is what things are built from, and what
+makes building easier sits on top, in extensions, and is stable. It is the current aim, not
+a settled rule: where the line falls may move as the proofs below are built.
 
 | Contract | Where | At 1.0 | Rule for change |
 | --- | --- | --- | --- |
