@@ -34,9 +34,10 @@
 //!
 //! Extensions (native plugins of a kind this command was built with, see
 //! [`extension`](crate::extension)) go under `[extensions.<name>]`; `kind` names the kind and
-//! every other key is the extension's own configuration. A kernel is an extension too:
-//! `[kernels.<name>]` with `kind = "shell"` builds the kind `shell-kernel`, with the entry's
-//! other keys (`dir`, `program`) as its configuration:
+//! every other key is the extension's own configuration. Kernels, MCP servers and secrets are
+//! extensions too, built from kinds the same way: `[kernels.<name>]` with `kind = "shell"`
+//! builds the kind `shell-kernel` with the entry's other keys (`dir`, `program`) as its
+//! configuration, `[mcp.<name>]` the kind `mcp` and `[secrets.<name>]` the kind `env-secret`:
 //!
 //! ```toml
 //! [extensions.scratch]
@@ -55,18 +56,14 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
-use corduroy_harness::core::{
-    FiberId, FiberState, SECRETS, Scope, Secret, Secrets, Spawn, plugin_fn,
-};
+use corduroy_harness::core::{FiberId, FiberState, Scope};
 use corduroy_harness::wasm::{CAPABILITIES, WasmRuntime};
 use corduroy_harness::{Harness, provider};
-use corduroy_mcp::{McpPlugin, Transport, mcp_server};
 use corduroy_providers::ProviderSpec;
 pub use corduroy_std::{DATA_DIR, Places};
-use corduroy_std::{Standard, kernel_kind};
-use serde::Deserialize;
+use corduroy_std::{ENV_SECRET, MCP, Standard, kernel_kind};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::extension::{Asked, Extensions};
@@ -146,38 +143,40 @@ pub struct KernelEntry {
     pub config: BTreeMap<String, toml::Value>,
 }
 
-/// A secret, read from the environment when a plugin's request needs it.
-#[derive(Debug, Clone, Deserialize)]
+/// A secret, read from the environment when a plugin's request needs it: an extension of the
+/// kind `env-secret`, with `env` as its configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SecretEntry {
     /// The environment variable holding the value.
     pub env: String,
 }
 
-/// An MCP server: a `command` started through a kernel, or a `url`.
-#[derive(Debug, Clone, Deserialize)]
+/// An MCP server: a `command` started through a kernel, or a `url`. An extension of the kind
+/// `mcp`, with the entry's keys as its configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct McpEntry {
     /// The program to start, speaking MCP over its standard input and output.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
     /// Its arguments.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
     /// Environment variables to set for it.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
     /// The kernel that starts it, `shell` by default.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kernel: Option<String>,
     /// Where a server reached over streamable HTTP is.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     /// The environment variable holding a bearer token for `url`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bearer_token_env: Option<String>,
     /// Seconds to wait for it to start and for each tool call.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_seconds: Option<u64>,
 }
 
@@ -625,9 +624,19 @@ fn natives(
         loaded.push((format!("kernel {name}"), id));
     }
     for (name, server) in &file.mcp {
-        harness.plugin(mcp(name, server, places)?);
+        let what = format!("MCP server `{name}`");
+        let config = serde_json::to_value(server)
+            .map_err(|error| AgentError::new(format!("{what}: {error}")))?;
+        let id = load(harness, places, kinds, (&what, name, MCP), config)?;
+        loaded.push((format!("mcp {name}"), id));
     }
-    secrets(harness, file);
+    for (name, secret) in &file.secrets {
+        let what = format!("secret `{name}`");
+        let config = serde_json::to_value(secret)
+            .map_err(|error| AgentError::new(format!("{what}: {error}")))?;
+        let id = load(harness, places, kinds, (&what, name, ENV_SECRET), config)?;
+        loaded.push((format!("secret {name}"), id));
+    }
     failed.extend(unstarted(harness, loaded));
     Ok(failed)
 }
@@ -651,26 +660,6 @@ fn providers(harness: &Harness, file: &AgentFile) -> Result<Vec<Unstarted>, Agen
         }
     }
     Ok(failed)
-}
-
-/// The secrets, each read from its environment variable when a plugin's request needs it.
-fn secrets(harness: &Harness, file: &AgentFile) {
-    let secrets: Vec<(String, String)> = file
-        .secrets
-        .iter()
-        .map(|(name, secret)| (name.clone(), secret.env.clone()))
-        .collect();
-    harness.plugin(plugin_fn("secrets", &[SECRETS], move |ctx| {
-        let registry = ctx.service::<Secrets>(SECRETS)?;
-        for (name, variable) in &secrets {
-            let variable = variable.clone();
-            let secret: Arc<dyn Secret> = Arc::new(move || {
-                std::env::var(&variable).map_err(|_| format!("${variable} is not set"))
-            });
-            registry.register(ctx, name.clone(), secret)?;
-        }
-        Ok(())
-    }));
 }
 
 /// The extensions, each built from its kind. Returns those that did not start.
@@ -712,44 +701,6 @@ fn unstarted(harness: &Harness, loaded: Vec<(String, FiberId)>) -> Vec<Unstarted
             Some(Unstarted { plugin, reason })
         })
         .collect()
-}
-
-/// The plugin for the MCP server `name`.
-fn mcp(name: &str, server: &McpEntry, places: &Places) -> Result<McpPlugin, AgentError> {
-    let transport = match (&server.command, &server.url) {
-        (Some(command), _) => Transport::Stdio {
-            kernel: server.kernel.clone().unwrap_or_else(|| "shell".to_owned()),
-            spawn: Spawn {
-                program: places.expand(command),
-                args: server.args.iter().map(|arg| places.expand(arg)).collect(),
-                env: server
-                    .env
-                    .iter()
-                    .map(|(key, value)| (key.clone(), places.expand(value)))
-                    .collect(),
-            },
-        },
-        (None, url) => {
-            let bearer_token = server
-                .bearer_token_env
-                .as_ref()
-                .map(|variable| {
-                    std::env::var(variable).map_err(|_| {
-                        AgentError::new(format!("MCP server `{name}`: ${variable} is not set"))
-                    })
-                })
-                .transpose()?;
-            Transport::Http {
-                url: places.expand(url.as_deref().unwrap_or_default()),
-                bearer_token,
-            }
-        }
-    };
-    let plugin = mcp_server(name, transport);
-    Ok(match server.timeout_seconds {
-        Some(seconds) => plugin.with_timeout(Duration::from_secs(seconds)),
-        None => plugin,
-    })
 }
 
 /// The WebAssembly plugins, each with its grants. Returns those that did not start.
@@ -805,6 +756,8 @@ fn plugins(
 
 #[cfg(test)]
 mod tests {
+    use corduroy_harness::core::{SECRETS, Secret, Secrets, plugin_fn};
+
     use super::*;
 
     #[test]
@@ -883,7 +836,7 @@ mod tests {
         assert_eq!(
             error,
             "extension `box`: this command has no extension kind `docker-kernel` (it has: \
-             http-client, powershell-kernel, shell-kernel)"
+             env-secret, http-client, mcp, powershell-kernel, shell-kernel)"
         );
 
         let refusing = Extensions::none().kind("picky", |_| Err("`image` is required".into()));
@@ -924,7 +877,7 @@ mod tests {
         // A command that brings the kind has it.
         let with_docker =
             Standard::new().with_kinds(&Extensions::none().kind(kernel_kind("docker"), |asked| {
-                Ok(Box::new(corduroy_harness::shell_kernel(asked.name, "/")))
+                Ok(Box::new(corduroy_std::shell::shell_kernel(asked.name, "/")))
             }));
         let agent = assemble_from(&file, &places, &with_docker).unwrap();
         assert_eq!(agent.harness.kernels().names(), ["box"]);
@@ -963,6 +916,39 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("loads no add-ons"), "{error}");
+    }
+
+    #[test]
+    fn secrets_and_mcp_servers_are_built_from_kinds_a_command_can_swap() {
+        let places = Places::new(corduroy_test_support::scratch("cli-secret-kinds"), None);
+        let file = AgentFile::parse(&format!(
+            "{BARE}[secrets.token]\nenv = \"CORDUROY_TEST_TOKEN\"\n\
+             [mcp.remote]\nurl = \"http://127.0.0.1:9/mcp\"\nbearer_token_env = \"CORDUROY_UNSET\"\n"
+        ))
+        .unwrap();
+
+        // The standard kinds: the secret from the environment; the MCP server's bearer token
+        // is read when it is built, and its variable is not set.
+        let error = assemble(&file, &places).unwrap_err().to_string();
+        assert_eq!(error, "MCP server `remote`: $CORDUROY_UNSET is not set");
+
+        // A command of its own keeps secrets elsewhere and reaches MCP servers its own way.
+        let own = Extensions::none()
+            .kind(ENV_SECRET, |asked| {
+                let name = format!("{}-from-the-keychain", asked.name);
+                Ok(Box::new(plugin_fn(asked.name, &[SECRETS], move |ctx| {
+                    let secret: Arc<dyn Secret> = Arc::new(|| Ok("value".to_owned()));
+                    ctx.service::<Secrets>(SECRETS)?
+                        .register(ctx, name.clone(), secret)?;
+                    Ok(())
+                })))
+            })
+            .kind(MCP, |asked| {
+                Ok(Box::new(plugin_fn(asked.name, &[], |_| Ok(()))))
+            });
+        let agent = assemble_with(&file, &places, &own).unwrap();
+        assert_eq!(agent.harness.secrets().names(), ["token-from-the-keychain"]);
+        assert!(agent.failed.is_empty(), "{:?}", agent.failed);
     }
 
     #[test]

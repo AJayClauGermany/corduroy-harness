@@ -12,6 +12,7 @@
 //! | Outbound HTTP | [`http`] | the client behind the `http` capability, which never follows redirects |
 //! | Models | [`providers`] | Anthropic, OpenAI-compatible, Ollama and others |
 //! | MCP | [`mcp`] | MCP servers' tools, over standard input and output or HTTP |
+//! | Secrets | [`extension::ENV_SECRET`] | credentials read from the environment, never handed to a plugin |
 //! | Add-ons | [`wasm`] | WebAssembly plugins, each holding only the capabilities it was granted |
 //!
 //! [`Standard`] is that set as one value, made of parts that can each be swapped: the
@@ -44,11 +45,13 @@ use std::path::Path;
 use std::sync::Arc;
 
 use corduroy_harness::core::EventStream;
-pub use corduroy_harness::{jsonl, shell, wasm};
+pub use corduroy_harness::wasm;
 pub use corduroy_http as http;
+pub use corduroy_jsonl as jsonl;
 pub use corduroy_mcp as mcp;
 pub use corduroy_providers as providers;
-pub use extension::{Asked, Built, Extensions, kernel_kind};
+pub use corduroy_shell as shell;
+pub use extension::{Asked, Built, ENV_SECRET, Extensions, MCP, kernel_kind};
 pub use places::{DATA_DIR, Places};
 
 /// Opens the event log kept at a path.

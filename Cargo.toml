@@ -76,7 +76,7 @@ categories.workspace = true
 workspace = true
 
 [features]
-default = ["tokio", "wasm", "shell", "jsonl"]
+default = ["tokio", "wasm"]
 # The standard library. Without it the harness, like the core, needs only an allocator and
 # runs on a microcontroller, with `critical-section` for its locks.
 std = ["corduroy-core/std", "anyhow/std", "base64/std", "serde_json/std"]
@@ -87,18 +87,13 @@ tokio = ["std", "dep:tokio"]
 # The lock of a harness built without `std`, from whatever implementation the device provides.
 critical-section = ["corduroy-core/critical-section"]
 # Add-ons: WebAssembly plugins, through wasmtime (`corduroy_harness::wasm`). Without it the
-# harness runs extensions only and carries no WebAssembly runtime.
+# harness runs extensions only and carries no WebAssembly runtime. Extensions themselves (the
+# shell kernel, the file log, providers) are not the loop's: `corduroy-std` gathers them.
 wasm = ["std", "dep:corduroy-wasm"]
-# The persistent POSIX shell kernel (`corduroy_harness::shell`).
-shell = ["std", "dep:corduroy-shell"]
-# The event log in a JSON Lines file (`corduroy_harness::jsonl`).
-jsonl = ["std", "dep:corduroy-jsonl"]
 
 [dependencies]
 corduroy-core = { workspace = true }
 corduroy-wasm = { workspace = true, optional = true }
-corduroy-jsonl = { workspace = true, optional = true }
-corduroy-shell = { workspace = true, optional = true }
 base64 = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
@@ -106,14 +101,16 @@ serde_json = { workspace = true }
 tokio = { workspace = true, optional = true }
 
 [dev-dependencies]
+# Extensions the demo and the tests plug in: a shell kernel and a log in a file.
+corduroy-jsonl = { workspace = true }
+corduroy-shell = { workspace = true }
 corduroy-test-support = { workspace = true }
 tokio = { workspace = true }
 
-# The demo and the tests that load add-ons, run the shell or keep a log in a file.
-[[bin]]
-name = "corduroy-harness"
-path = "src/main.rs"
-required-features = ["wasm", "shell"]
+# The demo and the tests that load add-ons.
+[[example]]
+name = "demo"
+required-features = ["wasm"]
 
 [[test]]
 name = "baseline"
@@ -124,16 +121,8 @@ name = "compaction"
 required-features = ["wasm"]
 
 [[test]]
-name = "durable"
-required-features = ["jsonl"]
-
-[[test]]
-name = "gates"
-required-features = ["jsonl"]
-
-[[test]]
 name = "plugins"
-required-features = ["wasm", "shell"]
+required-features = ["wasm"]
 
 [[test]]
 name = "providers"

@@ -9,7 +9,7 @@ fmtc = "fmt --all -- --check"
 # `scripts/local-model.sh start`. See crates/corduroy-cli/tests/local_model.rs.
 eval = "nextest run --profile eval -p corduroy-cli --test local_model --run-ignored only"
 # Run the demo agent loop.
-demo = "run --quiet -p corduroy-harness --"
+demo = "run --quiet -p corduroy-harness --example demo --"
 # Build the guest plugins in plugins/ to WebAssembly. Tests and the demo load the result.
 plugins = "build --manifest-path plugins/Cargo.toml --target wasm32-unknown-unknown --release"
 # The `corduroy` command, built from this tree: `cargo corduroy -- --help`.
