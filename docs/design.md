@@ -966,6 +966,11 @@ the step it waits on is done.
 
 ## Open questions
 
+What must be decided before 1.0 is gathered in
+[Open questions before 1.0](open-questions.md), each as a question with a direction and no
+answer. The list below is this record's own, older and broader: an entry that has to be
+settled by 1.0 is there as well, and one that can wait is only here.
+
 - **Grant files.** The `corduroy` agent file is the first form: one file naming the plugins
   of an agent and what each may do, as Goose's recipes and Cordis's `cordis.yml` do. Still
   open: a grant file per plugin shipped with it (Zed's `extension.toml`, Tauri's capability

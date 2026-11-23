@@ -81,3 +81,6 @@ Working on corduroy itself:
   is stable, and what is planned.
 - [Guest languages](guest-languages.md): how JavaScript and Python plugins were made to work
   without WASI, with measurements.
+- [Open questions before 1.0](open-questions.md): every decision still to make before the
+  core is frozen. Questions and directions only; a decided one moves to the page its answer
+  belongs on.
