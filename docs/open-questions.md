@@ -16,6 +16,7 @@ listed here.
 
 | Section | What it settles |
 | --- | --- |
+| [P. Purpose and place](#p-purpose-and-place) | what this is for, for whom, and what it offers that the others do not |
 | [A. What the freeze is](#a-what-the-freeze-is) | which contracts freeze, under which rule, and how that is kept |
 | [B. Core: types and traits](#b-core-types-and-traits) | `corduroy-core`'s shapes |
 | [C. Core: the event stream and the log](#c-core-the-event-stream-and-the-log) | what an event is and what the record promises |
@@ -37,17 +38,210 @@ reshapes entries further down.
 
 | Order | Group | Questions |
 | --- | --- | --- |
-| 1 | What 1.0 is, and for whom | A1, A2, A7, A8, A9 |
-| 2 | What the record promises | C1, C2, C17, C19 |
-| 3 | What the core is made of | B3, B4, B23, B24 |
-| 4 | What is safe by default | D7, D8, D9 |
-| 5 | How the plugin world grows | E3, E4, E7, E17 |
-| 6 | What an extension can reach | G1, G2, G4, G12, G18 |
-| 7 | How people meet it | H1, H11, H14, I4 |
+| 1 | Why this exists | P1, P2, P3, P4, P5, P8 |
+| 2 | What 1.0 is, and for whom | A1, A2, A7, A8, A9 |
+| 3 | What the record promises | C1, C2, C17, C19 |
+| 4 | What the core is made of | B3, B4, B23, B24 |
+| 5 | What is safe by default | D7, D8, D9 |
+| 6 | How the plugin world grows | E3, E4, E7, E17 |
+| 7 | What an extension can reach | G1, G2, G4, G12, G18 |
+| 8 | How people meet it | H1, H11, H14, I4 |
 
 Everything not in this table is detail that hangs off one of these, or a mechanical choice
 (which types may grow, which names are final) best made in one sitting per section once its
-group is settled.
+group is settled. The first group comes first for a reason: a core is frozen *for* something,
+and several technical questions below have no right answer until it is said what.
+
+## P. Purpose and place
+
+There are many agent harnesses, and this one is assembled from ideas found in six of them.
+These questions ask what it is for, so that the freeze fixes a foundation for something in
+particular. They have no code to point at; where they lean on a claim, it is one the
+project's own pages make.
+
+### P1. What is the one sentence?
+
+[Design](design.md) opens with "a prototype of one idea: an agent harness in which nearly
+everything is a plugin, plugins can be WebAssembly, and a WebAssembly plugin can do only what
+it was granted". That describes a mechanism. It does not say what someone can do with it that
+they cannot do, or cannot do safely, with what already exists.
+[Where the ideas come from](explanation/inspirations.md) comes closer in passing: "what
+corduroy is for: an agent that loads, replaces and drops plugins while it runs, including
+plugins it wrote itself".
+
+*Direction.* Write the sentence as an outcome for a named kind of person, with no mechanism
+in it. The candidates the project's pages already imply: an agent that can safely extend
+itself; a harness whose extensions need not be trusted; a small fixed base that keeps
+enforcing the same rules whatever is built on it; a kit for building harnesses. They are
+different products, and the rest of this page reads differently under each.
+
+### P2. Is this a harness people use, or what harnesses are built on?
+
+It is both today: a default agent meant to match another harness feature for feature, and a
+library with a command others rebuild with their own parts. The first competes for a place
+at someone's terminal against agents that ship with the models they are tuned for. The
+second competes with agent SDKs for a place inside someone's product. They are won
+differently and measured differently.
+
+*Direction.* Pick the primary one. The other becomes its proof: a kit needs one good agent
+built on it to be believed; a product needs to be embeddable only as far as its own front
+ends require.
+
+### P3. Who picks this, and instead of what?
+
+[A7](#a7-who-is-10-for) asks which uses 1.0 is measured against. This asks who makes the
+choice and what they give up. A person content with their current agent has no reason to
+move for a plugin system. The people the design could matter to: someone who must run
+extensions they cannot trust (a third party's, or the agent's own); someone embedding an
+agent in a product who needs it bounded and auditable; someone who wants an agent that works
+unattended for days and survives restarts; someone building for a device.
+
+*Direction.* Name one, and name what they use today. If no one can be named who is badly
+served now, that is the answer to act on.
+
+### P4. Which property is this the best at?
+
+The project makes three claims at once: add-ons that can do only what they are granted; runs
+that are durable because the loop is; and plugins that leave nothing behind when unloaded.
+Each is available somewhere on its own. Tools as sandboxed WebAssembly components with
+permissions denied by default already exist behind MCP, for any agent that speaks it
+([Wassette](https://microsoft.github.io/wassette) is one). Durable execution of agent steps
+is a product category of its own. Clean unloading is Cordis's.
+
+*Direction.* Decide whether the value is one of the three or their combination. A
+combination is only a purpose if some task needs all of it together. The one the design
+points at: an agent writes an automation, loads it under grants, and it keeps running
+unattended across restarts. If that is the purpose, then
+[I6](#i6-is-the-agent-extends-itself-part-of-10) is not optional, and it is the thing to
+demonstrate first.
+
+### P5. Why an add-on, when there is MCP?
+
+MCP is how nearly every harness is extended, and an MCP server runs in all of them. An
+add-on runs in this one. Sandboxing alone does not justify that, since the sandbox can be
+had behind MCP. What an add-on can be that an MCP tool cannot: a gate, a part of the system
+prompt, a listener on the event stream, state kept in the record, a service to other
+plugins, a loader of further plugins, and something that unloads completely.
+
+*Direction.* Say that add-ons are for extending the *harness* and MCP is for adding *tools*,
+and hold the design to it. Then decide the traffic between the two: whether an add-on's
+tools are offered to other agents over MCP, and whether components written for an existing
+sandboxed MCP host can be loaded here, so an author is not asked to choose an island.
+
+### P6. Do six borrowed mechanisms add up to one thesis?
+
+Each idea was taken because it "solves a problem the others leave open". That explains each
+part and not the whole. Without a problem that needs all six solved together, the result is
+a well-made collection.
+
+*Direction.* Write the thesis without naming any of the six projects, then check each
+borrowed idea against it. One that the thesis does not need (kernels, skills, running
+without the standard library and the Goose baseline are the ones to test) is a candidate to
+demote from the core's story to "also possible".
+
+### P7. Is another harness's feature list the right measure?
+
+"What a user gets from Goose out of the box should be reachable here with shipped plugins
+alone." As a test that the plugin system is expressive enough, that is a good one. As a goal
+it makes this a follower: always matching, a release behind, a list someone else writes.
+
+*Direction.* Keep parity as the test of expressiveness. State separately what a person gets
+here that the baseline does not give them, and let 1.0 be judged on that.
+
+### P8. What does this refuse to be?
+
+Nothing is ruled out today, so every feature another harness has looks like a gap. Likely
+refusals: a desktop application; a hosted service; an editor; a model vendor's showcase; a
+framework for wiring graphs of agents; an environment for training or evaluating models.
+
+*Direction.* Write the list. It shortens every other section, since a question that only
+serves a refused use can be deleted rather than answered.
+
+### P9. Is the fixed core itself the offer?
+
+"The core is meant to be fixed: compiled, small, and not something an agent or a plugin can
+change. … whatever the plugins become, the same core is underneath and still enforcing the
+same rules." That is an assurance argument: a small trusted base an organisation can read,
+audit and rely on while everything above it moves.
+
+*Direction.* Decide whether assurance is the pitch. If it is, the size of the trusted base
+becomes a feature with a budget (lines, dependencies, the WebAssembly engine included), and
+[D7](#d7-what-does-10-promise-about-safety-in-one-statement) with an outside review is a
+condition of 1.0 rather than a nice-to-have.
+
+### P10. Who writes add-ons: people or the agent?
+
+The design says the purpose of the plugin system is that the agent adapts the harness to its
+task. The SDKs, tutorials and reference are written for people. The two authors want
+different things: a model wants a script it can write in one go, a tight error when a grant
+refuses it, and a person to approve the load; a person wants packaging, versions and
+somewhere to publish ([I4](#i4-what-is-an-add-on-as-something-shipped)).
+
+*Direction.* Name the primary author. It decides which of the script host, the SDKs and a
+package format gets finished first.
+
+### P11. Is the plugin world ours alone, or meant for other hosts?
+
+A frozen, versioned, typed interface with capabilities as imports is close to a
+specification. If another host could implement it, an add-on would be portable between
+harnesses, which nothing offers today and which would be a contribution to the field rather
+than to one project. If it is ours alone, it is an internal boundary with good hygiene.
+
+*Direction.* Decide which. A specification needs a second implementation as proof and a
+home that is not one repository; an internal boundary needs neither, and should not carry
+the cost of pretending.
+
+### P12. What does the record give a person besides recovery?
+
+Durability is argued as crash recovery. The same log is also an audit trail of everything an
+agent did, was refused and was allowed, in one history shared by the model, the plugins and
+the reader. For some users that, more than recovery, is the reason to choose a harness.
+
+*Direction.* Decide whether "an agent whose every action can be reviewed afterwards" is
+part of the purpose. If it is, removal, redaction and the event reference
+([C17](#c17-can-anything-ever-leave-the-log), [C6](#c6-can-anything-be-kept-out-of-the-log),
+[C11](#c11-which-topics-and-payload-fields-are-frozen-and-where-is-the-one-list)) are
+product questions, not plumbing.
+
+### P13. Is independence from any one model part of the value?
+
+The agents most people use are made by model vendors and move with their models. An
+independent harness is neutral and always a little behind on what one model newly offers.
+The evals here already run against a 1.7-billion-parameter model on a laptop.
+
+*Direction.* Decide whether "works well with any model, small and local ones included" is a
+stated goal. It shapes the default prompts, the tool set, the loop and what counts as a
+regression.
+
+### P14. How does it reach people?
+
+A new terminal agent asks someone to change a habit. The alternatives are to sit behind
+something they already use (an editor, through a protocol editors and agents share), or
+inside something someone else ships. [H11](#h11-is-there-a-front-end-other-than-a-rust-program)
+asks about the mechanism; this asks about the intent.
+
+*Direction.* Pick the channel that matches
+[P2](#p2-is-this-a-harness-people-use-or-what-harnesses-are-built-on), and treat the
+terminal as the reference front end unless it is the product.
+
+### P15. What will show that it is worth having?
+
+Nothing outside this repository depends on it yet. Before the core is frozen for good,
+something should show the purpose is real: a task done here that cannot be done, or cannot
+be done safely, elsewhere; an extension written by someone who is not us; a user who stayed.
+
+*Direction.* One demonstration that is the thesis made runnable, chosen before 1.0 and
+passed before it, beside the proof extensions of
+[A9](#a9-what-proves-the-extension-tier-is-enough).
+
+### P16. Who keeps it going after 1.0?
+
+A frozen core is most useful if someone answers for it: reviews fixes, holds the line on
+what does not change, speaks for the world's next version. Whether that is a company, a few
+maintainers or a foundation changes what "stable" is worth to someone building on it.
+
+*Direction.* Say who, and what they commit to, together with
+[A11](#a11-what-may-still-change-after-10).
 
 ## A. What the freeze is
 
