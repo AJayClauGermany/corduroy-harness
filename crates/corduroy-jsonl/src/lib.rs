@@ -452,6 +452,8 @@ mod tests {
 
         assert_eq!(stream.events(), written);
         assert_eq!(stream.emit(user("next")).unwrap().get(), 4);
+        // Read once the log lets go of it: on Windows a locked file cannot be read by another.
+        drop(stream);
         let text = fs::read_to_string(&path).unwrap();
         // A header, then one line per commit.
         assert_eq!(text.lines().count(), 4);
@@ -473,10 +475,15 @@ mod tests {
         let stream = open(&path).unwrap();
 
         assert_eq!(stream.len(), 1);
-        assert_eq!(fs::read_to_string(&path).unwrap(), whole);
         assert_eq!(stream.emit(user("next")).unwrap().get(), 2);
+        // Read once the log lets go of it: on Windows a locked file cannot be read by another.
         drop(stream);
-        // Written where the cut was, with no gap: the log reads back whole.
+        // The unfinished line is gone, and the next commit was written where it began, with
+        // no gap: what was kept, then one line.
+        let text = fs::read_to_string(&path).unwrap();
+        let after = text.strip_prefix(whole.as_str()).unwrap();
+        assert_eq!(after.lines().count(), 1, "{after:?}");
+        assert!(after.starts_with("[{"), "{after:?}");
         assert_eq!(open(&path).unwrap().len(), 2);
     }
 
