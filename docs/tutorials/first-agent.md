@@ -40,6 +40,10 @@ export PATH="$PWD/target/debug:$PATH"
 
 The command finds the add-ons you just built in this checkout, so leave it where it is.
 
+To skip building, [install a ready-made build](../how-to/install-a-build.md) instead; it
+puts `corduroy` on your path with its add-ons. You still want the checkout for
+`scripts/local-model.sh` in the next step if you choose a model on your own machine.
+
 ## 2. Choose a model
 
 corduroy picks the model from your environment when it writes an agent. Do **one** of these:

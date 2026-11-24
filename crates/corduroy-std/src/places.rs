@@ -24,7 +24,9 @@ impl Places {
     /// The places for an agent working in `workspace`, described by `file`.
     ///
     /// The plugin path is the agent file's directory, then each directory in
-    /// `CORDUROY_PLUGIN_PATH`, then the plugins of the source tree this was built from.
+    /// `CORDUROY_PLUGIN_PATH`, then the `plugins` directory beside the running program (where
+    /// a downloaded build keeps its add-ons), then the plugins of the source tree this was
+    /// built from.
     #[must_use]
     pub fn new(workspace: PathBuf, file: Option<PathBuf>) -> Self {
         let mut plugin_path: Vec<PathBuf> = file
@@ -36,6 +38,7 @@ impl Places {
         if let Some(extra) = std::env::var_os("CORDUROY_PLUGIN_PATH") {
             plugin_path.extend(std::env::split_paths(&extra));
         }
+        plugin_path.extend(beside_program());
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins/target");
         plugin_path.push(source.join("wasm32-unknown-unknown/release"));
         plugin_path.push(source.join("guests"));
@@ -108,5 +111,31 @@ impl Places {
                     searched.join(", ")
                 )
             })
+    }
+}
+
+/// The `plugins` directory beside the running program, symbolic links resolved, so that a
+/// build unpacked anywhere (or linked onto `PATH`) finds the add-ons shipped with it.
+fn beside_program() -> Option<PathBuf> {
+    let program = std::env::current_exe().ok()?;
+    let program = std::fs::canonicalize(&program).unwrap_or(program);
+    Some(program.parent()?.join("plugins"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plugins_beside_the_program_come_before_the_source_tree() {
+        let places = Places::new(PathBuf::from("/work"), None);
+        let beside = beside_program().unwrap();
+        let at = |dir: &Path| places.plugin_path.iter().position(|entry| entry == dir);
+        let source = places
+            .plugin_path
+            .iter()
+            .position(|dir| dir.ends_with("wasm32-unknown-unknown/release"))
+            .unwrap();
+        assert!(at(&beside).unwrap() < source);
     }
 }

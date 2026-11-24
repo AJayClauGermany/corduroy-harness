@@ -44,7 +44,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read as _, Write as _};
+use std::io::{self, Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 
 use corduroy_core::{Draft, Event, EventId, EventStream, Log, LogError, SessionId};
@@ -117,10 +117,14 @@ fn open_locked(path: &Path) -> Result<Opened, LogError> {
     let fail = |what: &str, error: &dyn fmt::Display| {
         LogError::new(format!("{what} {}: {error}", path.display()))
     };
+    // Written, not appended: on Windows a handle opened to append cannot be cut short. Writes
+    // still land at the end, as this is the only writer (the lock) and where a cut is made
+    // the position follows it.
     let mut file = OpenOptions::new()
         .read(true)
-        .append(true)
+        .write(true)
         .create(true)
+        .truncate(false)
         .open(path)
         .map_err(|error| fail("cannot open", &error))?;
     file.try_lock()
@@ -140,7 +144,7 @@ fn open_locked(path: &Path) -> Result<Opened, LogError> {
         if !header().as_bytes().starts_with(torn) {
             return Err(fail("cannot use", &"it is not a corduroy log"));
         }
-        file.set_len(0)
+        cut(&mut file, 0)
             .and_then(|()| file.write_all(format!("{}\n", header()).as_bytes()))
             .and_then(|()| file.sync_data())
             .map_err(|error| fail("cannot start", &error))?;
@@ -160,7 +164,7 @@ fn open_locked(path: &Path) -> Result<Opened, LogError> {
         commits.push(commit);
     }
     if !torn.is_empty() {
-        file.set_len(kept as u64)
+        cut(&mut file, kept as u64)
             .and_then(|()| file.sync_data())
             .map_err(|error| fail("cannot repair", &error))?;
     }
@@ -245,7 +249,7 @@ fn write_without(
     };
     let mut file = OpenOptions::new()
         .read(true)
-        .append(true)
+        .write(true)
         .create(true)
         .truncate(false)
         .open(&next)
@@ -257,7 +261,7 @@ fn write_without(
         text.push_str(&line_of(commit).to_string());
         text.push('\n');
     }
-    file.set_len(0)
+    cut(&mut file, 0)
         .and_then(|()| file.write_all(text.as_bytes()))
         .and_then(|()| file.sync_data())
         .map_err(|error| fail("cannot write", &error))?;
@@ -333,6 +337,13 @@ impl Log for JsonlLog {
         self.last = last;
         Ok(())
     }
+}
+
+/// Cut `file` to `len` bytes and write from there on, so that nothing written next leaves a
+/// gap where the cut-off bytes were.
+fn cut(file: &mut File, len: u64) -> io::Result<()> {
+    file.set_len(len)?;
+    file.seek(SeekFrom::Start(len)).map(drop)
 }
 
 /// The whole file, read through the handle that holds the lock.
@@ -441,6 +452,8 @@ mod tests {
 
         assert_eq!(stream.events(), written);
         assert_eq!(stream.emit(user("next")).unwrap().get(), 4);
+        // Read once the log lets go of it: on Windows a locked file cannot be read by another.
+        drop(stream);
         let text = fs::read_to_string(&path).unwrap();
         // A header, then one line per commit.
         assert_eq!(text.lines().count(), 4);
@@ -462,8 +475,30 @@ mod tests {
         let stream = open(&path).unwrap();
 
         assert_eq!(stream.len(), 1);
-        assert_eq!(fs::read_to_string(&path).unwrap(), whole);
         assert_eq!(stream.emit(user("next")).unwrap().get(), 2);
+        // Read once the log lets go of it: on Windows a locked file cannot be read by another.
+        drop(stream);
+        // The unfinished line is gone, and the next commit was written where it began, with
+        // no gap: what was kept, then one line.
+        let text = fs::read_to_string(&path).unwrap();
+        let after = text.strip_prefix(whole.as_str()).unwrap();
+        assert_eq!(after.lines().count(), 1, "{after:?}");
+        assert!(after.starts_with("[{"), "{after:?}");
+        assert_eq!(open(&path).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_log_cut_off_in_its_header_starts_again() {
+        let path = log_in("jsonl-torn-header");
+        fs::write(&path, r#"{"corduro"#).unwrap();
+
+        let stream = open(&path).unwrap();
+        stream.emit(user("first")).unwrap();
+        drop(stream);
+
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with(r#"{"corduroy-log":2}"#), "{text:?}");
+        assert_eq!(open(&path).unwrap().len(), 1);
     }
 
     #[test]

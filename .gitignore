@@ -8,3 +8,6 @@ __pycache__/
 
 # The agent's own directory, made when `corduroy` is run with this tree as its workspace.
 .corduroy/
+
+# Archives made by scripts/package.sh.
+/dist
