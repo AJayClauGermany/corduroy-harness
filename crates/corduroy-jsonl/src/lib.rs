@@ -279,16 +279,18 @@ fn beside(path: &Path) -> Result<PathBuf, LogError> {
     Ok(path.with_file_name(name))
 }
 
-/// Make a file's new name in the directory holding `path` survive a crash, where the
-/// platform allows a directory to be synced.
+/// Make a file's new name in the directory holding `path` survive a crash.
+#[cfg(unix)]
 fn sync_directory(path: &Path) {
-    #[cfg(unix)]
     if let Some(directory) = path.parent().and_then(|parent| File::open(parent).ok()) {
         drop(directory.sync_all());
     }
-    #[cfg(not(unix))]
-    let _ = path;
 }
+
+/// Elsewhere a directory cannot be opened to be synced, and the rename is the file system's
+/// to keep.
+#[cfg(not(unix))]
+const fn sync_directory(_path: &Path) {}
 
 /// One commit as the line that stores it, without its newline.
 fn line_of(batch: &[Event]) -> Value {
