@@ -38,7 +38,6 @@ reshapes entries further down.
 
 | Order | Group | Questions |
 | --- | --- | --- |
-| 3 | What the record promises | C1, C2, C17, C19 |
 | 4 | What the core is made of | B3, B4, B23, B24 |
 | 5 | What is safe by default | D7, D8, D9 |
 | 6 | How the plugin world grows | E3, E4, E7, E17 |
@@ -47,13 +46,15 @@ reshapes entries further down.
 
 Everything not in this table is detail that hangs off one of these, or a mechanical choice
 (which types may grow, which names are final) best made in one sitting per section once its
-group is settled. The first two groups are decided, and every question below is read
+group is settled. The first three groups are decided, and every question below is read
 against them. Why this exists, and the two uses 1.0 is measured against, are in
 [What it is for](design.md#what-it-is-for). What freezes, what is only stable and what
 "frozen" allows are in [What is stable](design.md#what-is-stable), with the four proofs
 [the freeze waits on](design.md#what-the-freeze-waits-on). Running without the standard
 library is a direction and not a promise:
-[Without the standard library](design.md#without-the-standard-library).
+[Without the standard library](design.md#without-the-standard-library). What the log is
+for, what is promised about resuming, live output, removal and reading are in
+[What the record promises](design.md#what-the-record-promises).
 
 ## P. Purpose and place
 
@@ -131,18 +132,6 @@ than to one project. If it is ours alone, it is an internal boundary with good h
 *Direction.* Decide which. A specification needs a second implementation as proof and a
 home that is not one repository; an internal boundary needs neither, and should not carry
 the cost of pretending.
-
-### P12. What does the record give a person besides recovery?
-
-Durability is argued as crash recovery. The same log is also an audit trail of everything an
-agent did, was refused and was allowed, in one history shared by the model, the plugins and
-the reader. For some users that, more than recovery, is the reason to choose a harness.
-
-*Direction.* Decide whether "an agent whose every action can be reviewed afterwards" is
-part of the purpose. If it is, removal, redaction and the event reference
-([C17](#c17-can-anything-ever-leave-the-log), [C6](#c6-can-anything-be-kept-out-of-the-log),
-[C11](#c11-which-topics-and-payload-fields-are-frozen-and-where-is-the-one-list)) are
-product questions, not plumbing.
 
 ### P13. Is independence from any one model part of the value?
 
@@ -517,30 +506,6 @@ the same kind of question.
 
 ## C. Core: the event stream and the log
 
-### C1. Is there anything a listener sees that is not logged?
-
-Today no: every event is committed to the `Log` before anyone sees it. Text from a model as
-it arrives, or progress from a running tool, would have to be logged token by token or go
-around the stream altogether. This is the largest undecided question in the core, and what a
-person feels first at the terminal.
-
-*Direction.* Decide between (a) the stream stays durable-only and passing output goes through
-a separate channel the loop offers, and (b) a draft may be marked passing: delivered, never
-stored, never replayed. Either keeps "the log is the record" true. Try both against a real
-provider before choosing.
-
-### C2. Does the stream hold the whole log in memory?
-
-`EventStream` keeps every event (`core/event.rs:344`), `replay` loads them all, and `Log`
-can only be written to (`core/event.rs:293-304`). A long-lived host with many sessions, or
-a device, cannot let old events go.
-
-*Direction.* Neither of those hosts is promised by 1.0, but the stream is in the frozen
-core, so the room for them has to be left now. Decide what `events()`, `session()` and
-`matching()` promise (everything, or a window), and leave a defaulted read side on `Log` so
-a store can serve what memory dropped. The second store among the proofs
-[the freeze waits on](design.md#what-the-freeze-waits-on) is where to try it.
-
 ### C3. In what order are commits from two threads delivered?
 
 Each is delivered by the thread that made it, so a listener may hear the later first
@@ -567,8 +532,14 @@ listener in that same add-on. A per-plugin queue of undelivered events would clo
 A sensitive value the model writes into a tool call is committed before any gate is asked.
 A filter on a batch before it is stored would be a property of the log.
 
+[What the record promises](design.md#what-the-record-promises) works from "everything that
+can be logged is logged" and leaves this open. Review is part of the purpose, so what is
+kept out is a product question: a private value in a prompt is also something the person
+may not want kept. Once in, a value leaves only with its whole session.
+
 *Direction.* Decide whether the core offers a filter point, or whether a `Log` that wraps
-another is the answer (listeners would still see the value).
+another is the answer (listeners would still see the value). Checkpoints of live output
+pass the same point, so one answer has to cover them.
 
 ### C7. Is an event's payload JSON by contract or by convention?
 
@@ -615,14 +586,20 @@ Payloads and gate requests mix `read-only` (`src/gates.rs:65`) with `keep_from`,
 A `SessionId` is any string. Children are named `<parent>/<n>`, and `log-read` scopes are
 `<session>:<topic>` with `%` and `:` escaped.
 
-*Direction.* A grammar for ids, so `/` and `:` mean one thing.
+*Direction.* A grammar for ids, so `/` and `:` mean one thing. The folder store
+([What the record promises](design.md#what-the-record-promises)) names a file after each
+session, so the grammar also has to be safe as a file name on every platform promised, or
+the store has to encode ids.
 
 ### C14. Can a session branch from an earlier point?
 
 Sessions are linear with a parent link. Design holds that branching can be added as "a new
 session whose parent is event N of another" without changing the log.
 
-*Direction.* Prove that with a spike before freezing `session/start`.
+*Direction.* Prove that with a spike before freezing `session/start`, against the folder
+store ([What the record promises](design.md#what-the-record-promises)), where a branch is a
+new file whose start names an event in another. Say what a branch means once the session it
+came from has been removed.
 
 ### C15. Can a person answer an ask at `plugin/load`?
 
@@ -638,15 +615,6 @@ Design lists "a timer that raises signals" as still to do for the core tier.
 *Direction.* Decide whether it is the core's, the loop's, or an extension's
 ([G4](#g4-how-does-an-extension-raise-a-signal-or-resume-a-run)).
 
-### C17. Can anything ever leave the log?
-
-The log only grows, and an event's id is its position. Deleting a session, keeping events
-for a limited time, erasing what a person asked to have erased, or simply bounding the
-file's size all mean removing events.
-
-*Direction.* Decide whether a store may drop whole sessions (ids keep their numbers, gaps
-are allowed) and nothing smaller, and say what readers must then tolerate.
-
 ### C18. How many processes may use one log?
 
 One. A log has one writer, and the file store locks the file when it opens it, so two
@@ -655,16 +623,8 @@ terminals cannot work in the same workspace at once.
 *Direction.* Decide whether one process per log is the contract, with a service that owns
 the log and serves the others
 ([H11](#h11-is-there-a-front-end-other-than-a-rust-program)), or whether readers may share.
-
-### C19. What exactly is promised about resuming, and is replay promised at all?
-
-Built: an unfinished run is continued from the log, and a tool call whose fate is unknown
-is repeated only if its tool is replay-safe. Decided against for now: rebuilding a plugin
-by replaying its host calls. The core's own docs still say a run "can be resumed or
-replayed".
-
-*Direction.* Promise resumption, with the rule for each case written as a guarantee (never
-run twice unless replay-safe), and say plainly that replay is not promised.
+A file per session ([What the record promises](design.md#what-the-record-promises)) does
+not by itself allow two writers: ids are one sequence for the workspace.
 
 ### C20. Where do images and large results live?
 
@@ -672,7 +632,9 @@ In the log, as base64 inside the events that carry them.
 
 *Direction.* Decide whether the core has a reference to stored bytes (a kind of `Content`
 and `Part` that names a blob, and a store beside the log). The kind can be added later, but
-every log written before then holds the bytes.
+every log written before then holds the bytes. Removing a session
+([What the record promises](design.md#what-the-record-promises)) would then have to remove
+its bytes too, and bytes two sessions share would need an owner.
 
 ## D. Core: gates, capabilities and scopes
 
@@ -886,8 +848,14 @@ the host must read it).
 
 It can learn it is stopping; it cannot say how far it has got.
 
-*Direction.* Decide with [C1](#c1-is-there-anything-a-listener-sees-that-is-not-logged):
-progress is the same kind of passing output.
+[What the record promises](design.md#what-the-record-promises) decides where it goes: to a
+live channel in the loop and, at a coarse grain, into checkpoints in the log, reported
+through the call scope. A native tool reaches the call scope; an add-on does not.
+
+*Direction.* A new import interface for it (imports may be added after 1.0), or a function
+on `session`, which [E7](#e7-may-an-existing-interface-gain-a-function) has to allow first.
+Decide whether it is needed at 1.0: the shipped `bash` is an add-on, and a long command is
+the case that wants it most.
 
 ### E15. What trail does a tool call made by an add-on leave?
 
@@ -1029,8 +997,13 @@ feature-gated.
 provider entry only changes how the provider's own client reads the response; nothing
 reaches the terminal until the message is committed.
 
-*Direction.* A defaulted streaming method on `Provider`, once
-[C1](#c1-is-there-anything-a-listener-sees-that-is-not-logged) says where the pieces go.
+Decided in [What the record promises](design.md#what-the-record-promises): a streaming
+method with a default on `Provider`, its pieces going to a live channel in the loop and, at
+a coarse grain, into checkpoints in the log.
+
+*Direction.* What is left is the shape, to be tried against a real provider: what a piece
+is (text, thinking, a tool call being written), how a display subscribes to the channel
+and for which session, and what a checkpoint's payload holds.
 
 ### G10. Why did the model stop, and why did it fail?
 

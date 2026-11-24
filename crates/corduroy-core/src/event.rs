@@ -4,7 +4,7 @@
 //! agent took, an observation from a tool, a plugin being loaded. Each event records who
 //! produced it ([`Source`]) and, where it applies, which earlier event it answers (`cause`).
 //! The log is the single source of truth: the conversation shown to a model is a projection of
-//! it, and a run can be resumed or replayed from it.
+//! it, and a run can be read back and resumed from it.
 //!
 //! One stream holds many *sessions*: conversations, each with its own history. An event that
 //! belongs to one names it ([`SessionId`]); events about the harness as a whole, such as a

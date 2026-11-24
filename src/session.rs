@@ -2,7 +2,7 @@
 //!
 //! The loop never changes a conversation in place. Each step returns [`Effect`]s, and the
 //! [`Journal`] turns them into events: the conversation a model sees is whatever the
-//! `message` events add up to. A run can therefore be resumed, replayed or inspected from
+//! `message` events add up to. A run can therefore be resumed, read back or inspected from
 //! the log alone, and every plugin sees the same history the model does.
 //!
 //! One stream holds many sessions. Each begins with a `session/start` event, and every event

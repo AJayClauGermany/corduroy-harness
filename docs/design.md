@@ -54,7 +54,7 @@ together:
 | --- | --- |
 | An add-on can do only what it was granted | The reason growth can be allowed at all. The person approves *what a thing may do*, not how it works, so the agent can give itself only what the person would have given it. This one leads. |
 | A plugin leaves nothing behind when unloaded | The undo. Something the agent built wrongly is unplugged, and it tries again from a clean state. |
-| The run is durable | The safety net. When something goes wrong the run can be stopped, read, and recovered, in the same run or another. |
+| The run is durable | The safety net, and the account. When something goes wrong the run can be stopped, read, and recovered, in the same run or another; and what the agent did can be reviewed afterwards, by the person and by the agent ([What the record promises](#what-the-record-promises)). |
 
 **What 1.0 is measured against.** Two uses, and every other answer is judged by them:
 
@@ -662,7 +662,7 @@ failure has been dealt with.
 | --- | --- |
 | A sandboxed kernel | That what the agent starts (an MCP server it wrote included) can be confined through the kernel trait alone. |
 | Another harness connected as a plugin | That a long-lived connection exchanging messages fits over a synchronous core. The hardest test of whether the small core forces a design. |
-| A second store for the log | That the `Log` trait is enough for a store that is not the file. |
+| A second store for the log | That the `Log` trait is enough for a store that is not the file: a folder with a file per session, read on request ([What the record promises](#what-the-record-promises)). |
 | The test-driven pair, end to end | The second [measured use](#what-it-is-for): two agents with different loops, tools and views finishing one task. It needs an add-on to define a loop and sessions to differ. |
 
 Not waited on: a scheduler and kernel snapshots, which serve unattended work and come after
@@ -683,9 +683,9 @@ Two rules came with the capabilities that reach outside:
   For the same reason the host refuses URLs a parser could read differently from its own
   check: a backslash, whitespace, a control character, or a user name before the host.
 - **Time and randomness are host calls.** A WebAssembly plugin has no clock of its own, so
-  given the same host-call results it computes the same thing. That is what makes
-  [replaying a plugin](#durability) possible, and WASI stays out of the linker to
-  keep it true. The guest-language spike confirmed it for JavaScript and Python, with a
+  given the same host-call results it computes the same thing. That keeps
+  [re-executing a plugin](#what-the-record-promises) possible, though it is not promised,
+  and WASI stays out of the linker to keep it true. The guest-language spike confirmed it for JavaScript and Python, with a
   catch: built without WASI their clocks trap or stand still and their random numbers repeat,
   so `clock`, `random` and `log` are needed as soon as either language is.
 
@@ -754,6 +754,116 @@ input. Its uses are covered elsewhere:
 **Decided against:** a Cordis-style `bail` dispatch mode, in which the first listener to
 return a value decides. It is more general, but it gives events return values, and "first
 wins" lets a permissive plugin loaded early pre-empt a strict one.
+
+## What the record promises
+
+The log is for three things, in this order: **recovering** a run, **reviewing** what an
+agent did, and **the agent reading its own history** to find what to build next. Review is
+part of the purpose and not a convenience: a person can let an agent extend itself because
+what it did, what it was refused and where it failed can be checked afterwards, failures
+included. What follows is decided; which parts are built is said for each.
+
+**Everything that can be logged is logged.** That is the working assumption every other
+answer here is read against. What should be kept *out* (a private value in a prompt or a
+tool call) is not decided, and stays in [Open questions](open-questions.md) (C6).
+
+**How it is read.** By session, filtered, in order: the tool calls, the asks and their
+answers, where a run stopped. A reader wants the shape of a run first (search, reproduce,
+fix) and the single steps under it on request. That outline is a view a reader builds from
+the events and their causes; the log does not store one. The agent reads the same events
+(`log-read`), across sessions, to see where runs keep failing and what it should automate.
+
+**Reading back and resuming are promised; re-executing is not.** "Replay" has meant three
+things, and they are kept apart:
+
+| | What it is | At 1.0 |
+| --- | --- | --- |
+| Reading back | Walking a session's events in order to see what happened | Promised. |
+| Resuming | Continuing an unfinished run from the log ([Durability](#durability)) | Promised, as a guarantee: a tool is never run twice unless it declared that safe (`replay_safe`), and the only call ever in doubt is the one that was running when the process died. |
+| Re-executing | Feeding the log back through code to rebuild state or reproduce a run | Not promised. Nothing rules it out later: time and randomness stay host calls so that it remains possible. |
+
+What does not come back on a resume is stated, not hidden: a kernel's processes and
+variables are gone and the model is told so, and an add-on's memory is gone but for what it
+wrote through `state`. The model rebuilds what it needs. Resuming is expected to work on
+the same machine with the same build. On another machine or a later build the log is still
+read ([What is stable](#what-is-stable)), and resuming there is best effort. So that a
+reader or a resume can tell which it is, each process that opens a log records what it is:
+the program's version, the plugin world's version and the platform (*planned*; the identity
+of the machine is left out until someone needs it, since it is also something to keep
+private).
+
+**Live output is a preview; checkpoints are the record of it.** Text from a model as it
+arrives, and output from a tool while it runs, reach the terminal as they come. It is
+expected of a harness and is part of 1.0, and it is not the core's (*planned*):
+
+- *A live channel in the loop.* Fragments go to whoever displays them, at whatever grain
+  the provider or the tool gives, and are not events. The core's rule keeps no exception:
+  every event is in the log.
+- *Checkpoints in the log.* While a reply or a long tool call is under way, the loop
+  commits what has arrived since the last checkpoint as an ordinary event, at a coarse
+  grain, and always when the run is stopped or fails. A crash loses at most what came after
+  the last checkpoint, and the log shows how far the reply or the command got.
+- *The whole is still committed.* The finished message or result is one event, as now.
+  Nobody reconstructs anything from checkpoints: a reader, the model and other agents use
+  the whole one, and checkpoints matter only where no whole one exists. A view of a session
+  may hide them once it does. Nothing is overwritten.
+- *Other agents get finished messages.* A plugin or a connected harness subscribes to
+  events as today and is not in the path of every fragment.
+
+How often to checkpoint is a setting: off, every fragment, or an interval in between, a
+few seconds by default. Streamed text is then stored at most about twice, and the number of
+events is bounded by time and not by tokens. A reply cut off part-way is not continued from
+its checkpoint, because providers differ on whether they can: on resume the partial text is
+evidence for the reader and the request is made again. This needs a streaming method with
+a default on `Provider`, a way for a running tool to report output through the call scope
+(the one piece in the core, to be marked before the freeze) and topics for the checkpoints.
+The split between channel and checkpoints is the decision; the mechanism is confirmed
+against a real provider before it is fixed.
+
+**Whole sessions may leave the log, and nothing smaller.** The stream never removes or
+rewrites an event: while a program runs, the log only grows. A store may remove a whole
+session, with the sessions it started, as maintenance the person asks for through the
+command (*planned*):
+
+- Ids are never reused. A reader tolerates gaps in them, a cause that names an event no
+  longer there, and an event or a parent that names a session the log does not know.
+- A removal made through the program leaves a marker: which session, and when. The record
+  then says that something is gone, though not what it was.
+- Editing the files by hand is outside the contract. What it leaves behind is covered by
+  the same tolerance, with no marker.
+- Only a person removes at 1.0. An agent removing history would be a capability of its own,
+  apart from reading the log, never granted by default and always leaving the marker; the
+  set of capabilities grows after 1.0, so it can wait.
+- Nothing expires by itself at 1.0. Keeping history for a limited time, or a nudge when it
+  grows large, is policy that can be built on removal later.
+
+**A read is complete; memory is not promised.** `events()`, `session()` and `matching()`
+promise a complete answer about what the log holds, not that the stream holds it in memory.
+Three things are marked in the core before the freeze for that (*planned*): the `Log` trait
+gains a read side with a default, so a store can be asked for what the stream has let go;
+reads that are paged and may fail are the route that can reach the store; and the existing
+ones stay as the convenient form. At 1.0 a store may still load everything.
+
+**The second store is a folder.** The [second store the freeze waits on](#what-the-freeze-waits-on)
+is this one (*planned*). A workspace is a folder holding one workspace file and one file per
+session. To the stream it is one log with one order of ids; the store decides where each
+event goes:
+
+| File | Holds |
+| --- | --- |
+| The workspace file | Events that belong to no session (plugins loaded and unloaded, what add-ons keep through `state`), each session's start with its parent, and the markers of removed sessions. It is also the list of sessions. |
+| A session's file | That session's events. |
+
+Opening a workspace reads the workspace file and the sessions in use, so starting up does
+not grow with history; an old session is read when asked for, removing one deletes a file,
+and searching history is searching files. A commit that touches two files (a session
+starting) must still be stored whole or not at all, which is the store's to solve and part
+of what the proof shows. Whether it replaces the single file as the default is decided once
+it works; the single file stays as the simple store either way. Anything faster than
+paging through old sessions (an index, search) is an add-on's or an extension's to build
+beside the log, not a promise of the log. Branching a session from an earlier point fits
+the layout as a new file whose start names the event it branches from, and is still an
+open question (C14).
 
 ## Durability
 
@@ -1093,6 +1203,13 @@ the step it waits on is done.
     boundary. A plugin can ask which session it serves (the `session` capability), and
     `todo` keeps a list per session. A run can be stopped, at any point, and Ctrl-C in the
     `corduroy` command does it.
+12. What [the record promises](#what-the-record-promises), none of it started: the read
+    side of `Log` and paged reads that may fail; the folder store, as the second store the
+    freeze waits on; removing a session through the command, with its marker, and readers
+    that tolerate what is gone; an event for what each process runs as; then the live
+    channel, a streaming method on `Provider`, output from a running tool and checkpoints,
+    tried against a real provider before their shapes are fixed. `EventStream::replay`
+    loads a log and re-executes nothing, so it gets a name that says so before the freeze.
 
 ## Open questions
 
@@ -1123,8 +1240,10 @@ settled by 1.0 is there as well, and one that can wait is only here.
   queue would fix it at the cost of a commit returning before its listeners ran.
 - **Progress from a running tool.** A tool can learn that its run is stopping, but cannot
   say how far it has got while it runs; its result comes when it returns. An event it
-  emits is the way today. A progress call in the call scope, and behind the `session`
-  capability, would add it without changing a contract.
+  emits is the way today. Decided, not built: output reported through the call scope goes
+  to the live channel and into checkpoints
+  ([What the record promises](#what-the-record-promises)). Still open is how an add-on
+  reaches it.
 - **Providers of our own.** `corduroy-providers` still builds on oi-kit-providers, an
   alpha, for the HTTP side of each model's API. It is confined to that crate, behind the
   harness's `Provider`, so replacing it (with clients of our own for the two or three APIs
