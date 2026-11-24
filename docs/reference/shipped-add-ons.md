@@ -101,6 +101,20 @@ Files and directories summarised by a model of its own, so the main model reads 
 Tool: `summarize` (`paths`, `question`; read-only). Config: `model` (required; must be served
 and reachable by the `llm` grant), `max_bytes` (200 KB). Grants: `fs-read`, `llm`.
 
+## review
+
+A second model reviews the change in the workspace: what `git diff <base>` shows, and the
+files git does not track yet, sent once through `llm` with what the change is meant to do.
+Its findings are the tool's result, for the model in the loop to fix. The reviewer has no
+tools of its own; it sees what it is sent. In the default agent it is the other vendor's
+model when both `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` are set, else the same model.
+
+Tool: `review` (`goal`, `base`, `paths`: more files to read whole; read-only). With no
+change and no `paths`, the reviewer is not asked. Config: `model` (required; must be served
+and reachable by the `llm` grant), `kernel` (`shell`), `dir` (the repository; the kernel's
+directory by default), `base` (`HEAD`), `max_bytes` (200 KB), `instructions` (more for the
+reviewer to look for). Grants: `kernel`, `fs-read`, `llm`.
+
 ## compact
 
 Auto-compaction: provides the `compaction` service the harness asks before each step. When a

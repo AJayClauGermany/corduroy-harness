@@ -1054,6 +1054,15 @@ Two things are decided about the model
 started with, and whoever starts a child may choose its model from those it is allowed,
 knowing what each can do.
 
+The first use asked for is exactly this: one model writing a change and another, from
+another vendor, reviewing it. What can be built without deciding this is the `review` add-on
+(the other model asked once through `llm`, with no tools) and two sessions run from the
+command line with `--provider` and `--model`
+([Have a second model review the work](how-to/review-with-a-second-model.md)). There the model
+belongs to the process, not the session: nothing in the log says which model a session ran
+on, and coming back to a session without the flags runs it on the main model. A reviewer that
+is a child session on its own model, with its own tools, waits on this.
+
 *Direction.* Decide what `session/start` may carry, since that is in the log. At least the
 model, the loop, the tools offered and the grants its tool calls run under.
 

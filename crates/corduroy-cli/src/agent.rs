@@ -316,28 +316,60 @@ impl AgentFile {
     /// The default agent for a workspace with no agent file: the model from the environment
     /// (`ANTHROPIC_API_KEY`, then `OPENAI_API_KEY`, else a local Ollama), the Pi toolset on a
     /// shell in the workspace (PowerShell on Windows, told to the model, `sh` elsewhere), the
-    /// approval and inspect gates, and the Goose-baseline plugins (skills, hints, todo,
-    /// memory, recall, summarize, compact, subagents).
+    /// approval and inspect gates, the Goose-baseline plugins (skills, hints, todo, memory,
+    /// recall, summarize, compact, subagents) and `review`. With both keys set, `review` asks
+    /// the other vendor's model, from a second provider named `reviewer`.
     #[must_use]
     pub fn default_text() -> String {
-        let (kind, model) = if std::env::var_os("ANTHROPIC_API_KEY").is_some() {
-            ("anthropic", "claude-sonnet-5-5")
-        } else if std::env::var_os("OPENAI_API_KEY").is_some() {
-            ("openai", "gpt-5")
-        } else {
-            ("ollama", "qwen3")
-        };
-        let (shell, said) = if cfg!(windows) {
-            ("powershell", " Commands run in PowerShell.")
-        } else {
-            ("shell", "")
-        };
-        DEFAULT
-            .replace("{{kind}}", kind)
-            .replace("{{model}}", model)
-            .replace("{{shell}}", shell)
-            .replace("{{shell_said}}", said)
+        let set = |key: &str| std::env::var_os(key).is_some();
+        default_for(set("ANTHROPIC_API_KEY"), set("OPENAI_API_KEY"))
     }
+}
+
+/// The provider kind and model the default agent uses for each vendor.
+const ANTHROPIC: (&str, &str) = ("anthropic", "claude-sonnet-5-5");
+const OPENAI: (&str, &str) = ("openai", "gpt-5");
+
+/// The default agent when the keys for Anthropic and for `OpenAI` are, or are not, set.
+fn default_for(anthropic: bool, openai: bool) -> String {
+    let (kind, model) = if anthropic {
+        ANTHROPIC
+    } else if openai {
+        OPENAI
+    } else {
+        ("ollama", "qwen3")
+    };
+    // With both keys, the vendor the loop does not use reviews its work.
+    let (reviewer, review_model, review_said) = if anthropic && openai {
+        let (kind, model) = OPENAI;
+        (
+            format!(
+                "\n# A second provider, so another vendor's model reviews what the main one \
+                 writes.\n[providers.reviewer]\nkind = \"{kind}\"\nserve = [\"{model}\"]\n"
+            ),
+            model,
+            "Another vendor's model reviews",
+        )
+    } else {
+        (
+            String::new(),
+            model,
+            "The same model, with fresh eyes, reviews",
+        )
+    };
+    let (shell, said) = if cfg!(windows) {
+        ("powershell", " Commands run in PowerShell.")
+    } else {
+        ("shell", "")
+    };
+    DEFAULT
+        .replace("{{reviewer}}", &reviewer)
+        .replace("{{review_said}}", review_said)
+        .replace("{{review_model}}", review_model)
+        .replace("{{kind}}", kind)
+        .replace("{{model}}", model)
+        .replace("{{shell}}", shell)
+        .replace("{{shell_said}}", said)
 }
 
 /// The agent `corduroy init` writes, and the one used when there is no agent file.
@@ -356,7 +388,7 @@ kind = "{{kind}}"   # anthropic, openai, ollama, *-compatible, or a provider oi-
 serve = ["{{model}}"]   # models plugins may ask through the `llm` capability
 # max_tokens = 16000   # the most one answer may take; by default, the model's own limit
 # thinking = "medium"  # off, low, medium, high or max, for a model that can think
-
+{{reviewer}}
 [kernels.shell]
 kind = "{{shell}}"      # a persistent shell in {workspace}: shell (sh) or powershell
 
@@ -426,6 +458,15 @@ name = "summarize"
 path = "summarize.wasm"
 config = { model = "{{model}}" }
 grants = { fs-read = ["{workspace}", "{workspace}/*"], llm = "{{model}}" }
+
+# {{review_said}} the changes in the workspace (git diff and new files) and says
+# what is wrong, for the agent to fix before it reports the work done. To have another model
+# review, serve it from a provider and name it here and in the llm grant.
+[[plugins]]
+name = "review"
+path = "review.wasm"
+config = { model = "{{review_model}}", kernel = "shell", dir = "{workspace}" }
+grants = { fs-read = ["{workspace}", "{workspace}/*"], kernel = "shell", llm = "{{review_model}}" }
 
 # Hands a task to a sub-agent with the same tools and its own conversation, and waits for
 # its answer. The sub-agent's own tool calls pass the same gates.
@@ -779,12 +820,43 @@ mod tests {
     fn the_default_agent_parses() {
         let file = AgentFile::parse(&AgentFile::default_text()).unwrap();
         assert_eq!(file.provider, "main");
-        assert_eq!(file.plugins.len(), 12);
+        assert_eq!(file.plugins.len(), 13);
         assert_eq!(
             file.plugins.iter().filter(|plugin| plugin.enabled).count(),
-            11
+            12
         );
         assert!(file.plugins[0].grants.contains_key("kernel"));
+    }
+
+    /// The model the default agent's `review` asks, and the providers it has.
+    fn reviewing(anthropic: bool, openai: bool) -> (String, String, Vec<String>) {
+        let file = AgentFile::parse(&default_for(anthropic, openai)).unwrap();
+        let review = file.plugins.iter().find(|p| p.name == "review").unwrap();
+        let model = review.config.as_ref().unwrap()["model"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(review.grants.contains_key("llm"));
+        let providers = file.providers.keys().cloned().collect();
+        (file.model, model, providers)
+    }
+
+    #[test]
+    fn with_both_keys_the_other_vendor_reviews() {
+        let (main, review, providers) = reviewing(true, true);
+        assert_eq!((main.as_str(), review.as_str()), (ANTHROPIC.1, OPENAI.1));
+        assert_eq!(providers, ["main", "reviewer"]);
+        let file = AgentFile::parse(&default_for(true, true)).unwrap();
+        assert_eq!(file.providers["reviewer"].serve, [OPENAI.1]);
+    }
+
+    #[test]
+    fn with_one_key_the_same_model_reviews() {
+        for (anthropic, openai) in [(true, false), (false, true), (false, false)] {
+            let (main, review, providers) = reviewing(anthropic, openai);
+            assert_eq!(main, review);
+            assert_eq!(providers, ["main"]);
+        }
     }
 
     #[test]

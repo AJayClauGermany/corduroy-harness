@@ -69,7 +69,8 @@ See [Events](events.md) for how to read a line. The first lines each process wri
 
 **`init`** Write the default agent to `<workspace>/corduroy.toml`. Refuses if the file
 exists. The model is chosen from the environment: Anthropic if `ANTHROPIC_API_KEY` is set,
-else OpenAI if `OPENAI_API_KEY` is set, else a local Ollama.
+else OpenAI if `OPENAI_API_KEY` is set, else a local Ollama. With both keys set, it also writes a second
+provider, `reviewer`, so the `review` add-on asks OpenAI's model about Anthropic's work.
 
 ## What is shown while a run goes
 
