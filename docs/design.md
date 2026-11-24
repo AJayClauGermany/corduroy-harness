@@ -373,12 +373,12 @@ Everything else is a plugin, and a plugin may itself offer primitives to other p
 | Sessions | built | Many sessions, each with an id and an optional parent. Every event of a run names its session; events about the plugin tree name none. Whatever is done for a session (a tool call, rendering a prompt part, asking a gate, delivering an event of the session) is done in its call scope (`corduroy_core::call`), so the events a plugin raises then carry the session, and a plugin can ask which session it serves (the `session` capability) and keep something per session: `todo` keeps a list for each, so a sub-agent's plan does not overwrite its parent's. A session may be started by another for a task (a child), and nests at most `MAX_DEPTH` deep. |
 | Tool lifecycle | built | `tool/call`, `tool/start` and `tool/result` are each committed as they happen, per call; `ToolSpec::replay_safe` says whether a call that was running at a crash may be repeated, and `read_only` whether it changes anything. A run can be stopped (`Harness::stop`): a running tool learns it through its call scope (`call::stopping`, the `session` capability's `stopping`), the calls not yet begun are answered as not run, and the run ends as stopped. A result is a list of content blocks, text or images (`ToolOutput`, `content` in the WIT), which reach the model as they are; `tool/result` records the result's text as `output` and, when it is anything but one block of text, the blocks as `content`, so a finished result is handed over from the log after a crash. Still to do: progress and cancellation, which need no change to this contract (see [Open questions](#open-questions)). |
 | Gates | built | A fourth registry. A gate is asked at a named decision point before something happens and answers allow, deny or ask; the strictest answer wins and is recorded. Reachable from WebAssembly through the `gate` export. Decision points are declared: the core declares `tool/call` and `plugin/load`, an extension declares the points it asks at, and asking at an undeclared point is denied. Still to do: letting a person answer an ask at `plugin/load`. See [Events, gates and hooks](#events-gates-and-hooks). |
-| Waits and signals | built | A run whose tool call a gate asked about waits for `Harness::answer`. In general, a tool call may wait for a named signal: whatever serves it says so through `corduroy_core::call::wait_for`, the call gets a placeholder and a `tool/wait`, the loop stops the run before the model is asked again, and a `signal` event (`Harness::signal`) brings the result. A child session's end is such a signal, which the harness raises itself. All of it is in the log, so a wait survives a restart. Still to do: a timer that raises signals. |
+| Waits and signals | built | A run whose tool call a gate asked about waits for `Harness::answer`. In general, a tool call may wait for a named signal: whatever serves it says so through `corduroy_core::call::wait_for`, the call gets a placeholder and a `tool/wait`, the loop stops the run before the model is asked again, and a `signal` event (`Harness::signal`) brings the result. A child session's end is such a signal, which the harness raises itself. All of it is in the log, so a wait survives a restart. Still to do: a way for an extension to raise a signal; a timer is then an extension ([What the core is made of](#what-the-core-is-made-of)). |
 | Services | built | A fifth registry, `Services`: calls between plugins in JSON text, with the caller's name, across the WebAssembly boundary in both directions. See [Plugins extending plugins](#plugins-extending-plugins). |
 | Capabilities | sixteen | The mechanism is settled; the set grows (below). |
 | Kernels | built | The trait and registry, and `Kernel::spawn` for long-lived processes with pipes (MCP servers). `ShellKernel` is an implementation, not a primitive, and lives in `corduroy-shell`. |
 | Conversation projection | built | Messages, and the `compaction` event: the messages before `keep_from` stay in the log and the conversation but are hidden from the model, which sees the summary in their place. The harness cuts only before the current turn; when, and the summary, come from the plugin providing the `compaction` service, asked by a loop step (`CompactOperation`). |
-| Model access | built | The loop asks the provider registered under a name in `Providers`, on every request, so a plugin supplies the model and unloading it takes the model away. `Harness::new` registers its argument there for convenience. For plugins, the core's `Models` registry: one completion, synchronously, by model name; a `provider` plugin can serve its models there. |
+| Model access | built | The loop asks the provider registered under a name in `Providers`, on every request, so a plugin supplies the model and unloading it takes the model away. `Harness::new` registers its argument there for convenience. For plugins, the core's `Models` registry: one completion, synchronously, by model name; a `provider` plugin can serve its models there. *Planned:* one request and reply for the loop and plugins, in the core, and a model that describes itself ([What the core is made of](#what-the-core-is-made-of)). |
 | Secrets and outbound requests | built | `Secrets` and `HttpClients` registries. The core checks and records; native plugins hold the values and send the requests, so an HTTP client is a plugin like a kernel is. |
 | Versioning | WIT package version, log schema version | Built: a schema version in each log's header (2, which added the time; 1 is still read), and the rule for the world in [What is stable](#what-is-stable). Still to do: a version on each plugin's stored state. |
 
@@ -391,6 +391,143 @@ for as long as the child runs: `start` makes the call wait for the child's end, 
 runs the child to its end and signals the parent, and `continue_run` picks the chain up
 after a crash wherever it stopped. A gate asking in a child surfaces on the parent's
 outcome, with the child's session on the ask.
+
+## What the core is made of
+
+Four things about the core's own shapes are decided here: what a model call is, what a model
+says about itself, that whatever a plugin contributes is called and waited for, and that the
+kinds of contribution are closed. All of it is *planned*: the code still has the shapes the
+table above describes, and [Order of work](#order-of-work) lists what changes.
+
+**A plugin asks a model as a function; anything that acts is a session.** Code uses a model
+in one of two ways. As a function: content goes in and an answer comes back (summarise this,
+is this change risky, which of these files matters), and the model cannot act. As an agent:
+the model is offered tools, picks one, something runs it, the model sees the result, and so
+on until the work is done. The second needs what the harness exists to give (the gates, a
+trail for each tool call, a wait for a person, a stop, a resume), so it always happens in a
+session the harness runs and never privately inside a plugin: `llm` offers a model no tools.
+
+A session does not have to be started by the person. The agent or an add-on starts one
+(`delegate` does, through the `sessions` service) within the limits the person set, and the
+harness runs it and keeps its record. That fits what the agent builds for itself. A tool it
+wrote is code that takes the place of model calls; where the tool needs a little judgement
+it asks a model a question; where the work needs an agent, that is a session. The
+[test-driven pair](#what-it-is-for) is then an add-on that starts two sessions and passes
+work between them, not an add-on running two loops of its own. The cost is that an add-on
+cannot make a new shape of loop out of bare model calls, so how an add-on says what a
+session's steps are (E12) and what may differ between sessions (G12) carry that weight;
+both are still in [Open questions](open-questions.md).
+
+**One description of a model call, in the core.** Whatever asks a model fills in the same
+request and reads the same reply:
+
+| | Holds |
+| --- | --- |
+| The request | The model, the system prompt, the conversation as `Message`s, and the tools offered. Only the loop offers tools. It can grow. |
+| The reply | A `Message`, what the request cost, and why the model stopped. It can grow. |
+
+These take the place of the core's `Turn`, `Completion` and bare `String`, and of the
+harness's `ModelRequest`, `ModelReply` and `Usage`, which move into the core. What is added
+later (a limit on tokens, a new kind of part) is added once and reaches the loop and plugins
+alike. Two ways of asking stay, over the one description: the loop's `Provider`, which is
+asynchronous and lives in the harness, and the core's `Model`, which is called and waited
+for and is what `llm` reaches. Going from one to the other loses nothing, where today it
+keeps only the text.
+
+- *A plugin's call is recorded with its cost.* `llm/response` gains the usage and the reason
+  the model stopped, so a review of the log shows what the agent's own tools spent, and
+  whether code it wrote did make the tokens go further.
+- *A plugin's request carries what a message can*, images included.
+- *How the request crosses the WebAssembly boundary* (a typed record, or the JSON a
+  `message` event holds) is still open (E8).
+
+**The grant is the one list of models.** `llm` is scoped by model, and that is the only
+thing that says which models an add-on may ask. The `serve` key of a provider entry, a
+second list that had to be kept in step with the grants, goes. A plugin names a model as
+`<provider>/<model>`: the provider's name in the agent file, then the provider's own name
+for the model, divided at the first `/`. Grants are written the same way, with the allow and
+deny patterns every scope has, so "only these" and "all but this one" are both a grant. Two
+providers that offer a model of the same name no longer collide.
+
+**A model is anything that takes content and returns content.** A chat model is one kind.
+An embedding model returns a vector; a decision model returns a yes or a no (is this text
+an injected instruction), and it is the tool or the loop that asked which decides what to
+do with it. The core does not list the kinds. The request is still messages, and the reply
+is a message whose parts are whatever that model returns. For that, `Part` gains one general
+kind, a typed value (what kind of data, and the data), so the core need not learn each new
+kind of model; `Part` is already marked for growth. A vector database or a search index is
+not a kind of thing in the core: it is a service an extension or an add-on provides, over an
+embedding model if it wants one.
+
+**A model describes itself.** The core has a small description that can grow, in which
+every field may be unknown: what the model takes (text, images, tools), what it returns,
+how much context it holds, how much it may write. `Model` and `Provider` each gain a method
+with a default that knows nothing. A provider fills in what it knows, the agent file states
+or corrects it for a model, and the loop and plugins read it in one place. "Unknown" is an
+answer every reader has to cope with, since a model served on this machine often reports
+nothing. `compact` then starts from a share of the model's own context, and its fixed
+number becomes an override; one number for every session cannot be right once sessions
+differ in their model.
+
+- *The agent can see its models, if it is given the means.* Through `llm`, a plugin lists
+  the models its grant reaches, with their descriptions, as `tools.list` leaves out what a
+  scope does not reach. The agent sees them only when an add-on that offers this is loaded.
+- *A session keeps its model.* Choosing is for the next session or a child, not for the run
+  under way. What `session/start` carries is G12.
+- *Rules about the choice are policy.* That a child may not run on its parent's model, or on
+  one of the same family, is a gate's to say, at a decision point for starting a session,
+  which does not exist yet (D3).
+- *Cost is reported for each call, not described.* It comes with the usage, as far as the
+  provider says, and goes into the log: the tokens read, the tokens written, those spent on
+  reasoning, and what the call cost if the provider states it. A figure that is absent means
+  the provider did not say; zero means it said the call was free, as a model on this
+  machine may. A change of price needs nothing: each call records what it cost when it was
+  made.
+
+**Call and wait is the core's contract, for good.** Everything a plugin contributes (a
+tool, a service, a gate, a model, an HTTP client, a kernel) is called, and its caller waits
+until it returns. Add-ons work this way whatever is decided: a WebAssembly guest is called
+and returns, in every guest language. So the question only ever concerned extensions, which
+are native and have threads.
+
+- *A call that would take long does not hold its caller.* It says its result will come with
+  a signal (`call::wait_for`) and returns; the run waits in the log, and the signal takes it
+  on. A wait in the log survives a restart, which a wait in memory does not, and it is also
+  the answer on a machine with one thread.
+- *A signal resumes; an event is watched.* A signal takes a waiting run on and carries any
+  outcome: a result, a failure, or just the next message from the other side. Progress (now
+  on the third task) is an event: anything may listen, and nothing has to wait for it. An
+  agent that wants to react part-way waits for the next message and not for the last one:
+  it gets it, decides, and waits again. That is how two agents pass work back and forth.
+- *An extension that holds a connection keeps a thread of its own*, as `corduroy-mcp` does.
+  Asynchrony lives in the loop (`Provider`, `Loop`, `Operation`), which is stable and not
+  frozen, and keeps growing there. No asynchronous form of a core trait is marked for
+  growth, and a frozen contract gains no trait, so this is for good.
+- *Something outside may speak first.* A pull request is opened, or a connected harness says
+  something nobody here was waiting for. It arrives through an extension as an event, and
+  starts a session or resumes one. Automations built on that may ship after 1.0; the way
+  for an extension to raise a signal and to start a session has to exist before the freeze
+  (G4).
+
+This is the working answer, and one of the proofs [the freeze waits
+on](#what-the-freeze-waits-on), another harness connected as a plugin, is what confirms it
+or shows it wrong. If it is wrong the core changes, before 1.0.
+
+**The kinds are closed at eight.** Tools, prompt parts, gates, services, models, kernels,
+secrets and HTTP clients are everything a plugin, extension or add-on, contributes as far
+as the core is concerned. An extension also contributes to the loop's own registries
+(providers, steps, loops), which are stable and may gain more. After the freeze there is no
+ninth: a new kind is a registry some extension provides, which an add-on reaches as a
+service. The test for a ninth was whether it could not be made from the eight together with
+sessions and events, and none of the candidates passed it:
+
+| Candidate | Where it goes |
+| --- | --- |
+| Embeddings, classifiers and other models that are not chat | Models, as above. |
+| Search, a vector database | A service. |
+| Stored bytes (images and large results, which the log holds as text) | Not something plugins contribute. Where a store keeps a large payload is the store's business; whether a message may name bytes kept elsewhere is still open (C20). |
+| Asking the person a question | Not a gate, which decides whether something may happen, and not a registry: a tool that asks and waits for the reply. It is in 1.0, and needs one agreed form before front ends are written: an event a front end must show, and a signal that carries the reply (D10). |
+| Schedules and timers | An extension that raises signals (G4). |
 
 ## Three tiers: core, extensions, add-ons
 
@@ -527,9 +664,10 @@ things to grow around it, and one frozen with such an assumption could not lose 
 So the core and the loop keep building this way, CI keeps checking it, and whatever needs an
 operating system goes behind `std` or into an extension. It is where the design steers, not
 a veto: when a requirement cannot be met by an extension over the core as it is, the core
-changes, and it changes before 1.0. What is not yet known is whether a small, synchronous
-core forces a design that an extension cannot work around; the extensions
-[the freeze waits on](#what-the-freeze-waits-on) are how that is found out.
+changes, and it changes before 1.0. Whether a small, synchronous core forces a design that
+an extension cannot work around has a working answer, that it does not
+([What the core is made of](#what-the-core-is-made-of)); the extensions
+[the freeze waits on](#what-the-freeze-waits-on) are how that is confirmed.
 
 **The core** (`corduroy-core`) is `no_std` and needs only `alloc`. Its `std` feature, on by
 default and still free of dependencies, adds the standard library's locks, a call scope per
@@ -623,7 +761,8 @@ keep working.
   type gaining a field, a trait gaining a method with a default, a message gaining a kind
   of part). What is not marked is closed for good. The marked places are few on purpose,
   since each is an exception to "read it once and it stays true", and the set of primitives
-  has to be complete before 1.0 because it cannot be added to after.
+  has to be complete before 1.0 because it cannot be added to after. For the core that set
+  is decided: [eight kinds](#what-the-core-is-made-of) of thing a plugin contributes.
 - **Stable**: changes only by adding. New things arrive, and nothing written against what
   was there breaks.
 
@@ -661,7 +800,7 @@ failure has been dealt with.
 | Proof | What it shows |
 | --- | --- |
 | A sandboxed kernel | That what the agent starts (an MCP server it wrote included) can be confined through the kernel trait alone. |
-| Another harness connected as a plugin | That a long-lived connection exchanging messages fits over a synchronous core. The hardest test of whether the small core forces a design. |
+| Another harness connected as a plugin | That a long-lived connection exchanging messages fits over a core whose every trait is [called and waited for](#what-the-core-is-made-of). The hardest test of whether the small core forces a design. It has to show four things: a task handed over and its result received through a wait that survives a restart; the other side's progress seen here as events; a stop here reaching the other side; and a message the other side sends unasked getting in. |
 | A second store for the log | That the `Log` trait is enough for a store that is not the file: a folder with a file per session, read on request ([What the record promises](#what-the-record-promises)). |
 | The test-driven pair, end to end | The second [measured use](#what-it-is-for): two agents with different loops, tools and views finishing one task. It needs an add-on to define a loop and sessions to differ. |
 
@@ -1229,6 +1368,14 @@ the step it waits on is done.
     the folder store, as the second store the freeze waits on; then the live channel, a
     streaming method on `Provider`, output from a running tool and checkpoints, tried
     against a real provider before their shapes are fixed.
+13. What [the core is made of](#what-the-core-is-made-of). *Decided, none of it built:* the
+    one request and reply in the core, with the general typed part, usage that counts
+    reasoning and carries a cost, and the reason a model stopped; `Model` and the `llm`
+    interface taking them, with a plugin's calls recording their usage; models named
+    `<provider>/<model>` and the `serve` key gone; a model's description, read by the loop
+    and by `compact`; the form of a question a tool puts to the person; a way for an
+    extension to raise a signal and to start a session. Then the connected harness, the
+    proof that calling and waiting is enough.
 
 ## Open questions
 
