@@ -33,6 +33,8 @@ Using the `corduroy` command:
 
 - [Connect a model](how-to/connect-a-model.md): Anthropic, OpenAI, Ollama, any compatible
   endpoint, or a small model on your own machine.
+- [Have a second model review the work](how-to/review-with-a-second-model.md): Claude writes,
+  GPT reviews, or the other way round.
 - [Grant an add-on what it needs](how-to/grant-capabilities.md), and find out why one did not
   start or was refused.
 - [Decide what runs without asking](how-to/control-approval.md): permission modes, allow and

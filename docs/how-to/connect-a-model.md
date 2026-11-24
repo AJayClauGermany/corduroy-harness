@@ -109,6 +109,9 @@ grants = { fs-read = ["{workspace}", "{workspace}/*"], llm = "claude-haiku-5-5" 
 
 Using a smaller model here than the main one saves the main model's context and cost.
 
+The same way, the `review` add-on can have a model from another provider check the main
+model's work: see [Have a second model review the work](review-with-a-second-model.md).
+
 ## Check it
 
 ```bash

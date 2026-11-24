@@ -16,6 +16,7 @@ members = [
     "pi-tools",
     "plugin-manager",
     "recall",
+    "review",
     "skills",
     "subagents",
     "summarize",

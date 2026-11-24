@@ -129,6 +129,10 @@ name = "providers"
 required-features = ["wasm"]
 
 [[test]]
+name = "review"
+required-features = ["wasm"]
+
+[[test]]
 name = "subagents"
 required-features = ["wasm"]
 
