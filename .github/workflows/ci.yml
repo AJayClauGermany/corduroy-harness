@@ -74,8 +74,9 @@ jobs:
         with:
           tool: nextest
       - run: cargo build -p corduroy-cli
-      - run: cargo clippy -p corduroy-core -p corduroy-shell -p corduroy-std --all-targets -- -D warnings
-      # The core, and the PowerShell kernel; the POSIX shell's tests need a POSIX system.
-      - run: cargo nextest run -p corduroy-core -p corduroy-shell --profile ci -E "package(corduroy-core) or test(/powershell/)"
+      - run: cargo clippy -p corduroy-core -p corduroy-jsonl -p corduroy-shell -p corduroy-std --all-targets -- -D warnings
+      # The core, the event log's file, and the PowerShell kernel; the POSIX shell's tests need
+      # a POSIX system.
+      - run: cargo nextest run -p corduroy-core -p corduroy-jsonl -p corduroy-shell --profile ci -E "package(corduroy-core) or package(corduroy-jsonl) or test(/powershell/)"
         env:
           CORDUROY_REQUIRE_POWERSHELL: "1"
