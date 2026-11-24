@@ -60,6 +60,11 @@ gate asking you first. If you switch `approval` to `auto`, `bash` is unconfined.
 
 - **A kernel is not a sandbox.** Granting an add-on `kernel = "shell"` gives it your shell.
   Which kernel an add-on may use *is* the security decision.
+- **The shell sees the command's environment.** That is where a provider's API key is, so
+  the model can print it with `bash`, and what it prints is in the log.
+- **A workspace's `corduroy.toml` is used as soon as you run `corduroy` there.** It grants
+  capabilities, names kernels and starts MCP servers. Read the file of a repository someone
+  else wrote before you do.
 - **Extensions are not checked.** An extension kind you compile in can do anything.
 - **The model's own message is logged before any gate sees it.** If the model writes a
   secret into a tool call, a denial does not keep it out of the log.
@@ -80,3 +85,25 @@ gate asking you first. If you switch `approval` to `auto`, `bash` is unconfined.
   through the filesystem capabilities alone.
 - Read `corduroy log` for `capability/denied` and `gate/decision` events when something was
   refused; they say who asked for what.
+
+## What 1.0 will promise
+
+Everything above describes what is built. What 1.0 is to promise is decided, and most of it
+is not built yet:
+
+> What the agent can reach is what you allowed, whatever the model is told and whatever a
+> workspace holds. Nothing it builds or loads gives it more.
+
+The differences from today that matter most to someone configuring an agent:
+
+- **The default agent's shell is confined**, on Linux and macOS, to the files, hosts and
+  environment variables listed for it. Where a shell cannot be confined it does not start
+  unless you chose the plain one.
+- **A credential reaches a shell only if you say so**, and by default as a placeholder
+  whose value is written in only on its way to the hosts it is for.
+- **A workspace's agent file is a request** until you accept it, and what you allow is kept
+  with your account, not in the project.
+
+[What is safe by default](../design.md#what-is-safe-by-default) has the whole of it: who is
+trusted, the six guarantees and the test each is to have, and what is not promised. This
+page becomes that list as each part is built.

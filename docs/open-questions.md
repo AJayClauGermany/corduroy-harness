@@ -38,14 +38,13 @@ reshapes entries further down.
 
 | Order | Group | Questions |
 | --- | --- | --- |
-| 5 | What is safe by default | D7, D8, D9 |
 | 6 | How the plugin world grows | E3, E4, E7, E17 |
 | 7 | What an extension can reach | G1, G2, G4, G12, G18 |
 | 8 | How people meet it | H1, H11, H14, I4 |
 
 Everything not in this table is detail that hangs off one of these, or a mechanical choice
 (which types may grow, which names are final) best made in one sitting per section once its
-group is settled. The first four groups are decided, and every question below is read
+group is settled. The first five groups are decided, and every question below is read
 against them. Why this exists, and the two uses 1.0 is measured against, are in
 [What it is for](design.md#what-it-is-for). What freezes, what is only stable and what
 "frozen" allows are in [What is stable](design.md#what-is-stable), with the four proofs
@@ -56,7 +55,9 @@ for, what is promised about resuming, live output, removal and reading are in
 [What the record promises](design.md#what-the-record-promises). What a model call is, what
 a model says about itself, that the core's traits are called and waited for, and that the
 kinds of thing a plugin contributes are closed at eight are in
-[What the core is made of](design.md#what-the-core-is-made-of).
+[What the core is made of](design.md#what-the-core-is-made-of). What 1.0 promises about
+safety, what a kernel is given of the machine, and what a workspace may configure are in
+[What is safe by default](design.md#what-is-safe-by-default).
 
 ## P. Purpose and place
 
@@ -71,15 +72,18 @@ project's own pages make. The first of them are decided, in
 [What it is for](design.md#what-it-is-for) treats a tool from an MCP server and a tool from
 an add-on alike, and lets the agent build either. They are not alike in what they can do: an
 add-on runs with its grants and nothing else, and a stdio MCP server is a process started
-through a kernel, with whatever that kernel can reach. MCP has authorization and a way for a
-server to ask the person for input; whether either can stand where a gate does has not been
-checked.
+through a kernel, with whatever that kernel can reach.
+[What is safe by default](design.md#what-is-safe-by-default) decides what that is: the
+default agent's kernel is confined, so a server it starts, one the agent wrote included, is
+held to the files, hosts and variables that kernel was given. A server reached over HTTP is
+an address in an agent file. MCP has authorization and a way for a server to ask the person
+for input; whether either can stand where a gate does has not been checked.
 
-*Direction.* Decide what an MCP server the agent wrote runs as (a sandboxed component, a
-process in a confined kernel, see [H9](#h9-is-a-sandboxed-kernel-part-of-the-standard-set),
-or only what a person installed), and read the MCP specification before saying its
-approvals and the gates are one thing. Then the traffic the other way: whether this
-harness's tools are offered to other agents over MCP. Nothing needs it yet.
+*Direction.* Decide whether one kernel's reach is the right grain, since every server a
+kernel starts shares it with the shell, or whether a server gets a kernel of its own. Read
+the MCP specification before saying its approvals and the gates are one thing. Then the
+traffic the other way: whether this harness's tools are offered to other agents over MCP.
+Nothing needs it yet.
 
 ### P6. Do six borrowed mechanisms add up to one thesis?
 
@@ -108,10 +112,14 @@ change. … whatever the plugins become, the same core is underneath and still e
 same rules." That is an assurance argument: a small trusted base an organisation can read,
 audit and rely on while everything above it moves.
 
+What is promised is decided: one statement and six guarantees, each with a test
+([What is safe by default](design.md#what-is-safe-by-default)). Who checks them besides us
+is not.
+
 *Direction.* Decide whether assurance is the pitch. If it is, the size of the trusted base
 becomes a feature with a budget (lines, dependencies, the WebAssembly engine included), and
-[D7](#d7-what-does-10-promise-about-safety-in-one-statement) with an outside review is a
-condition of 1.0 rather than a nice-to-have.
+a review of the six guarantees from outside is a condition of 1.0 rather than a
+nice-to-have.
 
 ### P10. Who writes add-ons: people or the agent?
 
@@ -219,12 +227,12 @@ to freeze, and confirm the licence is the one meant.
 
 ### A11. What may still change after 1.0?
 
-A flaw in a frozen contract that is a security matter
-([D8](#d8-what-does-a-kernel-see-of-the-environment) and
-[D9](#d9-is-the-agent-file-in-a-workspace-trusted) are the kind) cannot wait for 2.0.
+One thing is decided: a flaw that breaks one of the six guarantees may be fixed by a change
+that breaks a frozen contract, announced as one
+([What is safe by default](design.md#what-is-safe-by-default)).
 
-*Direction.* Say that a security fix may break, how it is announced, and how long a 1.x
-release is supported.
+*Direction.* Say how such a fix is announced, how long a 1.x release is supported, and
+whether anything but a broken guarantee may break a frozen contract.
 
 ### A12. Is there a conformance kit?
 
@@ -291,7 +299,9 @@ A `Cell` is text, a status and a truncation flag (`core/kernel.rs:43`): no image
 rich output, which a notebook-style kernel produces; no separate error stream; nothing
 until the cell ends. A `Spawn` has a program, arguments and environment
 (`core/kernel.rs:134`): no working directory. A `Process` has no error stream and no exit
-status.
+status. Every kernel is to start from an empty environment
+([What is safe by default](design.md#what-is-safe-by-default)), so the environment a `Spawn`
+names is all a process gets.
 
 *Direction.* Make `Cell` and `Spawn` growable now. Decide separately whether rich output
 belongs in 1.0; the trait can gain defaulted methods later.
@@ -316,13 +326,20 @@ grow.
 defaulted method later, and confirm that is acceptable for an MCP client written as an
 add-on.
 
-### B9. Does a secret say where it may be sent?
+### B9. How does a secret say where it may be sent?
 
 `Secret` is `reveal()` and nothing else (`core/secret.rs:20`). A plugin granted a secret
 and a broad `http` scope can send that secret to any host its scope reaches.
 
-*Direction.* A defaulted `hosts()` on `Secret`, checked when the host writes the value into
-a request. Decide whether the binding is required or optional.
+That a secret names the hosts it may go to is decided, and it is in the core before the
+freeze ([What is safe by default](design.md#what-is-safe-by-default)): a masked credential
+in a shell is written only into requests to those hosts, and a provider's key no longer
+follows a `base_url` pointed somewhere else.
+
+*Direction.* A defaulted `hosts()` on `Secret`, checked wherever a value is written into a
+request: the host for an add-on, a kernel's filter for a shell, a provider for its key.
+Decide what a secret that names no host means (it goes nowhere, or anywhere), and how the
+agent file states the hosts.
 
 ### B10. In what order are prompt parts rendered?
 
@@ -491,7 +508,9 @@ A filter on a batch before it is stored would be a property of the log.
 [What the record promises](design.md#what-the-record-promises) works from "everything that
 can be logged is logged" and leaves this open. Review is part of the purpose, so what is
 kept out is a product question: a private value in a prompt is also something the person
-may not want kept. Once in, a value leaves only with its whole session.
+may not want kept. Once in, a value leaves only with its whole session. A credential the
+person passed through to a shell is such a value as soon as the model prints it
+([What is safe by default](design.md#what-is-safe-by-default)).
 
 *Direction.* Decide whether the core offers a filter point, or whether a `Log` that wraps
 another is the answer (listeners would still see the value). Checkpoints of live output
@@ -561,8 +580,15 @@ came from has been removed.
 
 Not yet (design, "still to do"). Asks are answered per tool call (`Harness::answer`).
 
+One of the six guarantees waits on this: that a person approved what the agent loads
+([What is safe by default](design.md#what-is-safe-by-default)). The same section has two
+more things a person is offered while a call runs, a host the shell was refused and a
+credential the agent asked for. Neither holds the call: it fails, the person answers, and
+the model tries again.
+
 *Direction.* Decide whether an ask at any declared point can wait for a person, since that
-shapes `gate/answer`.
+shapes `gate/answer`, and whether a refusal the person may lift afterwards is an ask of
+that kind or an event of its own.
 
 ### C18. How many processes may use one log?
 
@@ -661,43 +687,15 @@ needs beyond its imports.
 
 *Direction.* Decide whether this belongs in 1.0's agent file contract or after.
 
-### D7. What does 1.0 promise about safety, in one statement?
-
-[Security model](explanation/security-model.md) describes what is built: add-ons are
-sandboxed, extensions and kernels are not, gates are policy. In the default agent that
-means `bash` is held back by the `approval` gate and nothing else.
-
-*Direction.* Freeze a threat model: who is untrusted (the model, add-ons, what tools
-return, what a workspace contains), what is guaranteed against each, and a test for every
-guarantee. Decide whether the default agent's reliance on a gate is acceptable for 1.0
-([H9](#h9-is-a-sandboxed-kernel-part-of-the-standard-set)).
-
-### D8. What does a kernel see of the environment?
-
-The shell kernel starts with the command's own environment
-(`crates/corduroy-shell/src/lib.rs:132`), and that is where the provider's API key is.
-Secrets are kept from add-ons and from the log, but the model can print them with `bash`.
-
-*Direction.* A kernel starts from a cleared environment, and configuration names what is
-passed through. Decide with [H4](#h4-do-all-credentials-go-through-secrets).
-
-### D9. Is the agent file in a workspace trusted?
-
-`<workspace>/corduroy.toml` is read by default. It grants capabilities, names kernels and
-starts MCP servers. So a repository someone else wrote configures the agent that runs on
-your machine the moment you run `corduroy` inside it.
-
-*Direction.* A workspace's file is not used until the person has accepted it (remembered
-by its hash), or defaults come from a file of the user's own
-([H13](#h13-is-there-one-configuration-file-or-layers)).
-
 ### D10. What form does a tool's question to the person take?
 
 A gate's ask is the only question a run puts to a person today. That a tool can ask
 something else (which of these three branches, a value it lacks) is decided, and is in 1.0
 ([What the core is made of](design.md#what-the-core-is-made-of)): it is not a gate, which
 decides whether something may happen, and not a registry, but a tool that asks and waits
-for a signal. What no front end knows yet is how to show the question.
+for a signal. What no front end knows yet is how to show the question. The agent asking
+for a credential by name is one such question
+([What is safe by default](design.md#what-is-safe-by-default)).
 
 *Direction.* Settle the form before front ends are written: the event's topic and what it
 holds (the question, the choices if there are any), what a reply may be (a choice, a
@@ -716,12 +714,15 @@ record's contract.
 
 ### D12. Is there one place that says where an agent may send data?
 
-`http` is scoped by host for add-ons. A kernel, a provider and an MCP server each reach the
-network on their own.
+`http` is scoped by host for add-ons, and a confined kernel is to reach only the hosts
+listed for it ([What is safe by default](design.md#what-is-safe-by-default)). A provider and
+an MCP server reached over HTTP are extensions, and go to the address an agent file gives
+them. So every host is written down, but in three forms, and nothing is asked before a
+request leaves.
 
-*Direction.* Decide whether 1.0 wants a decision point for outbound requests that
-extensions are expected to ask at, or leaves network policy to the kernel and the
-operating system.
+*Direction.* Decide whether 1.0 wants a decision point for outbound requests, which
+extensions and a kernel's filter are expected to ask at, or leaves it at the lists. An
+allowed host can still be sent anything, which no list changes.
 
 ## E. The plugin world
 
@@ -1165,8 +1166,13 @@ contract, inherits whatever an alpha dependency accepts.
 `<provider>/<model>`. And a model's description (what it takes and returns, its context)
 can be stated or corrected in the file, which needs keys for a model under its provider.
 
+[What is safe by default](design.md#what-is-safe-by-default) changes a third: every
+credential comes through `Secrets`. A provider's `api_key_env`, and an MCP server's
+`bearer_token_env`, each read the environment on their own today, and give way to naming a
+secret.
+
 *Direction.* Provider kinds in `Standard` like the rest, and a named list of kinds and keys
-that are ours, those that describe a model among them.
+that are ours, those that describe a model and the one that names its secret among them.
 
 ### H2. Does 1.0 ship on oi-kit?
 
@@ -1183,13 +1189,6 @@ registers can never be chosen), the restart limit, extra steps, or the WebAssemb
 
 *Direction.* Decide which become keys and which are a `Standard` part.
 
-### H4. Do all credentials go through `Secrets`?
-
-Provider keys and an MCP server's bearer token are read from the environment directly, so
-replacing `env-secret` with a keychain covers neither.
-
-*Direction.* One path for every credential.
-
 ### H5. Can the `Standard`'s own types grow?
 
 `Asked` and `Places` (`crates/corduroy-std/src/`), `Transport` (`corduroy-mcp`),
@@ -1200,9 +1199,14 @@ replacing `env-secret` with a keychain covers neither.
 ### H6. Where does an installed command find the shipped add-ons?
 
 `Places::new` ends the plugin path with the source tree the command was built from
-(`crates/corduroy-std/src/places.rs:39`).
+(`crates/corduroy-std/src/places.rs:39`), and begins it with the agent file's directory. A
+shipped add-on's name is to resolve to the shipped one before anything a workspace holds
+([What is safe by default](design.md#what-is-safe-by-default)), so the order changes with
+the layout.
 
-*Direction.* Decide the installed layout (beside the binary, a data directory, embedded).
+*Direction.* Decide the installed layout (beside the binary, a data directory, embedded),
+and with it where the account-level place is on each platform and what the agent file's
+strings call it, beside `{workspace}`, `{data}` and `{home}`.
 
 ### H7. Are the agent file's older names final?
 
@@ -1217,23 +1221,19 @@ Tools, listed once at start. No resources, prompts, sampling, list changes or re
 
 *Direction.* Decide the scope; all of it is addable in the extension.
 
-### H9. Is a sandboxed kernel part of the standard set?
-
-Protected paths bind `fs-read` and `fs-write`; "protecting paths from a kernel is the
-kernel's job". The shipped shell kernel is not sandboxed, so an agent with `bash` can read
-its own log and agent file.
-
-*Direction.* One is built before 1.0 either way, as a proof
-[the freeze waits on](design.md#what-the-freeze-waits-on). Decide whether what comes out of
-it ships in the standard set and is the default agent's kernel, or stays a proof and 1.0
-says plainly that the shipped kernel is not confined.
-
 ### H10. Which platforms does 1.0 promise?
 
 CI runs the whole suite on Linux; on Windows and macOS it builds the command and tests the
 core and the PowerShell kernel.
 
-*Direction.* Decide whether the full suite on all three is a condition of 1.0.
+A confined shell is promised on Linux and macOS
+([What is safe by default](design.md#what-is-safe-by-default)), and each guarantee has a
+test, so those tests run on both. What confines a shell on Windows has not been looked
+into; until one exists the shell there is opt-in, and the file tools work as everywhere.
+
+*Direction.* Decide whether the full suite on all three is a condition of 1.0. Find out
+what Windows offers for confining a process, and then either promise a confined shell
+there or say that 1.0's shell on Windows is the plain one, chosen by the person.
 
 ### H11. Is there a front end other than a Rust program?
 
@@ -1253,22 +1253,17 @@ Named agents in one file (a planner, a reviewer) follow from
 *Direction.* Decide with G12 whether a file may define several, and how a session picks
 one.
 
-### H13. Is there one configuration file or layers?
-
-One: the workspace's, else the built-in default. There is no file of the user's own, so
-nothing says "always this provider" across workspaces.
-
-*Direction.* Decide the layers and their precedence together with
-[D9](#d9-is-the-agent-file-in-a-workspace-trusted).
-
 ### H14. What is in the standard set at 1.0?
 
 Shell kernels, the HTTP client, secrets from the environment, MCP, the providers and the
 file log. Not a sandboxed kernel, a scheduler, a keychain or a second store.
 
-*Direction.* Fix the list. A sandboxed kernel and a second store are built as proofs
-([What the freeze waits on](design.md#what-the-freeze-waits-on)); decide for each whether it
-then ships. A scheduler and a keychain are stated to be out, or added.
+The confined kernel ships, with its filter for hosts and masked credentials, and is the
+default agent's shell ([What is safe by default](design.md#what-is-safe-by-default)).
+
+*Direction.* Fix the rest of the list. A second store is built as a proof
+([What the freeze waits on](design.md#what-the-freeze-waits-on)); decide whether it then
+ships. A scheduler and a keychain are stated to be out, or added.
 
 ### H15. Which outside conventions does 1.0 commit to?
 
