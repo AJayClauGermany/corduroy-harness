@@ -7,6 +7,8 @@
 //! corduroy [options] stop            end a run that was cut short or waits, without finishing it
 //! corduroy [options] check           load the agent and say what it has, without a model
 //! corduroy [options] sessions        list the sessions in the log
+//! corduroy [options] sessions remove <name>
+//!                                    take a session, and those it started, out of the log
 //! corduroy [options] log             print the event log
 //! corduroy init                      write the default agent file to edit
 //!
@@ -23,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
-use corduroy_harness::core::SessionId;
+use corduroy_harness::core::{Query, SessionId};
 use corduroy_harness::{Harness, MAIN, Status};
 
 use corduroy_std::Standard;
@@ -33,7 +35,8 @@ use crate::extension::Extensions;
 use crate::terminal::{self, Out, say};
 
 const USAGE: &str = "usage: corduroy [--agent FILE] [--workspace DIR] [--session NAME] \
-                     [--model NAME] [--provider NAME] [run PROMPT | continue | stop | check | sessions | log | init]";
+                     [--model NAME] [--provider NAME] [run PROMPT | continue | stop | check | sessions | \
+                     sessions remove NAME | log | init]";
 
 /// The command line, read.
 #[derive(Debug, Default)]
@@ -113,13 +116,14 @@ fn init(workspace: &Path, out: &Out) -> Result<ExitCode, Box<dyn Error>> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// The agent the options describe, put together in `workspace`, and its agent file.
-fn load(
-    options: &Options,
-    workspace: PathBuf,
-    standard: &Standard,
-    out: &Out,
-) -> Result<Agent, Box<dyn Error>> {
+/// An agent file and the places it is read against.
+struct Described {
+    file: AgentFile,
+    places: Places,
+}
+
+/// The agent file the options name, or the default one, and the places it is read against.
+fn agent_file(options: &Options, workspace: PathBuf) -> Result<Described, Box<dyn Error>> {
     let file_path = options
         .agent
         .clone()
@@ -135,7 +139,19 @@ fn load(
         file.provider.clone_from(provider);
     }
     let file_path = file_path.map(|path| path.canonicalize()).transpose()?;
-    let agent = assemble_from(&file, &Places::new(workspace, file_path), standard)?;
+    let places = Places::new(workspace, file_path);
+    Ok(Described { file, places })
+}
+
+/// The agent the options describe, put together in `workspace`, and its agent file.
+fn load(
+    options: &Options,
+    workspace: PathBuf,
+    standard: &Standard,
+    out: &Out,
+) -> Result<Agent, Box<dyn Error>> {
+    let Described { file, places } = agent_file(options, workspace)?;
+    let agent = assemble_from(&file, &places, standard)?;
     for unstarted in &agent.failed {
         let line = format!(
             "! plugin {} did not start: {}",
@@ -155,6 +171,12 @@ async fn run(options: Options, standard: &Standard, out: &Out) -> Result<ExitCod
     let command: Vec<&str> = options.command.iter().map(String::as_str).collect();
     if command.first() == Some(&"init") {
         return init(&workspace, out);
+    }
+    if let ["sessions", "remove", name] = command.as_slice() {
+        // Maintenance between runs: the agent is not put together, so nothing else is written.
+        let Described { file, places } = agent_file(&options, workspace)?;
+        let log = file.log_path(&places);
+        return remove(&log, &SessionId::new(*name), standard, out);
     }
     let agent = load(&options, workspace, standard, out)?;
     let harness = &agent.harness;
@@ -194,14 +216,54 @@ async fn run(options: Options, standard: &Standard, out: &Out) -> Result<ExitCod
             }
             Ok(ExitCode::SUCCESS)
         }
-        ["log"] => {
-            for event in harness.events().events() {
-                say(out, &format!("{} {event}", stamp(event.time)));
-            }
-            Ok(ExitCode::SUCCESS)
-        }
+        ["log"] => print_log(harness, out),
         _ => Err(USAGE.into()),
     }
+}
+
+/// Print every event in the log, a page at a time, so that what the stream does not hold in
+/// memory is read from the store.
+fn print_log(harness: &Harness, out: &Out) -> Result<ExitCode, Box<dyn Error>> {
+    const PAGE: usize = 1000;
+    let mut query = Query::first(PAGE);
+    loop {
+        let page = harness.events().read(&query)?;
+        for event in &page {
+            say(out, &format!("{} {event}", stamp(event.time)));
+        }
+        match page.last() {
+            Some(last) if page.len() == PAGE => query = query.after(last.id),
+            _ => return Ok(ExitCode::SUCCESS),
+        }
+    }
+}
+
+/// Take `session`, and every session started from it, out of the log at `log`.
+fn remove(
+    log: &Path,
+    session: &SessionId,
+    standard: &Standard,
+    out: &Out,
+) -> Result<ExitCode, Box<dyn Error>> {
+    if !log.is_file() {
+        return Err(format!("there is no log at {}", log.display()).into());
+    }
+    let removed = standard.remove_session(log, session)?;
+    let started: Vec<String> = removed
+        .iter()
+        .filter(|id| *id != session)
+        .map(|id| format!("`{id}`"))
+        .collect();
+    let said = if started.is_empty() {
+        format!("removed `{session}` from the log")
+    } else {
+        format!(
+            "removed `{session}` from the log, with the sessions it started: {}",
+            started.join(", ")
+        )
+    };
+    say(out, &said);
+    Ok(ExitCode::SUCCESS)
 }
 
 /// `time`, in milliseconds since the Unix epoch, as `2026-11-22T17:31:05Z`.

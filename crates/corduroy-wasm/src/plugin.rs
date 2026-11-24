@@ -6,9 +6,9 @@ use std::sync::{Arc, Mutex};
 
 use corduroy_core::{
     CallError, Context, ContextError, Draft, Event, EventStream, GATES, Gate, Gates, Grants, HTTP,
-    HttpClients, KERNELS, Kernels, MODELS, Models, PLUGIN_LOAD, PROMPTS, Pattern, Plugin,
-    PluginError, PromptPart, Prompts, SECRETS, SERVICES, Scope, Secrets, Service, Services, Source,
-    TOOL_CALL, TOOLS, Tool, ToolError, ToolOutput, ToolSpec, Tools, Verdict,
+    HttpClients, KERNELS, Kernels, LogError, MODELS, Models, PLUGIN_LOAD, PROMPTS, Plugin,
+    PluginError, PromptPart, Prompts, Query, SECRETS, SERVICES, Scope, Secrets, Service, Services,
+    Source, TOOL_CALL, TOOLS, Tool, ToolError, ToolOutput, ToolSpec, Tools, Verdict,
 };
 use serde_json::Value;
 use wasmtime::component::{Component, HasSelf, Linker};
@@ -29,6 +29,10 @@ use instance::{Blueprint, Instance};
 
 /// The package every host interface belongs to.
 const PACKAGE: &str = "corduroy:plugin/";
+
+/// The plugin world this host is built against, as `wit/corduroy.wit` names its package: a
+/// guest built against another version is a different world.
+pub const WORLD: &str = "corduroy:plugin@0.1.0";
 
 /// The host interfaces that are capabilities, by the name they are granted under, in the
 /// order the WIT world imports them.
@@ -229,7 +233,11 @@ impl WasmPlugin {
             secrets: self.lends("secret", || ctx.service::<Secrets>(SECRETS))?,
             http: self.lends("http", || ctx.service::<HttpClients>(HTTP))?,
             events: self.imports("log-read").then(|| ctx.events()),
-            state: Arc::new(Mutex::new(stored_state(&ctx.events(), &self.name))),
+            state: Arc::new(Mutex::new(
+                stored_state(&ctx.events(), &self.name).map_err(|error| {
+                    PluginError::new(format!("plugin `{}`: {error}", self.name))
+                })?,
+            )),
             loader: self.imports("plugins").then(|| Loader {
                 runtime: self.runtime.clone(),
                 requests: ctx.requests(),
@@ -364,15 +372,27 @@ impl WasmPlugin {
     }
 }
 
-/// The `state` store of the plugin `name`, as its `state/set` and `state/remove` events on
-/// `events` leave it.
-fn stored_state(events: &EventStream, name: &str) -> BTreeMap<String, String> {
+/// The `state` store of the plugin `name`, as its `state/set` and `state/remove` events in
+/// the log behind `events` leave it.
+fn stored_state(events: &EventStream, name: &str) -> Result<BTreeMap<String, String>, LogError> {
+    /// How many events one read of the log asks for.
+    const PAGE: usize = 1000;
     let source = Source::Plugin(name.to_owned());
-    let mut store = BTreeMap::new();
-    for event in events.matching(&Pattern::new("state/*")) {
-        if event.source != source {
-            continue;
+    let mut writes = Vec::new();
+    let mut query = Query::first(PAGE).topics("state/*");
+    loop {
+        let page = events.read_where(&query, |event| event.source == source)?;
+        let full = page.len() >= PAGE;
+        if let Some(last) = page.last() {
+            query = query.after(last.id);
         }
+        writes.extend(page);
+        if !full {
+            break;
+        }
+    }
+    let mut store = BTreeMap::new();
+    for event in writes {
         let Ok(payload) = serde_json::from_str::<Value>(&event.payload) else {
             continue;
         };
@@ -388,7 +408,7 @@ fn stored_state(events: &EventStream, name: &str) -> BTreeMap<String, String> {
             _ => None,
         };
     }
-    store
+    Ok(store)
 }
 
 /// The capability an import names, if it is one of the host's interfaces.
@@ -530,5 +550,17 @@ impl Service for WasmService {
                 types::CallError::Failed(reason) => CallError::Failed(reason),
                 types::CallError::Denied(reason) => CallError::Denied(reason),
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_world_is_the_package_the_wit_file_names() {
+        let wit = include_str!("../../../wit/corduroy.wit");
+        assert!(
+            wit.starts_with(&format!("package {};", super::WORLD)),
+            "{wit:.40}"
+        );
     }
 }

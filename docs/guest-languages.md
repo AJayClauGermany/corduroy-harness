@@ -73,7 +73,7 @@ instance is dead until reloaded. What ordinary code does without WASI:
 | `fetch`, `open()` | **trap** | **trap** |
 | Environment | none | empty |
 
-Determinism holds, which is what [replay](design.md#durability) needs: nothing a plugin can
+Determinism holds, which is what [re-executing a plugin](design.md#what-the-record-promises) would need: nothing a plugin can
 observe varies between runs. But it holds by being wrong or fatal, and a `print` left in a
 Python plugin takes it down. Randomness that looks random and is not is a trap of a different
 kind for anything that generates an identifier or a token.

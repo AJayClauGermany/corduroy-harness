@@ -243,7 +243,7 @@ belongs to one, a session.
 `src/session.rs` makes the conversation a projection of it: the `Journal` turns the effects
 of one step of the loop into one commit of `message`, `tool/call` (caused by its message),
 `tool/result` (caused by its call) and `usage` events, and `Harness::resume` rebuilds every
-session from a replayed stream. Plugin lifecycle, capability denials and plugin-defined
+session from a stream loaded from the log. Plugin lifecycle, capability denials and plugin-defined
 topics share the same stream, so plugins and the model see one history. The stream writes
 each commit to a `Log` before showing it to anyone; `corduroy-jsonl` is the store on disk.
 See [Durability](#durability).
@@ -695,8 +695,8 @@ What other harnesses call hooks are two different things here, and both are plug
 
 - **Reacting is an event.** Events stay fire-and-forget: the emitter does not know who
   listens and gets nothing back. A hook that observes (log this, count that, nudge the
-  prompt) is a plugin with a subscription. This keeps the log a plain record that replays
-  without re-running anyone's decision.
+  prompt) is a plugin with a subscription. This keeps the log a plain record that reads
+  back without re-running anyone's decision.
 - **Deciding is a gate.** Where the loop needs an answer before it proceeds, it asks the
   gates registered for that decision point, in a fixed order, and the strictest answer wins
   (deny over ask over allow). The outcome does not depend on which plugin loaded first. The
@@ -788,9 +788,9 @@ wrote through `state`. The model rebuilds what it needs. Resuming is expected to
 the same machine with the same build. On another machine or a later build the log is still
 read ([What is stable](#what-is-stable)), and resuming there is best effort. So that a
 reader or a resume can tell which it is, each process that opens a log records what it is:
-the program's version, the plugin world's version and the platform (*planned*; the identity
-of the machine is left out until someone needs it, since it is also something to keep
-private).
+the program's version, the plugin world's version and the platform (built: `process/start`,
+the first thing the `corduroy` command writes; the identity of the machine is left out until
+someone needs it, since it is also something to keep private).
 
 **Live output is a preview; checkpoints are the record of it.** Text from a model as it
 arrives, and output from a tool while it runs, reach the terminal as they come. It is
@@ -823,12 +823,14 @@ against a real provider before it is fixed.
 **Whole sessions may leave the log, and nothing smaller.** The stream never removes or
 rewrites an event: while a program runs, the log only grows. A store may remove a whole
 session, with the sessions it started, as maintenance the person asks for through the
-command (*planned*):
+command (built: `corduroy sessions remove`; `corduroy_harness::removal` says which sessions
+go and what the markers are, so every store removes the same):
 
 - Ids are never reused. A reader tolerates gaps in them, a cause that names an event no
   longer there, and an event or a parent that names a session the log does not know.
-- A removal made through the program leaves a marker: which session, and when. The record
-  then says that something is gone, though not what it was.
+- A removal made through the program leaves a marker: which session, and when
+  (`session/removed`, one for each session, stored with the ids after every event the log
+  held). The record then says that something is gone, though not what it was.
 - Editing the files by hand is outside the contract. What it leaves behind is covered by
   the same tolerance, with no marker.
 - Only a person removes at 1.0. An agent removing history would be a capability of its own,
@@ -837,12 +839,24 @@ command (*planned*):
 - Nothing expires by itself at 1.0. Keeping history for a limited time, or a nudge when it
   grows large, is policy that can be built on removal later.
 
-**A read is complete; memory is not promised.** `events()`, `session()` and `matching()`
-promise a complete answer about what the log holds, not that the stream holds it in memory.
-Three things are marked in the core before the freeze for that (*planned*): the `Log` trait
-gains a read side with a default, so a store can be asked for what the stream has let go;
-reads that are paged and may fail are the route that can reach the store; and the existing
-ones stay as the convenient form. At 1.0 a store may still load everything.
+**A read is complete; memory is not promised.** A read promises a complete answer about
+what the log holds, not that the stream holds it in memory. Three things are marked in the
+core before the freeze for that, and built:
+
+- The `Log` trait has a read side with a default (`Log::read`), so a store can be asked for
+  what the stream does not hold. A store that hands the stream every event when it is
+  opened leaves the default, which finds nothing. One that hands over part answers for the
+  rest, and says where numbering carries on (`EventStream::continuing`), since the last
+  event stored may be one it kept back.
+- Reads that are paged and may fail (`EventStream::read`, and `read_where` with a filter
+  applied before the limit) are the route that reaches the store: they merge what the
+  stream holds with what the store returns. The harness rebuilds sessions and the list of
+  them through it, the WebAssembly host rebuilds an add-on's `state` and answers
+  `log-read` through it, and `corduroy log` prints through it.
+- The existing ones (`events()`, `session()`, `matching()`, `after()`, `get()`) stay as the
+  convenient form. They cannot fail, so they answer from what the stream holds: the whole
+  log while the store loads everything, which at 1.0 it still may (the JSON Lines file
+  does).
 
 **The second store is a folder.** The [second store the freeze waits on](#what-the-freeze-waits-on)
 is this one (*planned*). A workspace is a folder holding one workspace file and one file per
@@ -881,7 +895,9 @@ All but the last point are built; kernel state is *planned*.
 - **Stores are plugins of the log.** The core carries the `Log` trait and nothing that
   touches a disk. `corduroy-jsonl` is the first store: a header line with the schema
   version, then one line per commit (each event with its time), written with one `write`
-  and synced. An unfinished last
+  and synced. Between runs it can [remove whole sessions](#what-the-record-promises),
+  writing the file again beside the old one and putting it in place in one step. An
+  unfinished last
   line, which is all a crash can leave, is cut off when the file is opened, and the file is
   locked because a log has one writer. *Changed from the plan:* the JSONL store was to live
   in the core, std only. Reading it back needs a JSON parser, and a hand-written parser on
@@ -1203,13 +1219,15 @@ the step it waits on is done.
     boundary. A plugin can ask which session it serves (the `session` capability), and
     `todo` keeps a list per session. A run can be stopped, at any point, and Ctrl-C in the
     `corduroy` command does it.
-12. What [the record promises](#what-the-record-promises), none of it started: the read
-    side of `Log` and paged reads that may fail; the folder store, as the second store the
-    freeze waits on; removing a session through the command, with its marker, and readers
-    that tolerate what is gone; an event for what each process runs as; then the live
-    channel, a streaming method on `Provider`, output from a running tool and checkpoints,
-    tried against a real provider before their shapes are fixed. `EventStream::replay`
-    loads a log and re-executes nothing, so it gets a name that says so before the freeze.
+12. What [the record promises](#what-the-record-promises). *Done:* the read side of `Log`
+    and paged reads that may fail, which the harness, the WebAssembly host and the command
+    read through; removing a session through the command (`corduroy sessions remove`),
+    with its marker, and readers that tolerate what is gone (the JSON Lines store reads
+    ids with gaps); `process/start`, what each process runs as; and `EventStream::replay`,
+    which loads a log and re-executes nothing, renamed `EventStream::load`. *Still to do:*
+    the folder store, as the second store the freeze waits on; then the live channel, a
+    streaming method on `Provider`, output from a running tool and checkpoints, tried
+    against a real provider before their shapes are fixed.
 
 ## Open questions
 

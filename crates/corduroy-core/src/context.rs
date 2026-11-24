@@ -361,7 +361,7 @@ impl App {
         Self::with_events(Arc::new(EventStream::new()))
     }
 
-    /// An app that records to an existing event stream, for example a replayed one.
+    /// An app that records to an existing event stream, for example one loaded from a log.
     #[must_use]
     pub fn with_events(events: Arc<EventStream>) -> Self {
         Self {

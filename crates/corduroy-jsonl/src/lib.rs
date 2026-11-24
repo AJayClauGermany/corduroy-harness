@@ -18,6 +18,11 @@
 //!
 //! The file is locked while it is open: a log has one writer.
 //!
+//! While a stream writes to it the file only grows. Between runs, [`remove`] takes whole
+//! sessions out of it, as maintenance a person asks for: the file is written again without
+//! them, and with a commit recording their removal, then put in place of the old one in one
+//! step. Ids are never used again, so a log may have gaps in them.
+//!
 //! ```
 //! # let path = std::env::temp_dir().join(format!("corduroy-jsonl-doc-{}.jsonl", std::process::id()));
 //! # drop(std::fs::remove_file(&path));
@@ -36,12 +41,13 @@
 //! # Ok::<(), corduroy_core::LogError>(())
 //! ```
 
+use std::collections::BTreeSet;
 use std::fmt;
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read as _, Write as _};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use corduroy_core::{Event, EventId, EventStream, Log, LogError, SessionId};
+use corduroy_core::{Draft, Event, EventId, EventStream, Log, LogError, SessionId};
 use serde_json::{Value, json};
 
 /// The schema version this crate writes.
@@ -61,7 +67,7 @@ const HEADER_KEY: &str = "corduroy-log";
 /// As [`JsonlLog::open`].
 pub fn open(path: impl AsRef<Path>) -> Result<EventStream, LogError> {
     let (log, events) = JsonlLog::open(path)?;
-    Ok(EventStream::replay(events).with_log(log))
+    Ok(EventStream::load(events).with_log(log))
 }
 
 /// A JSON Lines file holding one commit per line. See the [crate documentation](crate).
@@ -90,63 +96,223 @@ impl JsonlLog {
     /// it), is not a corduroy log, has a schema version outside [`OLDEST_READ`] to
     /// [`SCHEMA_VERSION`], or holds a complete line that is not a valid commit.
     pub fn open(path: impl AsRef<Path>) -> Result<(Self, Vec<Event>), LogError> {
-        let path = path.as_ref();
-        let fail = |what: &str, error: &dyn fmt::Display| {
-            LogError::new(format!("{what} {}: {error}", path.display()))
-        };
-        let mut file = OpenOptions::new()
-            .read(true)
-            .append(true)
-            .create(true)
-            .open(path)
-            .map_err(|error| fail("cannot open", &error))?;
-        file.try_lock()
-            .map_err(|error| fail("cannot lock", &error))?;
-        let bytes = read_locked(&mut file).map_err(|error| fail("cannot read", &error))?;
-
-        // Everything after the last newline is a write that never finished. It may end in
-        // the middle of a character, so it is set aside before the rest is read as text.
-        let kept = bytes
-            .iter()
-            .rposition(|byte| *byte == b'\n')
-            .map_or(0, |newline| newline + 1);
-        let (whole, torn) = bytes.split_at_checked(kept).unwrap_or((&[], &bytes));
-        let whole = str::from_utf8(whole).map_err(|error| fail("cannot read", &error))?;
-        let header = format!("{}", json!({HEADER_KEY: SCHEMA_VERSION}));
-        let mut lines = whole.lines();
-        let Some(first) = lines.next() else {
-            if !header.as_bytes().starts_with(torn) {
-                return Err(fail("cannot use", &"it is not a corduroy log"));
-            }
-            file.set_len(0)
-                .and_then(|()| file.write_all(format!("{header}\n").as_bytes()))
-                .and_then(|()| file.sync_data())
-                .map_err(|error| fail("cannot start", &error))?;
-            return Ok((Self { file, last: 0 }, Vec::new()));
-        };
-        check_header(first).map_err(|error| fail("cannot use", &error))?;
-
-        let mut events: Vec<Event> = Vec::new();
-        for (number, line) in lines.enumerate() {
-            let last = events.last().map_or(0, |event| event.id.get());
-            let commit = parse_commit(line, last)
-                .map_err(|error| fail(&format!("line {} of", number + 2), &error))?;
-            events.extend(commit);
-        }
-        if !torn.is_empty() {
-            file.set_len(kept as u64)
-                .and_then(|()| file.sync_data())
-                .map_err(|error| fail("cannot repair", &error))?;
-        }
+        let Opened { file, commits } = open_locked(path.as_ref())?;
+        let events: Vec<Event> = commits.into_iter().flatten().collect();
         let last = events.last().map_or(0, |event| event.id.get());
         Ok((Self { file, last }, events))
     }
 }
 
+/// A log file opened and locked, and what it holds.
+struct Opened {
+    /// The file, locked.
+    file: File,
+    /// Its commits, in order, without an unfinished last line.
+    commits: Vec<Vec<Event>>,
+}
+
+/// Open, lock and read the log at `path`, creating it if it does not exist and cutting off
+/// an unfinished last line.
+fn open_locked(path: &Path) -> Result<Opened, LogError> {
+    let fail = |what: &str, error: &dyn fmt::Display| {
+        LogError::new(format!("{what} {}: {error}", path.display()))
+    };
+    let mut file = OpenOptions::new()
+        .read(true)
+        .append(true)
+        .create(true)
+        .open(path)
+        .map_err(|error| fail("cannot open", &error))?;
+    file.try_lock()
+        .map_err(|error| fail("cannot lock", &error))?;
+    let bytes = read_locked(&mut file).map_err(|error| fail("cannot read", &error))?;
+
+    // Everything after the last newline is a write that never finished. It may end in the
+    // middle of a character, so it is set aside before the rest is read as text.
+    let kept = bytes
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |newline| newline + 1);
+    let (whole, torn) = bytes.split_at_checked(kept).unwrap_or((&[], &bytes));
+    let whole = str::from_utf8(whole).map_err(|error| fail("cannot read", &error))?;
+    let mut lines = whole.lines();
+    let Some(first) = lines.next() else {
+        if !header().as_bytes().starts_with(torn) {
+            return Err(fail("cannot use", &"it is not a corduroy log"));
+        }
+        file.set_len(0)
+            .and_then(|()| file.write_all(format!("{}\n", header()).as_bytes()))
+            .and_then(|()| file.sync_data())
+            .map_err(|error| fail("cannot start", &error))?;
+        return Ok(Opened {
+            file,
+            commits: Vec::new(),
+        });
+    };
+    check_header(first).map_err(|error| fail("cannot use", &error))?;
+
+    let mut commits: Vec<Vec<Event>> = Vec::new();
+    let mut last = 0;
+    for (number, line) in lines.enumerate() {
+        let commit = parse_commit(line, last)
+            .map_err(|error| fail(&format!("line {} of", number + 2), &error))?;
+        last = commit.last().map_or(last, |event| event.id.get());
+        commits.push(commit);
+    }
+    if !torn.is_empty() {
+        file.set_len(kept as u64)
+            .and_then(|()| file.sync_data())
+            .map_err(|error| fail("cannot repair", &error))?;
+    }
+    Ok(Opened { file, commits })
+}
+
+/// The header line this crate writes.
+fn header() -> String {
+    format!("{}", json!({HEADER_KEY: SCHEMA_VERSION}))
+}
+
+/// Take whole sessions out of the log at `path`, between runs: nothing may have it open.
+///
+/// `choose` is shown every event the log holds and returns the sessions to remove and the
+/// events recording their removal (a marker for each, as `corduroy_harness::removal` gives
+/// them). The log is written
+/// again beside the old one without those sessions' events, each commit keeping what is
+/// left of it, then with the markers as one more commit numbered after every event the log
+/// held, so no id is used twice. The new file then takes the old one's place in one step:
+/// a crash leaves one or the other, never a mix. Nothing is written if `choose` picks no
+/// session.
+///
+/// Returns the sessions removed.
+///
+/// # Errors
+///
+/// Returns a [`LogError`] if the log cannot be opened as [`JsonlLog::open`] would, if
+/// `choose` fails, or if the new file cannot be written or put in place; the log is then as
+/// it was.
+pub fn remove(
+    path: impl AsRef<Path>,
+    choose: impl FnOnce(&EventStream) -> Result<(BTreeSet<SessionId>, Vec<Draft>), LogError>,
+) -> Result<BTreeSet<SessionId>, LogError> {
+    let path = path.as_ref();
+    let Opened {
+        file: held,
+        commits,
+    } = open_locked(path)?;
+    let all: Vec<Event> = commits.iter().flatten().cloned().collect();
+    let (removed, markers) = choose(&EventStream::load(all))?;
+    if removed.is_empty() {
+        return Ok(removed);
+    }
+    let next = write_without(path, commits, &removed, markers)?;
+    fs::rename(&next, path).map_err(|error| {
+        LogError::new(format!("cannot put {} in place: {error}", next.display()))
+    })?;
+    sync_directory(path);
+    // The old file, and its lock, go only once the new one is in its place.
+    drop(held);
+    Ok(removed)
+}
+
+/// Write the log at `path` again beside it, as [`remove`] puts it in place: `commits`
+/// without the events of `removed`, then `markers` as one commit numbered after the last
+/// event of `commits`. Returns where it was written.
+fn write_without(
+    path: &Path,
+    commits: Vec<Vec<Event>>,
+    removed: &BTreeSet<SessionId>,
+    markers: Vec<Draft>,
+) -> Result<PathBuf, LogError> {
+    let (last, time) = commits
+        .iter()
+        .flatten()
+        .last()
+        .map_or((0, 0), |event| (event.id.get(), event.time));
+    let gone = |event: &Event| {
+        event
+            .session
+            .as_ref()
+            .is_some_and(|session| removed.contains(session))
+    };
+    let kept: Vec<Vec<Event>> = commits
+        .into_iter()
+        .map(|commit| commit.into_iter().filter(|event| !gone(event)).collect())
+        .filter(|commit: &Vec<Event>| !commit.is_empty())
+        .collect();
+    let next = beside(path)?;
+    let fail = |what: &str, error: &dyn fmt::Display| {
+        LogError::new(format!("{what} {}: {error}", next.display()))
+    };
+    let mut file = OpenOptions::new()
+        .read(true)
+        .append(true)
+        .create(true)
+        .truncate(false)
+        .open(&next)
+        .map_err(|error| fail("cannot open", &error))?;
+    file.try_lock()
+        .map_err(|error| fail("cannot lock", &error))?;
+    let mut text = format!("{}\n", header());
+    for commit in &kept {
+        text.push_str(&line_of(commit).to_string());
+        text.push('\n');
+    }
+    file.set_len(0)
+        .and_then(|()| file.write_all(text.as_bytes()))
+        .and_then(|()| file.sync_data())
+        .map_err(|error| fail("cannot write", &error))?;
+    // Numbered after the last event the old log held, removed or not, so no id comes back.
+    let stream = EventStream::load(kept.into_iter().flatten())
+        .continuing(EventId::new(last), time)
+        .with_log(JsonlLog { file, last });
+    stream.commit(markers)?;
+    Ok(next)
+}
+
+/// Where a log at `path` is written again before it takes the old one's place.
+fn beside(path: &Path) -> Result<PathBuf, LogError> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| LogError::new(format!("{} names no file", path.display())))?;
+    let mut name = name.to_owned();
+    name.push(".removing");
+    Ok(path.with_file_name(name))
+}
+
+/// Make a file's new name in the directory holding `path` survive a crash, where the
+/// platform allows a directory to be synced.
+fn sync_directory(path: &Path) {
+    #[cfg(unix)]
+    if let Some(directory) = path.parent().and_then(|parent| File::open(parent).ok()) {
+        drop(directory.sync_all());
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+/// One commit as the line that stores it, without its newline.
+fn line_of(batch: &[Event]) -> Value {
+    Value::Array(
+        batch
+            .iter()
+            .map(|event| {
+                json!({
+                    "id": event.id.get(),
+                    "time": event.time,
+                    "session": event.session.as_ref().map(SessionId::as_str),
+                    "source": event.source.to_string(),
+                    "cause": event.cause.map(EventId::get),
+                    "topic": event.topic,
+                    "payload": event.payload,
+                })
+            })
+            .collect(),
+    )
+}
+
 impl Log for JsonlLog {
     fn commit(&mut self, batch: &[Event]) -> Result<(), LogError> {
         let mut last = self.last;
-        let mut line = Vec::with_capacity(batch.len());
         for event in batch {
             if event.id.get() != last + 1 {
                 return Err(LogError::new(format!(
@@ -155,18 +321,9 @@ impl Log for JsonlLog {
                 )));
             }
             last += 1;
-            line.push(json!({
-                "id": event.id.get(),
-                "time": event.time,
-                "session": event.session.as_ref().map(SessionId::as_str),
-                "source": event.source.to_string(),
-                "cause": event.cause.map(EventId::get),
-                "topic": event.topic,
-                "payload": event.payload,
-            }));
         }
         // One write for the whole commit, so a crash cannot store only some of its events.
-        let line = format!("{}\n", Value::Array(line));
+        let line = format!("{}\n", line_of(batch));
         self.file
             .write_all(line.as_bytes())
             .and_then(|()| self.file.sync_data())
@@ -203,7 +360,8 @@ fn check_header(line: &str) -> Result<(), String> {
     }
 }
 
-/// Decode one line into the events of a commit, which must continue from the id `last`.
+/// Decode one line into the events of a commit, whose ids must rise from above `last`. They
+/// may skip some, where whole sessions were removed.
 fn parse_commit(line: &str, mut last: u64) -> Result<Vec<Event>, String> {
     let commit: Vec<Value> = serde_json::from_str(line).map_err(|error| error.to_string())?;
     let mut events = Vec::with_capacity(commit.len());
@@ -218,7 +376,7 @@ fn parse_commit(line: &str, mut last: u64) -> Result<Vec<Event>, String> {
             .get("id")
             .and_then(Value::as_u64)
             .ok_or("an event has no `id`")?;
-        if id != last + 1 {
+        if id <= last {
             return Err(format!("event #{id} does not follow #{last}"));
         }
         last = id;
@@ -243,10 +401,8 @@ fn parse_commit(line: &str, mut last: u64) -> Result<Vec<Event>, String> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-    use std::path::PathBuf;
 
-    use corduroy_core::{Draft, Source};
+    use corduroy_core::Source;
     use corduroy_test_support::scratch;
 
     use super::*;
@@ -334,6 +490,87 @@ mod tests {
         assert_eq!(open(&path).unwrap().events()[1].time, stored);
     }
 
+    /// The markers removing `sessions` leave, as the harness writes them.
+    fn markers(sessions: &[&str]) -> (BTreeSet<SessionId>, Vec<Draft>) {
+        let drafts = sessions
+            .iter()
+            .map(|session| Draft::new(Source::User, "session/removed").payload(*session))
+            .collect();
+        (
+            sessions.iter().copied().map(SessionId::new).collect(),
+            drafts,
+        )
+    }
+
+    #[test]
+    fn removing_a_session_keeps_the_rest_and_never_reuses_an_id() {
+        let path = log_in("jsonl-remove");
+        let (main, side) = (SessionId::new("main"), SessionId::new("side"));
+        let stream = open(&path).unwrap();
+        stream.emit(user("a").session(main.clone())).unwrap();
+        // One commit holding events of both sessions and of none.
+        stream
+            .commit([
+                user("b").session(side.clone()),
+                user("c").session(main),
+                Draft::new(Source::Host, "plugin/activated"),
+            ])
+            .unwrap();
+        stream.emit(user("d").session(side.clone())).unwrap();
+        drop(stream);
+
+        let removed = remove(&path, |events| {
+            assert_eq!(events.len(), 5);
+            Ok(markers(&["side"]))
+        })
+        .unwrap();
+
+        assert_eq!(removed, BTreeSet::from([side.clone()]));
+        let stream = open(&path).unwrap();
+        let kept: Vec<(u64, String)> = stream
+            .events()
+            .into_iter()
+            .map(|event| (event.id.get(), event.topic))
+            .collect();
+        // What was left of each commit, then the marker after the last id the log held.
+        let topics = ["a", "c", "plugin/activated", "session/removed"];
+        let expected: Vec<(u64, String)> = [1, 3, 4, 6]
+            .into_iter()
+            .zip(topics.map(str::to_owned))
+            .collect();
+        assert_eq!(kept, expected);
+        assert_eq!(stream.session(&side).len(), 0);
+        assert_eq!(stream.events()[3].payload, "side");
+        assert_eq!(stream.emit(user("e")).unwrap().get(), 7);
+        drop(stream);
+        let text = fs::read_to_string(&path).unwrap();
+        // The header, the two commits left (one of them shorter), the marker and `e`.
+        assert_eq!(text.lines().count(), 5, "{text}");
+        assert!(!beside(&path).unwrap().exists());
+    }
+
+    #[test]
+    fn a_removal_that_fails_or_picks_nothing_leaves_the_log_as_it_was() {
+        let path = log_in("jsonl-remove-nothing");
+        let stream = open(&path).unwrap();
+        stream
+            .emit(user("a").session(SessionId::new("main")))
+            .unwrap();
+        drop(stream);
+        let before = fs::read_to_string(&path).unwrap();
+
+        let none = remove(&path, |_| Ok(markers(&[]))).unwrap();
+        let error = remove(&path, |_| Err(LogError::new("no such session"))).unwrap_err();
+        let held = open(&path).unwrap();
+        let locked = remove(&path, |_| Ok(markers(&["main"]))).unwrap_err();
+        drop(held);
+
+        assert_eq!(none.len(), 0);
+        assert_eq!(error.to_string(), "event log: no such session");
+        assert!(locked.to_string().contains("cannot lock"), "{locked}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
+    }
+
     #[test]
     fn files_that_are_not_a_readable_log_are_refused_untouched() {
         let cases = [
@@ -342,9 +579,10 @@ mod tests {
             ("future", "{\"corduroy-log\":3}\n", "schema version 3"),
             ("corrupt", "{\"corduroy-log\":1}\nnot json\n", "line 2 of"),
             (
-                "gap",
-                "{\"corduroy-log\":1}\n[{\"id\":2,\"source\":\"user\",\"topic\":\"a\",\"payload\":\"\"}]\n",
-                "does not follow #0",
+                "backwards",
+                "{\"corduroy-log\":2}\n[{\"id\":2,\"source\":\"user\",\"topic\":\"a\",\"payload\":\"\"}]\n\
+                 [{\"id\":2,\"source\":\"user\",\"topic\":\"a\",\"payload\":\"\"}]\n",
+                "does not follow #2",
             ),
         ];
         for (name, contents, expected) in cases {

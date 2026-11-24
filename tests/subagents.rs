@@ -152,7 +152,7 @@ async fn a_gate_asking_in_the_child_holds_the_parent_until_it_is_answered() {
 }
 
 fn harness_from(events: &EventStream, model: &Arc<ScriptedProvider>) -> Harness {
-    harness(model, Arc::new(EventStream::replay(events.events())))
+    harness(model, Arc::new(EventStream::load(events.events())))
 }
 
 #[tokio::test]
@@ -238,7 +238,7 @@ async fn a_run_cut_short_as_a_call_began_waiting_starts_no_second_child() {
         say("There are 3 files."),
         say("3 files."),
     ]));
-    let again = harness_with(&model, Arc::new(EventStream::replay(survived)));
+    let again = harness_with(&model, Arc::new(EventStream::load(survived)));
     let outcome = again.continue_run(&SessionId::new(MAIN)).await.unwrap();
 
     assert_eq!(
@@ -295,7 +295,7 @@ async fn a_plugins_event_does_not_answer_a_gate_or_write_the_conversation() {
             .unwrap();
     }
 
-    let again = harness_with(&model, Arc::new(EventStream::replay(events.events())));
+    let again = harness_with(&model, Arc::new(EventStream::load(events.events())));
     again.gates().insert("careful", gate).unwrap();
     let outcome = again.continue_run(&main).await.unwrap();
 

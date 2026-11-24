@@ -55,6 +55,15 @@ A tool call leaves a trail, one commit at a time: `tool/call`, then `tool/start`
 running (it runs again only if `replay-safe`, else the model gets an `interrupted` error), or
 finished (its result is handed over from the log).
 
+## The log itself
+
+These belong to no session.
+
+| Topic | Source | Payload |
+| --- | --- | --- |
+| `process/start` | host | `{"program", "version", "world", "platform"}`: what the process that opened the log runs as, recorded before anything else it writes; `world` (the plugin world, such as `corduroy:plugin@0.1.0`) only if it hosts add-ons |
+| `session/removed` | user | `{"session"}`: a person removed that session from the log (`corduroy sessions remove`), with the sessions it started, each leaving one of these |
+
 ## Plugins
 
 | Topic | Source | When |
@@ -78,4 +87,8 @@ Add-ons may emit topics of their own through the `events` capability (`skills/ch
 
 The log file starts with a header line carrying its schema version (currently 2); older
 versions stay readable. Events gain fields and topics; they do not lose or repurpose them.
+
+While a program runs the log only grows. Between runs, removing a session takes its events
+out, so a reader must expect gaps in the ids (they are never used again), a `cause` naming
+an event that is gone, and, in a log edited by hand, a session whose parent is gone.
 Readers should ignore topics and fields they do not know.

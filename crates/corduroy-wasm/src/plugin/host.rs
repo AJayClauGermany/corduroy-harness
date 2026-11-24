@@ -16,7 +16,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use corduroy_core::{
     CallError as CoreCallError, Completion, Content, Draft, Event, EventId, EventStream, FiberId,
-    Gates, Grants, HttpClients, HttpRequest, Kernels, ModelError, Models, PLUGIN_LOAD, Pattern,
+    Gates, Grants, HttpClients, HttpRequest, Kernels, ModelError, Models, PLUGIN_LOAD, Query,
     Requests, Role, Scope, Secrets, Services, SessionId, Source, TOOL_CALL,
     ToolError as CoreToolError, ToolOutput, Tools, Turn, Verdict, json,
 };
@@ -991,22 +991,23 @@ impl log_read::Host for HostState {
             .events
             .clone()
             .ok_or_else(|| HostError::Failed(unlent("event stream")))?;
-        let topics = Pattern::new(topic);
         let limit = usize::try_from(limit.min(MAX_EVENTS)).unwrap_or_default();
+        let mut query = Query::first(limit).after(EventId::new(after)).topics(topic);
+        if let Some(session) = session {
+            query = query.session(SessionId::new(session));
+        }
         let grants = &self.grants;
-        let found = events.after(EventId::new(after), limit, |event| {
-            let in_session = event.session.as_ref().map(SessionId::as_str);
-            let reached = format!(
-                "{}:{}",
-                escaped(in_session.unwrap_or_default()),
-                event.topic
-            );
-            session
-                .as_deref()
-                .is_none_or(|wanted| in_session == Some(wanted))
-                && topics.matches(&event.topic)
-                && grants.check("log-read", &reached).is_ok()
-        });
+        let found = events
+            .read_where(&query, |event| {
+                let in_session = event.session.as_ref().map(SessionId::as_str);
+                let reached = format!(
+                    "{}:{}",
+                    escaped(in_session.unwrap_or_default()),
+                    event.topic
+                );
+                grants.check("log-read", &reached).is_ok()
+            })
+            .map_err(|error| HostError::Failed(error.to_string()))?;
         Ok(found.iter().map(event_of).collect())
     }
 }

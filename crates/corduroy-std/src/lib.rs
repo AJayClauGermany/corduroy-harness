@@ -44,7 +44,7 @@ use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
 
-use corduroy_harness::core::EventStream;
+use corduroy_harness::core::{EventStream, LogError, SessionId};
 pub use corduroy_harness::wasm;
 pub use corduroy_http as http;
 pub use corduroy_jsonl as jsonl;
@@ -57,12 +57,16 @@ pub use places::{DATA_DIR, Places};
 /// Opens the event log kept at a path.
 type OpenLog = dyn Fn(&Path) -> Result<EventStream, String> + Send + Sync;
 
+/// Removes a session, with the sessions it started, from the event log kept at a path.
+type RemoveSession = dyn Fn(&Path, &SessionId) -> Result<Vec<SessionId>, String> + Send + Sync;
+
 /// The standard extensions, as parts that can each be swapped. See the [crate documentation](crate).
 #[derive(Clone)]
 pub struct Standard {
     kinds: Extensions,
     defaults: Vec<String>,
     log: Arc<OpenLog>,
+    remove: Arc<RemoveSession>,
     addons: bool,
 }
 
@@ -91,6 +95,16 @@ impl Standard {
             kinds: Extensions::builtin(),
             defaults: vec!["http-client".to_owned()],
             log: Arc::new(|path| jsonl::open(path).map_err(|error| error.to_string())),
+            remove: Arc::new(|path, session| {
+                let removed = jsonl::remove(path, |events| {
+                    corduroy_harness::removal(events, session)
+                        .map(|removal| (removal.sessions, removal.markers))
+                        .map_err(|error| LogError::new(error.to_string()))
+                });
+                removed
+                    .map(|sessions| sessions.into_iter().collect())
+                    .map_err(|error| error.to_string())
+            }),
             addons: true,
         }
     }
@@ -122,13 +136,28 @@ impl Standard {
     }
 
     /// Keep the event log with `open`, which opens (or creates) the log at a path and returns
-    /// the stream over it, rather than in a JSON Lines file.
+    /// the stream over it, rather than in a JSON Lines file. Such a log cannot have sessions
+    /// removed from it unless [`with_removal`](Self::with_removal) says how.
     #[must_use]
     pub fn with_log(
         mut self,
         open: impl Fn(&Path) -> Result<EventStream, String> + Send + Sync + 'static,
     ) -> Self {
         self.log = Arc::new(open);
+        self.remove = Arc::new(|_, _| Err("this event log cannot remove sessions".to_owned()));
+        self
+    }
+
+    /// Remove sessions from the event log with `remove`, which takes a session, and every
+    /// session started from it, out of the log at a path, leaving a marker for each, and
+    /// returns the sessions it removed. `corduroy_harness::removal` says which sessions and
+    /// what the markers are, so that every store removes the same.
+    #[must_use]
+    pub fn with_removal(
+        mut self,
+        remove: impl Fn(&Path, &SessionId) -> Result<Vec<SessionId>, String> + Send + Sync + 'static,
+    ) -> Self {
+        self.remove = Arc::new(remove);
         self
     }
 
@@ -164,5 +193,20 @@ impl Standard {
     /// Why the log could not be opened.
     pub fn open_log(&self, path: &Path) -> Result<EventStream, String> {
         (self.log)(path)
+    }
+
+    /// Remove `session`, and every session started from it, from the event log at `path`,
+    /// between runs. Returns the sessions removed.
+    ///
+    /// # Errors
+    ///
+    /// Why nothing was removed: the log has no such session, is open elsewhere, or cannot
+    /// have sessions removed.
+    pub fn remove_session(
+        &self,
+        path: &Path,
+        session: &SessionId,
+    ) -> Result<Vec<SessionId>, String> {
+        (self.remove)(path, session)
     }
 }

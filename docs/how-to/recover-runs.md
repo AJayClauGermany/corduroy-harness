@@ -64,10 +64,23 @@ corduroy sessions
 In a chat, `/session refactor` switches (starting it if new) and `/sessions` lists them.
 Sub-agents started with `delegate` are sessions too, listed with the session they came from.
 
+## Remove a session
+
+A session you no longer want kept goes out of the log whole, with the sessions started from
+it:
+
+```bash
+corduroy sessions remove refactor
+```
+
+The log keeps a `session/removed` marker for each, so it still says that something was
+there and when it went, though not what. Plugin state and other sessions stay. Nothing
+smaller than a session can be removed, and nothing is removed by itself.
+
 ## Start over
 
 Sessions, runs, plugin state and the conversation all live in the log. To start from
-nothing, move it away:
+nothing, rather than [removing one session](#remove-a-session), move it away:
 
 ```bash
 mv .corduroy/log.jsonl .corduroy/log.old.jsonl

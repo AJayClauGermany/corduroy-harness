@@ -91,7 +91,9 @@ pub use context::{
     App, Context, ContextError, FiberId, FiberInfo, FiberState, FnPlugin, Plugin, PluginError,
     RESERVED_NAMES, Requests, plugin_fn,
 };
-pub use event::{Draft, Event, EventId, EventStream, ListenerId, Log, LogError, SessionId, Source};
+pub use event::{
+    Draft, Event, EventId, EventStream, ListenerId, Log, LogError, Query, SessionId, Source,
+};
 pub use gate::{Decision, GATES, Gate, Gates, PLUGIN_LOAD, POINTS, TOOL_CALL, UNDECLARED, Verdict};
 pub use http::{HTTP, HttpClient, HttpClients, HttpRequest, HttpResponse};
 #[cfg(feature = "std")]

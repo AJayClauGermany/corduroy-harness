@@ -58,8 +58,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use corduroy_harness::core::{FiberId, FiberState, Scope};
-use corduroy_harness::wasm::{CAPABILITIES, WasmRuntime};
-use corduroy_harness::{Harness, provider};
+use corduroy_harness::wasm::{CAPABILITIES, WORLD, WasmRuntime};
+use corduroy_harness::{Harness, ProcessInfo, provider};
 use corduroy_providers::ProviderSpec;
 pub use corduroy_std::{DATA_DIR, Places};
 use corduroy_std::{ENV_SECRET, MCP, Standard, kernel_kind};
@@ -240,6 +240,16 @@ impl AgentError {
 }
 
 impl AgentFile {
+    /// Where the event log is kept: `log`, or `log.jsonl` in the agent's own directory. A
+    /// relative path is in the workspace, like every other path the file names.
+    #[must_use]
+    pub fn log_path(&self, places: &Places) -> PathBuf {
+        self.log.as_deref().map_or_else(
+            || places.data.join("log.jsonl"),
+            |path| places.workspace.join(places.expand(path)),
+        )
+    }
+
     /// Parse an agent file.
     ///
     /// # Errors
@@ -523,13 +533,18 @@ pub fn assemble_from(
 ) -> Result<Agent, AgentError> {
     fs::create_dir_all(&places.data)
         .map_err(|error| AgentError::new(format!("{}: {error}", places.data.display())))?;
-    // A relative path is in the workspace, like every other path the file names.
-    let log = file.log.as_deref().map_or_else(
-        || places.data.join("log.jsonl"),
-        |path| places.workspace.join(places.expand(path)),
-    );
+    let log = file.log_path(places);
     let events = standard
         .open_log(&log)
+        .map_err(|error| AgentError::new(format!("log {}: {error}", log.display())))?;
+    // What this process runs as, before anything else it writes.
+    let platform = format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS);
+    let mut process = ProcessInfo::new("corduroy", env!("CARGO_PKG_VERSION"), platform);
+    if standard.addons() {
+        process = process.world(WORLD);
+    }
+    events
+        .emit(process.start())
         .map_err(|error| AgentError::new(format!("log {}: {error}", log.display())))?;
     let mut harness = Harness::open(Arc::new(events))
         .map_err(|error| AgentError::new(error.to_string()))?
