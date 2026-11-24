@@ -38,13 +38,12 @@ reshapes entries further down.
 
 | Order | Group | Questions |
 | --- | --- | --- |
-| 6 | How the plugin world grows | E3, E4, E7, E17 |
 | 7 | What an extension can reach | G1, G2, G4, G12, G18 |
 | 8 | How people meet it | H1, H11, H14, I4 |
 
 Everything not in this table is detail that hangs off one of these, or a mechanical choice
 (which types may grow, which names are final) best made in one sitting per section once its
-group is settled. The first five groups are decided, and every question below is read
+group is settled. The first six groups are decided, and every question below is read
 against them. Why this exists, and the two uses 1.0 is measured against, are in
 [What it is for](design.md#what-it-is-for). What freezes, what is only stable and what
 "frozen" allows are in [What is stable](design.md#what-is-stable), with the four proofs
@@ -57,7 +56,10 @@ a model says about itself, that the core's traits are called and waited for, and
 kinds of thing a plugin contributes are closed at eight are in
 [What the core is made of](design.md#what-the-core-is-made-of). What 1.0 promises about
 safety, what a kernel is given of the machine, and what a workspace may configure are in
-[What is safe by default](design.md#what-is-safe-by-default).
+[What is safe by default](design.md#what-is-safe-by-default). What is promised to an add-on
+already built, how the capabilities grow, that the exports are closed at six, and which
+versions of the world a host accepts are in
+[How the plugin world grows](design.md#how-the-plugin-world-grows).
 
 ## P. Purpose and place
 
@@ -193,21 +195,29 @@ therefore a list of which places to mark. What is left here is how the freeze is
 ### A4. What enforces the freeze?
 
 Nothing does today: CI has no check of the public API, the WIT or the log format against a
-recorded baseline.
+recorded baseline. One check is decided: a built add-on from each released world is kept as
+a fixture and loaded by every later host
+([How the plugin world grows](design.md#how-the-plugin-world-grows)).
 
 *Direction.* `cargo-semver-checks` (or a public-API snapshot) on `corduroy-core` and
-`corduroy-harness`; a snapshot of `wit/corduroy.wit`'s exports and shared types; a log file
-of every schema version from 1.0 on kept as a fixture and read back in a test. The same
-check can hold the list of places marked for growth, so that an addition anywhere else
-fails.
+`corduroy-harness`; a snapshot of `wit/corduroy.wit`'s exports, shared types and each
+interface's functions, so that a changed one fails and an added one is seen; a log file of
+every schema version from 1.0 on kept as a fixture and read back in a test. The same check
+can hold the list of places marked for growth, so that an addition anywhere else fails. For
+the add-on fixtures, decide which guest languages are kept and where: a JavaScript or
+Python add-on is 12 to 19 MB, which is a lot to hold in the repository for every release.
 
 ### A5. What carries the version 1.0, and are the versions tied?
 
 The crates are `0.1.0`, the WIT package is `corduroy:plugin@0.1.0`, the log's schema is `2`.
 Whether these move together decides what a guest SDK, a store and an extension each pin.
+What a version of the world means is decided, and an add-on built against its 1.0 loads on
+every host whose world is 1.x
+([How the plugin world grows](design.md#how-the-plugin-world-grows)).
 
 *Direction.* One version per contract, moving independently: the crates (semver), the WIT
-package, the log schema.
+package, the log schema. Then say whether the world may reach a new major version while
+the command stays at 1.x, since a person reads "every 1.x" as the command's.
 
 ### A6. Is the minimum Rust version part of the contract?
 
@@ -729,35 +739,22 @@ allowed host can still be sent anything, which no list changes.
 ### E1. What can a host call fail with?
 
 `host-error` is `denied` or `failed` (`wit/corduroy.wit:6`), used by fourteen interfaces. A
-missing file, bad input and a timeout are all `failed`, and a variant cannot gain a case
-without a new package version.
+missing file, bad input and a timeout are all `failed`. A variant gains no case within 1.x:
+the engine checks types, so an add-on already built would stop loading
+([How the plugin world grows](design.md#how-the-plugin-world-grows)).
 
-*Direction.* Add the cases now: at least `not-found`, `invalid`, `timed-out`.
+*Direction.* Add the cases now, since there is no later: at least `not-found`, `invalid`,
+`timed-out`.
 
 ### E2. Can what a guest returns grow?
 
 `tool-spec` and `plugin-info` are fixed records, though the core's `ToolSpec` was made
-growable. `content` is text or an image.
+growable. `content` is text or an image. None of them gains a field or a case within 1.x
+([How the plugin world grows](design.md#how-the-plugin-world-grows)), so whatever is to
+grow has to be given its place before 1.0.
 
 *Direction.* An open tail on both records (a list of named values), and a general typed
 block (`mime-type`, `data`) beside `image`.
-
-### E3. What happens to a guest built for another version of the world?
-
-The host drops the version when reading a component's imports
-(`crates/corduroy-wasm/src/plugin.rs:397`), so such a guest loads and then fails at
-instantiation with the engine's own error.
-
-*Direction.* Check at load, with a message that names both versions; decide which versions a
-host accepts.
-
-### E4. How is a new kind of contribution added once exports are frozen?
-
-All six exports are required of every guest, so a seventh orphans every built add-on.
-
-*Direction.* Choose one rule and write it down: the host resolves exports one by one and
-tolerates absence, or every new kind goes through `provides` and `handle-call` as
-`compaction` already does.
 
 ### E5. Can a header mix text and a secret?
 
@@ -775,18 +772,15 @@ starting a child session.
 tool that asks the person a question, and an agent that waits for the next message from
 another. If an add-on cannot wait, both have to be extensions.
 
-*Direction.* Decide whether waiting is offered to add-ons (on `session`, or a new
-interface) before extensions start raising signals. The answer is wanted at 1.0, since the
+Where it goes is decided: waiting changes how a run proceeds, which no grant of `session`
+covers, so it is an interface of its own, in the 1.0 world
+([How the plugin world grows](design.md#how-the-plugin-world-grows)).
+
+*Direction.* What is left is its shape, before extensions start raising signals: what the
+call hands back to the add-on once it has said its result will come with a signal, how the
+signal is named ([B20](#b20-how-are-signals-named)), and what the grant is scoped by. The
 tool that asks the person
-([D10](#d10-what-form-does-a-tools-question-to-the-person-take)) is.
-
-### E7. May an existing interface gain a function?
-
-"Adding an import interface breaks nobody" is the stated rule. Adding a function to an
-interface that exists is not covered, and several entries below depend on it.
-
-*Direction.* Decide: either interfaces are frozen and growth is a new interface, or an
-interface may gain functions under a new minor version.
+([D10](#d10-what-form-does-a-tools-question-to-the-person-take)) is its first user.
 
 ### E8. How does a model call cross the boundary?
 
@@ -799,16 +793,8 @@ without tools, a reply with a message, usage and the reason the model stopped, m
 and a record in the world does not, so they are JSON text in the shape a `message` event
 holds (which an add-on already reads through `log-read`) unless
 [E13](#e13-when-is-a-value-json-text-and-when-a-typed-record) says otherwise. Listing models
-is a function `llm` gains, which [E7](#e7-may-an-existing-interface-gain-a-function) has to
-allow, or an interface of its own.
-
-### E9. Can an add-on read bytes?
-
-`fs-read` returns text. Reading an image (design's `read_image`, "left for later") needs
-bytes.
-
-*Direction.* Decide whether this is in 1.0; under E7 it is either a new function or a new
-interface.
+is a function of `llm`: it shows only what the grant already reaches
+([How the plugin world grows](design.md#how-the-plugin-world-grows)).
 
 ### E10. Who bounds a kernel cell's time?
 
@@ -826,8 +812,9 @@ report a refusal.
 
 ### E12. Can an add-on ever contribute a loop step, a model or a kernel?
 
-Today no: these are native. Design's open question ("operations from plugins") needs an
-export, and exports freeze.
+Today no: these are native. It will not be by an export: the exports are closed at six for
+all of 1.x, and what the host newly asks of an add-on goes through `handle-call`
+([How the plugin world grows](design.md#how-the-plugin-world-grows)).
 
 [What it is for](design.md#what-it-is-for) rules out "never" for the loop: an add-on has to
 be able to say what a run's steps are, so a workflow (a reviewer, two agents taking turns)
@@ -838,14 +825,18 @@ does not run a loop of its own by asking a model with tools through `llm`. Whate
 a session the harness runs, so an add-on's loop is something it tells the harness, not
 something it carries out.
 
-*Direction.* Decide how, so no export has to be added later: through services (E4), or as a
-description of a loop that a native step carries out. Models and kernels can still be
-"never".
+*Direction.* Choose between the two forms left: a service the harness asks at each step, or
+a description of a loop that a native step carries out. Models and kernels can still be
+"never"; one that does come is a service an extension registers in the core's registry.
 
 ### E13. When is a value JSON text and when a typed record?
 
 Gate requests, service payloads and configuration are JSON text; events and tool specs are
 records.
+
+Two decisions lean on the answer. A record gains no field and a variant no case within 1.x,
+and whatever the host newly asks of an add-on is JSON through `handle-call`
+([How the plugin world grows](design.md#how-the-plugin-world-grows)).
 
 *Direction.* State the rule (JSON where the shape is the plugin's or grows; records where
 the host must read it).
@@ -858,10 +849,14 @@ It can learn it is stopping; it cannot say how far it has got.
 live channel in the loop and, at a coarse grain, into checkpoints in the log, reported
 through the call scope. A native tool reaches the call scope; an add-on does not.
 
-*Direction.* A new import interface for it (imports may be added after 1.0), or a function
-on `session`, which [E7](#e7-may-an-existing-interface-gain-a-function) has to allow first.
-Decide whether it is needed at 1.0: the shipped `bash` is an add-on, and a long command is
-the case that wants it most.
+How an add-on reaches it is decided: reporting is something new, which no grant of
+`session` covers, so it is an interface of its own, in the 1.0 world
+([How the plugin world grows](design.md#how-the-plugin-world-grows)). The shipped `bash` is
+an add-on, and a long command is the case that wants it most.
+
+*Direction.* What is left is its shape, which waits on the live channel and checkpoints
+being tried against a real provider: what a report holds, how often one may be made, and
+what the grant is scoped by.
 
 ### E15. What trail does a tool call made by an add-on leave?
 
@@ -877,14 +872,20 @@ A plugin loaded by a plugin is gone after a restart unless its loader loads it a
 *Direction.* Decide whether the host owes this (a plugin store), since `plugins.load`'s
 meaning freezes with the interface.
 
-### E17. Does an add-on built today load on a later host?
+### E18. Which service names are the harness's?
 
-Freezing the text of the world does not freeze what a built `.wasm` needs from the engine.
-The component format, wasmtime, `wit-component` and the JavaScript and Python toolchains
-all move on their own schedules.
+What the host newly asks of an add-on goes through `handle-call`, under a service name the
+harness defines, and a prefix is to be set aside for such names, so that a later one cannot
+be a name an add-on already answers to
+([How the plugin world grows](design.md#how-the-plugin-world-grows)). Today the names are
+bare: the loop asks for `compaction`, the harness provides `sessions`, and an add-on may
+list any name in `provides`.
 
-*Direction.* State the promise (a built add-on loads on every 1.x host, or is rebuilt for
-each minor release) and keep a built add-on from each released world as a test fixture.
+*Direction.* Choose the prefix before 1.0, since the names in `provides` are inside built
+add-ons. Decide whether `compaction` and `sessions` move under it, what happens to an
+add-on that provides a name under the prefix which the harness has not defined, and where
+the one list of defined names and their payloads is kept (with the topics,
+[C11](#c11-which-topics-and-payload-fields-are-frozen-and-where-is-the-one-list)).
 
 ## F. The WebAssembly host
 
@@ -1280,6 +1281,9 @@ depend on.
 ### I1. Is `corduroy-guest`'s API stable?
 
 Every Rust add-on builds on it. It is neither in the stable list nor declared free to move.
+What is promised is the built add-on, not its source
+([How the plugin world grows](design.md#how-the-plugin-world-grows)): whether source
+written against one release of the crate builds against the next is this question.
 
 *Direction.* Decide which, and version it against the WIT package.
 
@@ -1306,7 +1310,13 @@ Rust is the reference; JavaScript, TypeScript and Python have SDKs; the script h
 scripts with nothing compiled. A JavaScript or Python add-on is 12 to 19 MB built and
 holds 9 to 13 MB for each instance.
 
-*Direction.* Name the first-class ones, and say whether the script host is among them.
+The script host is promised already: what a script is handed (the `host` object) and the
+plugin object it returns hold for all of 1.x
+([How the plugin world grows](design.md#how-the-plugin-world-grows)).
+
+*Direction.* Name the first-class ones among the compiled languages. Write the script
+host's `host` object down as a reference page before 1.0, since it is now a contract and
+is described only in `sdk/js/script-host/host.js`.
 
 ### I6. What does "the agent extends itself" need at 1.0?
 

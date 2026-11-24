@@ -91,6 +91,13 @@ answer it.
 
 ## Versioning
 
-The package is `corduroy:plugin@0.1.0`. A new capability is a new import, which breaks no
-existing add-on; changing an export or a shared type changes the version. See
-[What is stable](../design.md#what-is-stable).
+The package is `corduroy:plugin@0.1.0`. Before 1.0 a host is promised to load only add-ons
+built for its own version of the world, and it does not check yet: an add-on built for
+another fails when it is instantiated.
+
+From 1.0, an add-on that is already built loads on every 1.x host. A minor version adds a
+capability, or a function to one where its grant already covers what the function does;
+neither breaks an existing add-on. Changing an export, a shared type or a function that
+exists is a new major version. A newer add-on on an older host loads only if everything it
+imports is there. See
+[How the plugin world grows](../design.md#how-the-plugin-world-grows).
