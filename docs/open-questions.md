@@ -636,6 +636,29 @@ every log written before then holds the bytes. Removing a session
 ([What the record promises](design.md#what-the-record-promises)) would then have to remove
 its bytes too, and bytes two sessions share would need an owner.
 
+### C21. What does the stream hold once a store keeps part of the log back?
+
+The read side is built ([What the record promises](design.md#what-the-record-promises)):
+`Log::read` with a default, and `EventStream::read` and `read_where`, which are paged, may
+fail, and are complete. The reads that cannot fail (`events()`, `session()`, `matching()`,
+`after()`, `get()`) answer from memory, so they are complete only while the store hands the
+stream everything, which the JSON Lines file does. The folder store will be the first that
+does not, and four things are then unsettled:
+
+- What the convenient reads promise: what the stream holds, and so less than the log; or
+  the whole log, reaching the store and hiding a failure to read it.
+- Which sessions a store hands over when it is opened ("the sessions in use"): those with
+  an unfinished run, those the program names, or none, each read when first asked for.
+- Whether the stream lets events go while it runs (a window, or sessions not touched for a
+  while), and whether what `read` brings back from the store is then kept.
+- Whether a plugin that reads with `log-read` should know that a read reached the store,
+  since it is slower and can fail.
+
+*Direction.* Decide with the folder store, before the core freezes, since the answer is
+what `EventStream`'s reads promise for good. Keeping the convenient reads to memory and
+saying so in their names (or their docs) costs nothing now; making them reach the store
+later changes what they promise.
+
 ## D. Core: gates, capabilities and scopes
 
 ### D1. Is a verdict allow, ask or deny, for good?

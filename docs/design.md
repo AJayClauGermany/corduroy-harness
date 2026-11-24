@@ -856,7 +856,8 @@ core before the freeze for that, and built:
 - The existing ones (`events()`, `session()`, `matching()`, `after()`, `get()`) stay as the
   convenient form. They cannot fail, so they answer from what the stream holds: the whole
   log while the store loads everything, which at 1.0 it still may (the JSON Lines file
-  does).
+  does). What they promise once a store keeps part of the log back, and which part it
+  hands over, is still open (C21).
 
 **The second store is a folder.** The [second store the freeze waits on](#what-the-freeze-waits-on)
 is this one (*planned*). A workspace is a folder holding one workspace file and one file per
