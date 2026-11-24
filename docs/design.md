@@ -349,7 +349,9 @@ denied a capability its interpreter imports.
 - **Metered.** Each call into a plugin has a fuel budget and instance memory is capped.
 
 A new capability is a new WIT interface, a `Host` implementation, and an entry in
-`CAPABILITIES`. Sandboxes layer on top of this: a kernel that runs in a container is still
+`CAPABILITIES`. Whether something new is a capability of its own or a function of one that
+exists is decided by what the grant already covers
+([How the plugin world grows](#how-the-plugin-world-grows)). Sandboxes layer on top of this: a kernel that runs in a container is still
 just a kernel name in a scope.
 
 ## The core boundary
@@ -380,7 +382,7 @@ Everything else is a plugin, and a plugin may itself offer primitives to other p
 | Conversation projection | built | Messages, and the `compaction` event: the messages before `keep_from` stay in the log and the conversation but are hidden from the model, which sees the summary in their place. The harness cuts only before the current turn; when, and the summary, come from the plugin providing the `compaction` service, asked by a loop step (`CompactOperation`). |
 | Model access | built | The loop asks the provider registered under a name in `Providers`, on every request, so a plugin supplies the model and unloading it takes the model away. `Harness::new` registers its argument there for convenience. For plugins, the core's `Models` registry: one completion, synchronously, by model name; a `provider` plugin can serve its models there. *Planned:* one request and reply for the loop and plugins, in the core, and a model that describes itself ([What the core is made of](#what-the-core-is-made-of)). |
 | Secrets and outbound requests | built | `Secrets` and `HttpClients` registries. The core checks and records; native plugins hold the values and send the requests, so an HTTP client is a plugin like a kernel is. |
-| Versioning | WIT package version, log schema version | Built: a schema version in each log's header (2, which added the time; 1 is still read), and the rule for the world in [What is stable](#what-is-stable). Still to do: a version on each plugin's stored state. |
+| Versioning | WIT package version, log schema version | Built: a schema version in each log's header (2, which added the time; 1 is still read), and the rule for the world in [What is stable](#what-is-stable). Still to do: a version on each plugin's stored state, and the check of the world's version when an add-on is loaded ([How the plugin world grows](#how-the-plugin-world-grows)). |
 
 **Child sessions, a service rather than a capability (built).** The plan was a `session`
 capability to start a child session and await it. It became a service the harness
@@ -623,7 +625,7 @@ from the capabilities alone belongs in an add-on instead.
 | --- | --- | --- | --- |
 | `corduroy-shell` | `shell-kernel`, `powershell-kernel` | processes, pipes, process groups | No: the `kernel` capability is how add-ons reach it. |
 | `corduroy-http` | `http-client` | sockets and TLS | No: it is what the `http` capability sends through. |
-| `corduroy-providers` | `[providers.*]` | async HTTP clients, credentials, streaming | Not yet: the loop asks a `Provider` for every step, and the world has no export to serve one. A model API over `http` and `secret` is the route if one is added. |
+| `corduroy-providers` | `[providers.*]` | async HTTP clients, credentials, streaming | Not yet: the loop asks a `Provider` for every step, and the world has no export to serve one and gains none in 1.x ([How the plugin world grows](#how-the-plugin-world-grows)). The route, if it is ever wanted, is a service an add-on provides over `http` and `secret`, which an extension registers as a provider. |
 | `corduroy-mcp` | `mcp` | starting a server through `Kernel::spawn` and holding its pipes; a streaming HTTP client | Over stdio, no: no capability spawns. Over streamable HTTP, possibly, through `http` (one request at a time, no streams); not done. |
 | `corduroy-std` | `env-secret` | the process environment | No: an add-on has no environment, and must never see the value. |
 
@@ -773,8 +775,8 @@ a settled rule: where the line falls may move as the proofs below are built.
 | Contract | Where | At 1.0 | Rule for change |
 | --- | --- | --- | --- |
 | The core | `corduroy-core`: the plugin tree, capabilities, the event stream, the registries and their traits | frozen | New trait methods come with defaults (as `Kernel::spawn` did). Types that grow are `#[non_exhaustive]` with constructors (`ToolSpec`, tool results), so a new field breaks no extension. Both only where growth was marked before 1.0. What the core offers without `std` only grows: something that needs an operating system is added behind `std`. |
-| The plugin world: exports and shared types | `wit/corduroy.wit` | frozen | Changing an export, or a type a guest sees, changes the package version, and guests are rebuilt against it; so exports and shared types change only together, rarely, and never to add what an import could add. |
-| The plugin world: imports (the capabilities) | `wit/corduroy.wit` | stable | Adding an import interface breaks nobody: a plugin that does not import it is unaffected, and a host without it refuses, at load, a plugin that does. So the set of capabilities grows after 1.0. |
+| The plugin world: exports and shared types | `wit/corduroy.wit` | frozen | The exports are closed at six. Changing an export, a type a guest sees, or a function that exists is a new major version of the package, and guests are rebuilt against it; so they change only together, rarely, and never to add what an import or a service could add. See [How the plugin world grows](#how-the-plugin-world-grows). |
+| The plugin world: imports (the capabilities) | `wit/corduroy.wit` | stable | A minor version adds an import interface, or a function to one where its grant already covers what the function does. Neither breaks a built add-on: one that does not import the addition is unaffected, and a host without it refuses, at load, an add-on that does. So the set of capabilities grows after 1.0, and an add-on built against 1.0 loads on every 1.x host. |
 | The loop's traits and registries | `corduroy-harness`: what extensions implement or register in (`Operation`, `Operations`, `Loop`, `Loops`, `Provider`, `Providers`) | stable | As for the core: defaults for new methods, `#[non_exhaustive]` for types that grow. |
 | The WebAssembly host's Rust API | `corduroy-wasm` | stable | Added to, not changed. |
 | The log | `corduroy-jsonl`, the topic table in `src/session.rs` | stable | The header's schema version changes when a line's shape does. Events gain fields; they do not lose or repurpose them. A log written by 1.0 or later is read by every later version. The other way round is not promised: an older program is helped with a newer log only by the rule that readers ignore topics and fields they do not know. |
@@ -827,6 +829,147 @@ Two rules came with the capabilities that reach outside:
   and WASI stays out of the linker to keep it true. The guest-language spike confirmed it for JavaScript and Python, with a
   catch: built without WASI their clocks trap or stand still and their random numbers repeat,
   so `clock`, `random` and `log` are needed as soon as either language is.
+
+## How the plugin world grows
+
+Four things about the plugin world after 1.0 are decided here: what is promised to an add-on
+that is already built, how the capabilities grow, that the exports do not, and which
+versions a host accepts. All of it is *planned*. Today the host drops the version when it
+reads a component's imports, so an add-on built for another world loads and then fails when
+it is instantiated, with the engine's own error; [Order of work](#order-of-work) lists what
+changes.
+
+**A built add-on loads on every 1.x host.** The promise is about the built thing, the
+`.wasm` file, and not only its source. An add-on built against the world of 1.0 loads on
+every later host whose world is 1.x, with nothing rebuilt, and each function it calls does
+what it was documented to do. What the agent built yesterday is then still there after the
+command is upgraded, which "the agent extends itself" needs and a rebuild for each release
+would quietly break. A change that would stop a built add-on loading is a new major version
+of the world.
+
+- *Scripts are inside the promise.* An automation the agent writes is mostly not a `.wasm`
+  file of its own: it is a script the script host runs, and the script host ships with the
+  command. What such a script depends on is the `host` object it is handed. `host` is not a
+  capability and grants nothing. It is how a script reaches the capabilities (`host.fsRead`,
+  `host.llm`, `host.state`), each call still checked against that automation's own grants.
+  Its names and shapes hold for all of 1.x, as the world they mirror does, and so does the
+  shape of the plugin object a script returns. A script written under 1.0 runs on every 1.x.
+- *Shipped add-ons need no promise.* They are rebuilt with every release.
+- *What "loads" covers.* That the add-on loads, and that each function does what its
+  documentation says. Not how fast it is, how fuel is counted, or what the default limits
+  are.
+- *It is kept by a test.* A built add-on from each released world is kept as a fixture and
+  loaded by every later host. An upgrade of the WebAssembly engine that cannot load one
+  waits until it can.
+- *One exception stands.* A flaw that breaks one of the six guarantees may be fixed by a
+  change that breaks a frozen contract ([What is safe by default](#what-is-safe-by-default)),
+  this one included.
+
+**Backwards compatible, forwards adaptable.** The promise runs one way. An older add-on on a
+newer host always loads. A newer add-on on an older host is not promised: it loads if
+everything it asks of the host is there, and is refused otherwise. Growth starts from a
+small set and builds on it, so what a host was not built to handle is handled by the release
+that adds it and by none before. What an older host does with something it does not know
+depends on what is being asked of it:
+
+| What the host does not know | What it does |
+| --- | --- |
+| Something the add-on needs from it: an interface, or a function of one | Refuses the add-on at load, naming what is missing. It cannot be ignored, since the add-on would call what is not there. |
+| Something in data it is handed: a field, a topic | Ignores it, as a reader of the log does ([What is stable](#what-is-stable)). |
+
+**An interface gains a function only inside its grant.** An import interface is a
+capability, and a capability is what a person grants. The engine would let an interface gain
+any function: an add-on built for 1.0 imports the functions it calls, and links against a
+host whose interface has more. The limit is the grant. A function added to an interface
+reaches every add-on already granted it, and the person is not asked again, so it may do
+only what that grant already covered.
+
+| What is added | Where it goes |
+| --- | --- |
+| Another way to the same thing: the same resource, under the same scope, with the same kind of effect. A different form of result, or more to say about what is asked for. | A function of the interface, in a minor version. Reading a file as bytes is `fs-read`'s: the same files, and still only reading. Listing models is `llm`'s: it shows only the models the grant reaches. |
+| Anything that does something new | A new interface, with a grant of its own. A running tool reporting how far it has got is not `session`'s, which only answers questions about the call being served. A tool call that waits for a signal changes how a run proceeds. |
+
+The test is whether the person who approved the grant under 1.0 would be surprised by what
+it now allows.
+
+- *What freezes is what a grant means, not its list of functions.* Each capability has one
+  sentence saying what holding it covers: the table under [Capabilities](#capabilities), and
+  the interface's own text in the WIT. Before 1.0 each sentence is read again, so that it is
+  as wide as is meant and no wider. After 1.0 it does not change, and it is what a proposed
+  function is held to.
+- *A function, once there, does not change.* The engine checks types, so a changed
+  signature would stop a built add-on loading. A different input or result is a new
+  function beside the old one. The same holds for the types add-ons share with the host: a
+  record gains no field and a variant no case within 1.x, so what must grow is marked
+  before 1.0 or is JSON text (E1, E2 and E13 in [Open questions](open-questions.md)).
+- *The cases already known go in before 1.0.* Progress from a running tool and a tool call
+  that waits for a signal are interfaces of the 1.0 world, so that the set is as complete
+  as it can be made when it is fixed. Their shapes are still open (E14, E6). Reading bytes
+  can come at any time, before 1.0 or after.
+- *A new ability is tried as a service first.* An interface added after 1.0 is there for
+  good. So an ability nobody has used yet is offered by an extension as a service, reached
+  through the `service` capability
+  ([the pressure valve](#three-tiers-core-extensions-add-ons)), and becomes a typed
+  interface in a minor version once it has proved itself.
+
+**The exports are closed at six.** What the host calls in an add-on is `activate`,
+`call-tool`, `on-event`, `prompt-part`, `gate` and `handle-call`, for all of 1.x. Whatever
+the host newly needs to ask an add-on goes through `handle-call`, under a service name the
+harness defines, as the loop already asks whichever add-on provides `compaction`. It
+follows from the kinds being [closed at eight](#what-the-core-is-made-of): a new kind is a
+service, and a service needs no export.
+
+- *The cost is types.* What is asked through a service is JSON text, so a wrong shape shows
+  when the call is made and not when the add-on is built. That is accepted.
+- *A seventh export is for 2.0.* Something asked through a service that proves itself may
+  become a typed export in the next major version, which is a breaking change. Anything
+  already known to need an export has to be found before 1.0.
+- *Exports stay mandatory.* Every add-on has all six, and the SDKs fill in the ones a
+  plugin does not write. A host that tolerates a missing export could come later and would
+  break nobody, so it is not decided now.
+- *The harness's service names are reserved.* If a later release asked add-ons for a
+  service under a name an add-on already used for something of its own, that add-on would
+  get calls it does not understand. A prefix is set aside before 1.0 for the services the
+  harness defines. Which prefix, and whether `compaction` and `sessions` move under it, is
+  still open (E18).
+- *A loop from an add-on is not an export.* How an add-on says what a run's steps are is
+  still open (E12), but it is a service the harness asks or a description it reads, not a
+  seventh way of being called. A model served by an add-on, if there ever is one, comes the
+  same way.
+
+**Which versions a host accepts.** The world's version is the WIT package's, and it reads as
+a semantic version does:
+
+| Change | Version |
+| --- | --- |
+| A new import interface; a function added to one, inside its grant | minor |
+| Wording that changes no shape | patch |
+| Anything else: an export, a shared type, a function that exists, something removed | major |
+
+The host checks when it loads an add-on, before anything is instantiated, and says what it
+found in its own words:
+
+| Add-on built for | On a 1.x host |
+| --- | --- |
+| An earlier 1.x | Loads, always. |
+| A later 1.x | Loads if every interface and function it imports is there. Otherwise it is refused, with a message naming the version it was built for, the host's, and what is missing. |
+| Another major version | Refused, naming both versions. |
+| Any version, before 1.0 | The host promises to load its own version only. |
+
+- *The check is on what the add-on imports, not on the number.* An add-on built against 1.3
+  that uses only what 1.0 had loads on a 1.1 host. A Rust add-on imports only the functions
+  it calls. A JavaScript or Python one imports every function of each interface in the
+  world it was built against ([Guest languages](guest-languages.md)), so it more often
+  needs a host as new as the one it was built for. Either way this is the forwards
+  direction, which is not promised.
+- *The engine already matches versions this way.* wasmtime's linker resolves an import of
+  `@1.0` against a definition of `@1.2`, and the other way round (checked in the pinned
+  51.0.0). The host's own check is there for the message, and so that the rule is ours and
+  not a property of one engine.
+- *Nothing is promised across a major version, and nothing is ruled out.* A 1.x host
+  accepts 1.x. Whether a 2.x host also loads add-ons built for 1.x, by carrying the old
+  world beside its own (the engine can link both, and the host would then implement and
+  keep safe two worlds), is decided when 2.0 is designed.
 
 ## Events, gates and hooks
 
@@ -1592,6 +1735,17 @@ the step it waits on is done.
     agent file accepted by its hash, the fallback order of agent files, and a shipped
     add-on's name resolved before anything a workspace holds; a test named for each of the
     six guarantees.
+15. How [the plugin world grows](#how-the-plugin-world-grows). *Decided, none of it built:*
+    a check of the world's version when an add-on is loaded, with a message naming the
+    version it was built for, the host's and what is missing; each capability's sentence
+    read again before the freeze; the interfaces already known to be wanted (progress from
+    a running tool, a tool call that waits for a signal) in the 1.0 world; the cases and
+    open tails the shared types need, since none can be added within 1.x; a prefix for the
+    service names the harness defines; a reference page for the script host's `host`
+    object; a built add-on from each released world as a fixture every later host loads.
+    To check on the way: that an add-on importing no capability still says which world it
+    was built for, in each guest language, and that the three toolchains accept a WIT in
+    which a function says which version it arrived in.
 
 ## Open questions
 
@@ -1614,8 +1768,10 @@ settled by 1.0 is there as well, and one that can wait is only here.
   session names its parent, branching can be added as "a new session whose parent is event N
   of another" without changing the log.
 - **Operations from plugins.** Loop steps are native `Operation`s, which extensions
-  register in `Operations`. Letting WebAssembly plugins contribute steps needs an
-  async-friendly, effect-returning export.
+  register in `Operations`. A WebAssembly plugin will not get an export for one: the
+  exports are closed at six ([How the plugin world grows](#how-the-plugin-world-grows)). It
+  says what a run's steps are through a service the harness asks, or as a description a
+  native step carries out; which is still open.
 - **Delivery order across threads.** Commits are stored in one order, and each is
   delivered by the thread that made it, so two threads committing at once may deliver out
   of id order. Listeners that must not get order wrong read the log. A single delivery
@@ -1640,8 +1796,10 @@ settled by 1.0 is there as well, and one that can wait is only here.
 - **Exports every guest must write.** Each export of the world is mandatory: the
   JavaScript and Python toolchains refuse to build a plugin without `gate`, and Rust's
   bindings will not compile. For Rust, `corduroy-guest` supplies a default for every export
-  but `activate` (a gate that is asked anyway denies); the JavaScript and Python SDKs must
-  do the same.
+  but `activate` (a gate that is asked anyway denies); the JavaScript and Python SDKs do
+  the same. Decided: it stays so, and no export is added in 1.x. A host that tolerates a
+  missing export could come later without breaking a built add-on
+  ([How the plugin world grows](#how-the-plugin-world-grows)).
 - **Blocking.** Tool calls run on blocking threads, but event listeners run inline on the
   thread that emitted, including inside the async loop. Slow listeners would need a queue.
 - **Durable loads.** Plugins loaded by a plugin are not reloaded after a restart unless their

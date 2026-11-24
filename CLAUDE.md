@@ -129,7 +129,9 @@ as design guidance, not noise.
   thing plugins contribute.
 - **The stable contracts change by adding.** The WIT world, the core's traits, the log and
   the agent file (see "What is stable" in `docs/design.md`). A new host ability is a new
-  import interface, never a changed export; a new trait method has a default; a struct
+  import interface, never a changed export, or a function on an existing interface only
+  where its grant already covers what the function does (see "How the plugin world grows"
+  there); a new trait method has a default; a struct
   that may grow is `#[non_exhaustive]` with a constructor; a log line gains fields and a
   new schema version, and old versions stay readable.
 - **An extension is a native plugin, not a second mechanism.** It contributes through the
@@ -208,7 +210,9 @@ as design guidance, not noise.
   restart. A tool waits only through `corduroy_core::call::wait_for`, inside the call scope
   `PluginTools` sets; never block a tool call on another run.
 - **Every world export is mandatory for every guest.** Adding one means a stub in each
-  plugin under `plugins/`, and a check that JavaScript and Python can implement it.
+  plugin under `plugins/`, and a check that JavaScript and Python can implement it. The
+  exports are meant to close at six: what the host newly asks of an add-on goes through
+  `handle-call`, under a service name the harness defines, not through a seventh export.
 - **A tool returns content blocks.** `Tool::call` gives a `ToolOutput` (text and images);
   text converts into one (`Ok(text.into())`, or return a `String` from `tool_fn`). Build a
   `ToolSpec` with `ToolSpec::new(..)` and its builder methods, never as a literal. Whatever
