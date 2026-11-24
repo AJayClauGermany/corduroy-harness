@@ -38,7 +38,6 @@ reshapes entries further down.
 
 | Order | Group | Questions |
 | --- | --- | --- |
-| 4 | What the core is made of | B3, B4, B23, B24 |
 | 5 | What is safe by default | D7, D8, D9 |
 | 6 | How the plugin world grows | E3, E4, E7, E17 |
 | 7 | What an extension can reach | G1, G2, G4, G12, G18 |
@@ -46,7 +45,7 @@ reshapes entries further down.
 
 Everything not in this table is detail that hangs off one of these, or a mechanical choice
 (which types may grow, which names are final) best made in one sitting per section once its
-group is settled. The first three groups are decided, and every question below is read
+group is settled. The first four groups are decided, and every question below is read
 against them. Why this exists, and the two uses 1.0 is measured against, are in
 [What it is for](design.md#what-it-is-for). What freezes, what is only stable and what
 "frozen" allows are in [What is stable](design.md#what-is-stable), with the four proofs
@@ -54,7 +53,10 @@ against them. Why this exists, and the two uses 1.0 is measured against, are in
 library is a direction and not a promise:
 [Without the standard library](design.md#without-the-standard-library). What the log is
 for, what is promised about resuming, live output, removal and reading are in
-[What the record promises](design.md#what-the-record-promises).
+[What the record promises](design.md#what-the-record-promises). What a model call is, what
+a model says about itself, that the core's traits are called and waited for, and that the
+kinds of thing a plugin contributes are closed at eight are in
+[What the core is made of](design.md#what-the-core-is-made-of).
 
 ## P. Purpose and place
 
@@ -245,7 +247,7 @@ for good, or `#[non_exhaustive]` with a constructor.
 | `Event` | `core/event.rs:146` | Open. Design says events gain fields; a store builds one when reading a log back, so it also needs a constructor. |
 | `Source` | `core/event.rs:101` | Decide with [B21](#b21-are-the-reserved-names-and-event-sources-a-closed-set). |
 | `Role` | `core/model.rs:26` | Decide: are `user` and `assistant` the only roles, with tool results said by the user, for good? |
-| `Turn`, `Completion`, `ModelError` | `core/model.rs:35,44,53` | See [B3](#b3-what-does-a-plugin-ask-a-model-and-what-comes-back). |
+| `Turn`, `Completion`, `ModelError` | `core/model.rs:35,44,53` | The first two go: the one request and reply of [What the core is made of](design.md#what-the-core-is-made-of) take their place, and can grow. Open `ModelError` with them. |
 | `ToolError` | `core/tool.rs:241` | Open (a stopped or timed-out call has no case). |
 | `CallError` | `core/service.rs:31` | Open. |
 | `ContextError` | `core/context.rs:187` | Open. |
@@ -264,35 +266,10 @@ provider that returns something more about its thinking, or an image with a name
 represented without breaking every match.
 
 *Direction.* Mark the variants `#[non_exhaustive]`, or make each a struct with a constructor
-as `ToolCall` and `ToolResult` are.
-
-### B3. What does a plugin ask a model, and what comes back?
-
-The core has two shapes for a conversation. The loop and the log speak `Message` (text,
-images, thinking, tool calls). `Models`, which the `llm` capability reaches, speaks `Turn`:
-text only, with a `Completion` of a system prompt and turns, answered by a bare `String`
-(`core/model.rs:35-84`). So a plugin's model call can never carry an image, report usage,
-or say why it stopped, and none of the three types can grow.
-
-*Direction.* One shape: a request built from `Message`s, growable, and a growable reply
-(text now; usage and a stop reason later). The `llm` interface in the world follows
-([E8](#e8-what-does-llm-carry)).
-
-### B4. Is every core trait synchronous for good?
-
-`Tool::call`, `Service::call`, `Gate::check`, `Model::complete`, `HttpClient::send` and
-`Kernel::exec` all block the calling thread. Concurrency is therefore threads, and on a
-device with one thread a tool that waits holds up everything, a stop included.
-
-Whether that forces a design an extension cannot work around is not known. Connecting
-another harness as a plugin, one of the proofs
-[the freeze waits on](design.md#what-the-freeze-waits-on), is the test: a long-lived
-connection that exchanges messages, over these traits.
-
-*Direction.* Build that proof before answering. If it fits, confirm the traits and write
-down how an asynchronous form would be added without breaking (a defaulted method, or a
-second trait), marked as a place for growth. If it does not, the change is to the core and
-is made before 1.0.
+as `ToolCall` and `ToolResult` are. The general typed part
+[What the core is made of](design.md#what-the-core-is-made-of) adds (what a model that is
+not a chat model returns: a vector, a yes or a no) is made the same way. Decide what it
+holds: a media type and bytes, or JSON text.
 
 ### B5. Are there kernels without the standard library?
 
@@ -433,7 +410,7 @@ A signal is a bare string (`call::wait_for`). The harness uses names of its own 
 child's end; nothing keeps two extensions' signals apart.
 
 *Direction.* A naming rule (`<plugin>/<what>`), stated before extensions raise signals
-([G4](#g4-how-does-an-extension-raise-a-signal-or-resume-a-run)).
+([G4](#g4-how-does-an-extension-raise-a-signal-resume-a-run-or-start-a-session)).
 
 ### B21. Are the reserved names and event sources a closed set?
 
@@ -450,27 +427,6 @@ shape has nowhere to record which shape a log holds.
 
 *Direction.* Decide before the log freezes, since the answer is a field on `state/set` or a
 convention inside the value.
-
-### B23. Is the set of registries closed?
-
-The core has eight: tools, prompt parts, kernels, gates, services, models, secrets and HTTP
-clients. "A new kind of thing plugins contribute" has been the one reason to change the
-core. After the freeze, a new kind is a registry some extension provides, which an add-on
-reaches only as a service.
-
-*Direction.* Declare the eight final, after checking the candidates for a ninth: stored
-bytes ([C20](#c20-where-do-images-and-large-results-live)), search or embeddings, a way to
-ask the person something ([D10](#d10-can-a-tool-ask-the-person-something-other-than-yes-or-no)),
-schedules ([C16](#c16-is-there-a-timer)).
-
-### B24. Does the core know what a model can do?
-
-Nothing describes a model: the size of its context, whether it takes images or tools, what
-it costs. `compact` is told a token count in its configuration, and a request that is too
-large simply fails the run.
-
-*Direction.* Decide whether a model describes itself (a defaulted method on `Model` and on
-the loop's `Provider`) or whether this stays configuration for good.
 
 ### B25. Whose job is a tool's input, and the size of its result?
 
@@ -608,13 +564,6 @@ Not yet (design, "still to do"). Asks are answered per tool call (`Harness::answ
 *Direction.* Decide whether an ask at any declared point can wait for a person, since that
 shapes `gate/answer`.
 
-### C16. Is there a timer?
-
-Design lists "a timer that raises signals" as still to do for the core tier.
-
-*Direction.* Decide whether it is the core's, the loop's, or an extension's
-([G4](#g4-how-does-an-extension-raise-a-signal-or-resume-a-run)).
-
 ### C18. How many processes may use one log?
 
 One. A log has one writer, and the file store locks the file when it opens it, so two
@@ -630,9 +579,13 @@ not by itself allow two writers: ids are one sequence for the workspace.
 
 In the log, as base64 inside the events that carry them.
 
-*Direction.* Decide whether the core has a reference to stored bytes (a kind of `Content`
-and `Part` that names a blob, and a store beside the log). The kind can be added later, but
-every log written before then holds the bytes. Removing a session
+Stored bytes are not a kind of thing plugins contribute
+([What the core is made of](design.md#what-the-core-is-made-of)): where a store keeps a
+large payload is the store's business, and there is no registry for it.
+
+*Direction.* What is left is whether an event may name bytes it does not hold (a kind of
+`Content` and `Part` that names a blob, which the log's store keeps). The kind can be added
+later, but every log written before then holds the bytes. Removing a session
 ([What the record promises](design.md#what-the-record-promises)) would then have to remove
 its bytes too, and bytes two sessions share would need an owner.
 
@@ -680,8 +633,13 @@ call was decided against. "Allow, and remember" is left to the gate's own memory
 The core declares two. Design names "the user's input and the request about to be sent to
 the model" as the likely next. A point the loop asks at is the loop's to declare.
 
-*Direction.* Decide whether the loop declares those two before 1.0, since gates written by
-third parties will key on the names.
+A third follows from [What the core is made of](design.md#what-the-core-is-made-of):
+starting a session. Which model a child session may run on (not its parent's, not one of
+the same family) is policy, and a gate can only say so if it is asked when a session starts.
+
+*Direction.* Decide whether the loop declares those three before 1.0, since gates written by
+third parties will key on the names, and what the request at a session's start holds
+([G12](#g12-what-can-differ-between-sessions)).
 
 ### D4. Is name order, first strictest, the final rule?
 
@@ -733,13 +691,19 @@ your machine the moment you run `corduroy` inside it.
 by its hash), or defaults come from a file of the user's own
 ([H13](#h13-is-there-one-configuration-file-or-layers)).
 
-### D10. Can a tool ask the person something other than yes or no?
+### D10. What form does a tool's question to the person take?
 
-A gate's ask is the only question a run puts to a person. A tool that needs a choice or a
-value could wait for a signal, but no front end would know to show the question.
+A gate's ask is the only question a run puts to a person today. That a tool can ask
+something else (which of these three branches, a value it lacks) is decided, and is in 1.0
+([What the core is made of](design.md#what-the-core-is-made-of)): it is not a gate, which
+decides whether something may happen, and not a registry, but a tool that asks and waits
+for a signal. What no front end knows yet is how to show the question.
 
-*Direction.* A declared form for a question to the person (an event a front end must
-present, a signal that carries the reply), settled before front ends are written.
+*Direction.* Settle the form before front ends are written: the event's topic and what it
+holds (the question, the choices if there are any), what a reply may be (a choice, a
+value, a refusal to answer), the signal that carries it, and that a question with nobody
+there waits in the log as an ask does. An add-on can provide the tool only if its call can
+wait ([E6](#e6-can-an-add-ons-tool-call-wait-for-a-signal)).
 
 ### D11. Can a person say something to a run that is under way?
 
@@ -806,8 +770,14 @@ A `header-value` is all text or all secret (`wit/corduroy.wit:333`), so
 Natively, yes (`call::wait_for`). The world has no such call; an add-on waits only by
 starting a child session.
 
+[What the core is made of](design.md#what-the-core-is-made-of) leans on waiting twice: a
+tool that asks the person a question, and an agent that waits for the next message from
+another. If an add-on cannot wait, both have to be extensions.
+
 *Direction.* Decide whether waiting is offered to add-ons (on `session`, or a new
-interface) before extensions start raising signals.
+interface) before extensions start raising signals. The answer is wanted at 1.0, since the
+tool that asks the person
+([D10](#d10-what-form-does-a-tools-question-to-the-person-take)) is.
 
 ### E7. May an existing interface gain a function?
 
@@ -817,12 +787,19 @@ interface that exists is not covered, and several entries below depend on it.
 *Direction.* Decide: either interfaces are frozen and growth is a new interface, or an
 interface may gain functions under a new minor version.
 
-### E8. What does `llm` carry?
+### E8. How does a model call cross the boundary?
 
-Text in, a string out (`wit/corduroy.wit:300-318`), mirroring
-[B3](#b3-what-does-a-plugin-ask-a-model-and-what-comes-back).
+Text in, a string out today (`wit/corduroy.wit:300-318`). What it carries is decided
+([What the core is made of](design.md#what-the-core-is-made-of)): the core's one request
+without tools, a reply with a message, usage and the reason the model stopped, models named
+`<provider>/<model>`, and a way to list the models a grant reaches with their descriptions.
 
-*Direction.* Decide with B3.
+*Direction.* What is left is the form. The request, the reply and the description all grow,
+and a record in the world does not, so they are JSON text in the shape a `message` event
+holds (which an add-on already reads through `log-read`) unless
+[E13](#e13-when-is-a-value-json-text-and-when-a-typed-record) says otherwise. Listing models
+is a function `llm` gains, which [E7](#e7-may-an-existing-interface-gain-a-function) has to
+allow, or an interface of its own.
 
 ### E9. Can an add-on read bytes?
 
@@ -854,6 +831,11 @@ export, and exports freeze.
 [What it is for](design.md#what-it-is-for) rules out "never" for the loop: an add-on has to
 be able to say what a run's steps are, so a workflow (a reviewer, two agents taking turns)
 is plugged in without a rebuild.
+
+[What the core is made of](design.md#what-the-core-is-made-of) rules out one way: an add-on
+does not run a loop of its own by asking a model with tools through `llm`. Whatever acts is
+a session the harness runs, so an add-on's loop is something it tells the harness, not
+something it carries out.
 
 *Direction.* Decide how, so no export has to be added later: through services (E4), or as a
 description of a loop that a native step carries out. Models and kernels can still be
@@ -977,13 +959,22 @@ Only through `Run::call_tools`: every call of a message, one after another
 *Direction.* A single-call primitive, and a decision on whether calls of one message may
 run in parallel (which the log's order must then allow for).
 
-### G4. How does an extension raise a signal or resume a run?
+### G4. How does an extension raise a signal, resume a run or start a session?
 
-Only `Harness::signal` does, and a plugin has no harness. Timers, webhooks and background
-jobs therefore cannot be extensions of the shipped command.
+Only `Harness::signal` raises one, and a plugin has no harness. Timers, webhooks,
+background jobs and a connection to another harness therefore cannot be extensions of the
+shipped command.
 
-*Direction.* A service the harness provides for signals, and a defined owner for taking the
-run on once it arrives.
+[What the core is made of](design.md#what-the-core-is-made-of) makes this a condition of
+the freeze. Calling and waiting is the core's contract because whatever outlasts a call
+comes back as a signal, and something outside may speak first (a pull request opened, a
+message from a connected harness nobody was waiting for) and has to be able to start a
+session or resume one. A timer is one such extension, and need not ship at 1.0.
+
+*Direction.* A service the harness provides for raising a signal and for starting a
+session, and a defined owner for taking the run on once a signal arrives. The connected
+harness among the proofs [the freeze waits on](design.md#what-the-freeze-waits-on) is its
+first user.
 
 ### G5. Which harness types are in the stable set?
 
@@ -1034,7 +1025,11 @@ and for which session, and what a checkpoint's payload holds.
 finished. `ProviderError` is text, so a loop cannot tell a full context from a rate limit
 or a bad key.
 
-*Direction.* A stop reason on the reply, and a kind on the error.
+That the reply says why the model stopped is decided, and the reply is the core's
+([What the core is made of](design.md#what-the-core-is-made-of)).
+
+*Direction.* What is left is which reasons there are (finished, cut off at its limit, asked
+for a tool, refused), and a kind on the error.
 
 ### G11. What can be set per request?
 
@@ -1042,7 +1037,9 @@ or a bad key.
 thinking, tool choice and a required output shape are fixed per provider entry.
 
 *Direction.* Decide which belong on the request (it is growable) and which stay
-configuration.
+configuration. The request is the core's now, and a plugin's model call fills in the same
+one ([What the core is made of](design.md#what-the-core-is-made-of)), so a setting put
+there is one an add-on can use too.
 
 ### G12. What can differ between sessions?
 
@@ -1052,8 +1049,13 @@ session gets the same. A sub-agent with fewer tools or a cheaper model cannot be
 [What it is for](design.md#what-it-is-for) needs it: two agents working on one task, each
 with its own loop, its own tools and its own limits on what it can read.
 
+Two things are decided about the model
+([What the core is made of](design.md#what-the-core-is-made-of)): a session keeps the one it
+started with, and whoever starts a child may choose its model from those it is allowed,
+knowing what each can do.
+
 *Direction.* Decide what `session/start` may carry, since that is in the log. At least the
-loop, the tools offered and the grants its tool calls run under.
+model, the loop, the tools offered and the grants its tool calls run under.
 
 ### G13. Can a person send more than text?
 
@@ -1086,10 +1088,12 @@ run together.
 
 ### G17. Where is usage added up?
 
-Per request, as `usage` events. `Outcome` has no total, and a plugin's `llm` calls record
-none (see [B3](#b3-what-does-a-plugin-ask-a-model-and-what-comes-back)).
+Per request, as `usage` events. `Outcome` has no total. That a plugin's `llm` calls record
+their usage too, and that usage carries a cost where the provider states one, is decided
+([What the core is made of](design.md#what-the-core-is-made-of)).
 
-*Direction.* Decide whether totals are the harness's to keep or a reader's to compute.
+*Direction.* Decide whether totals are the harness's to keep or a reader's to compute, and
+in what unit a cost is written, since it is in the log.
 
 ### G18. What may run at once in one harness?
 
@@ -1147,8 +1151,13 @@ from what events hold today.
 providers oi-kit knows can be named directly as the `kind`": the agent file, a stable
 contract, inherits whatever an alpha dependency accepts.
 
+[What the core is made of](design.md#what-the-core-is-made-of) changes two things here. The
+`serve` key goes, since the `llm` grant is the one list of models an add-on may ask, by
+`<provider>/<model>`. And a model's description (what it takes and returns, its context)
+can be stated or corrected in the file, which needs keys for a model under its provider.
+
 *Direction.* Provider kinds in `Standard` like the rest, and a named list of kinds and keys
-that are ours.
+that are ours, those that describe a model among them.
 
 ### H2. Does 1.0 ship on oi-kit?
 
@@ -1301,8 +1310,8 @@ holds 9 to 13 MB for each instance.
 ([What it is for](design.md#what-it-is-for)). The pieces exist (`plugin-manager`, off by
 default; the script host; the `tools` capability). Three things it leans on do not: loads
 that survive a restart ([E16](#e16-are-loads-by-a-plugin-durable)), a person approving a
-load ([C15](#c15-can-a-person-answer-an-ask-at-pluginload)), and a scheduler
-([C16](#c16-is-there-a-timer)).
+load ([C15](#c15-can-a-person-answer-an-ask-at-pluginload)), and a scheduler (an extension
+that raises signals, [G4](#g4-how-does-an-extension-raise-a-signal-resume-a-run-or-start-a-session)).
 
 *Direction.* The first two are conditions of the freeze: something the agent built must
 still be there tomorrow, and the person must be the one who allowed it. The scheduler
