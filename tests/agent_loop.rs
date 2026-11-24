@@ -294,7 +294,7 @@ async fn a_run_can_be_resumed_from_its_event_log() {
     first.run("add 1 and 2").await.unwrap();
     let log = first.events().events();
 
-    let stream = Arc::new(EventStream::replay(log));
+    let stream = Arc::new(EventStream::load(log));
     let model = Arc::new(ScriptedProvider::new([say("still 3")]));
     let provider: Arc<ScriptedProvider> = Arc::clone(&model);
     let resumed = Harness::resume(provider, stream).unwrap();
@@ -360,7 +360,7 @@ async fn sessions_come_back_from_the_log_with_their_parents() {
     let child = first.start_session("child", Some(&main)).unwrap();
     first.run_in(&child, "hello").await.unwrap();
 
-    let stream = Arc::new(EventStream::replay(first.events().events()));
+    let stream = Arc::new(EventStream::load(first.events().events()));
     let model = Arc::new(ScriptedProvider::new([say("still here")]));
     let provider: Arc<ScriptedProvider> = Arc::clone(&model);
     let resumed = Harness::resume(provider, stream).unwrap();

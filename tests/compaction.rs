@@ -107,16 +107,16 @@ async fn earlier_turns_give_way_to_a_summary_and_the_current_turn_is_kept_whole(
     // The log has the cut, and a harness rebuilt from it sees the same conversation.
     let cut = events.matching(&Pattern::new(COMPACTION));
     assert_eq!(cut.len(), 1);
-    let replayed = harness_from(&events);
-    assert_eq!(seen_by_model(&replayed), seen);
+    let reloaded = harness_from(&events);
+    assert_eq!(seen_by_model(&reloaded), seen);
     // Nothing is lost: the whole conversation is still there for a person.
-    let all = replayed.journal(&SessionId::new(MAIN)).unwrap().session();
+    let all = reloaded.journal(&SessionId::new(MAIN)).unwrap().session();
     assert_eq!(all.conversation()[0].text_content(), "first question");
 }
 
 fn harness_from(events: &EventStream) -> Harness {
     let model = Arc::new(ScriptedProvider::new([]));
-    harness(&model, Arc::new(EventStream::replay(events.events())))
+    harness(&model, Arc::new(EventStream::load(events.events())))
 }
 
 #[tokio::test]

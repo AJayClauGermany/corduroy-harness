@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use async_trait::async_trait;
 
 use corduroy_harness::core::{
-    Content, Context, Event, EventStream, Log, LogError, Message, Pattern, Plugin, PluginError,
-    SessionId, TOOLS, ToolCall, ToolSpec, Tools, plugin_fn, tool_fn,
+    Content, Context, Event, EventId, EventStream, Log, LogError, Message, Pattern, Plugin,
+    PluginError, Query, SessionId, TOOLS, ToolCall, ToolSpec, Tools, plugin_fn, tool_fn,
 };
 use corduroy_harness::scripted::{ScriptedProvider, call, say};
 use corduroy_harness::{Harness, HarnessError, MAIN, Next, Operation, Session, Status};
@@ -112,6 +112,85 @@ impl Log for Failing {
     }
 }
 
+/// A store that hands the stream only the events that belong to no session, and answers
+/// for the rest when asked, as one that reads old sessions on request does.
+struct Shelf(Vec<Event>);
+
+impl Shelf {
+    /// A stream over this store, holding what it hands over.
+    fn open(self) -> EventStream {
+        let held: Vec<Event> = self
+            .0
+            .iter()
+            .filter(|event| event.session.is_none())
+            .cloned()
+            .collect();
+        let last = self.0.last().map(|event| (event.id, event.time));
+        let (last, time) = last.unwrap_or((EventId::new(0), 0));
+        EventStream::load(held)
+            .continuing(last, time)
+            .with_log(self)
+    }
+}
+
+impl Log for Shelf {
+    fn commit(&mut self, batch: &[Event]) -> Result<(), LogError> {
+        self.0.extend_from_slice(batch);
+        Ok(())
+    }
+
+    fn read(
+        &mut self,
+        query: &Query,
+        keep: &dyn Fn(&Event) -> bool,
+    ) -> Result<Vec<Event>, LogError> {
+        Ok(self
+            .0
+            .iter()
+            .filter(|event| event.id > query.after && query.selects(event) && keep(event))
+            .take(query.limit)
+            .cloned()
+            .collect())
+    }
+}
+
+#[tokio::test]
+async fn sessions_the_stream_was_not_handed_are_read_from_the_store() {
+    let (first, _model) = harness(
+        EventStream::new(),
+        [
+            call("c1", "echo", &json!({"text": "hi"})),
+            say("it said hi"),
+        ],
+    )
+    .unwrap();
+    first.run("echo hi").await.unwrap();
+    let stored = first.events().events();
+    drop(first);
+
+    let (second, model) = harness(Shelf(stored).open(), [say("still here")]).unwrap();
+    // Nothing of the session is in memory, yet it is known and its conversation is whole.
+    assert_eq!(second.events().session(&SessionId::new(MAIN)).len(), 0);
+    assert!(
+        second
+            .session_list()
+            .iter()
+            .any(|info| info.id.as_str() == MAIN)
+    );
+    let outcome = second.run("and again?").await.unwrap();
+
+    assert!(matches!(outcome.status, Status::Finished { .. }));
+    // The prompt, the call, its result and the answer, then the new prompt.
+    assert_eq!(model.requests()[0].messages, 5);
+    let ids: Vec<u64> = second
+        .events()
+        .events()
+        .iter()
+        .map(|e| e.id.get())
+        .collect();
+    assert!(ids.windows(2).all(|pair| pair[0] < pair[1]), "{ids:?}");
+}
+
 #[tokio::test]
 async fn a_step_the_log_refuses_ends_the_run_before_anyone_sees_it() {
     let commits = Arc::new(AtomicUsize::new(0));
@@ -191,7 +270,7 @@ fn restarted(
 ) -> (Harness, Arc<AtomicUsize>, Arc<AtomicUsize>) {
     let (launches, peeks) = (Arc::default(), Arc::default());
     let model = Arc::new(ScriptedProvider::new(replies));
-    let harness = Harness::resume(model, Arc::new(EventStream::replay(events))).unwrap();
+    let harness = Harness::resume(model, Arc::new(EventStream::load(events))).unwrap();
     harness.plugin(rocketry(&launches, &peeks));
     (harness, launches, peeks)
 }
@@ -338,7 +417,7 @@ async fn a_finished_image_is_handed_over_from_the_log_and_the_tool_is_not_run_ag
     // A new process, with nothing but the log.
     let again = Arc::default();
     let model = Arc::new(ScriptedProvider::new([say("a fine view")]));
-    let second = Harness::resume(model, Arc::new(EventStream::replay(events))).unwrap();
+    let second = Harness::resume(model, Arc::new(EventStream::load(events))).unwrap();
     second.plugin(camera(&again));
     let outcome = second.continue_run(&SessionId::new(MAIN)).await.unwrap();
 

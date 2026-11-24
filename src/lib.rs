@@ -116,6 +116,6 @@ pub use provider::{
     Providers, Usage, provider,
 };
 pub use session::{
-    Answer, Ask, COMPACTION, Effect, End, Journal, MAIN, SIGNAL, Session, SessionInfo, Sessions,
-    Wait,
+    Answer, Ask, COMPACTION, Effect, End, Journal, MAIN, PROCESS_START, ProcessInfo, Removal,
+    SESSION_REMOVED, SIGNAL, Session, SessionInfo, Sessions, Wait, removal,
 };

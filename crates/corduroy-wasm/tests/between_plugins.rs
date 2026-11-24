@@ -473,7 +473,7 @@ fn state_is_kept_across_restarts_reloads_and_processes_but_not_from_a_trapped_ca
     assert_eq!(state(&host, json!({"op": "get", "key": "public/a"})), "1");
 
     // A new process: the same events, a new app, a new plugin.
-    let events = EventStream::replay(host.app.events().events());
+    let events = EventStream::load(host.app.events().events());
     let mut next = self::host(events).unwrap();
     next.app
         .plugin(testbed(&dir, "testbed", &json!({}), scoped()).unwrap());

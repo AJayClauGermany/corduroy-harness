@@ -313,6 +313,87 @@ fn a_declined_call_goes_back_to_the_model_with_the_reason() {
 }
 
 #[test]
+fn each_process_records_what_it_runs_as_before_anything_else() {
+    let workspace = scratch("cli-process");
+    let plugins = plugin("pi-tools").parent().unwrap().to_owned();
+    let (address, _seen) = model(Vec::new()).unwrap();
+    fs::write(
+        workspace.join("corduroy.toml"),
+        agent_file(address, &plugins),
+    )
+    .unwrap();
+
+    let check = corduroy(&workspace, &["check"], "").unwrap();
+    assert!(check.status.success(), "{}", text(&check.stderr));
+    let log = text(&corduroy(&workspace, &["log"], "").unwrap().stdout);
+
+    // `check`, then the `log` that read it back.
+    let starts: Vec<&str> = log
+        .lines()
+        .filter(|line| line.contains("[host] process/start"))
+        .collect();
+    assert_eq!(starts.len(), 2, "{log}");
+    assert!(
+        log.starts_with(starts[0]) && starts[0].contains(" #1 "),
+        "{log}"
+    );
+    let version = format!(r#""version":"{}""#, env!("CARGO_PKG_VERSION"));
+    for field in [
+        r#""program":"corduroy""#,
+        r#""world":"corduroy:plugin@0.1.0""#,
+        &version,
+    ] {
+        assert!(
+            starts[0].contains(field),
+            "{field} missing from {}",
+            starts[0]
+        );
+    }
+}
+
+#[test]
+fn a_session_is_removed_with_those_it_started_and_leaves_a_marker() {
+    let workspace = scratch("cli-remove");
+    let plugins = plugin("pi-tools").parent().unwrap().to_owned();
+    let (address, _seen) = model(Vec::new()).unwrap();
+    fs::write(
+        workspace.join("corduroy.toml"),
+        agent_file(address, &plugins),
+    )
+    .unwrap();
+    // `side`, and `kid` started from it at the prompt.
+    let chat = corduroy(&workspace, &["--session", "side"], "/session kid\n/exit\n").unwrap();
+    assert!(chat.status.success(), "{}", text(&chat.stderr));
+
+    let removed = corduroy(&workspace, &["sessions", "remove", "side"], "").unwrap();
+    let missing = corduroy(&workspace, &["sessions", "remove", "nobody"], "").unwrap();
+
+    assert!(removed.status.success(), "{}", text(&removed.stderr));
+    assert!(
+        text(&removed.stdout)
+            .contains("removed `side` from the log, with the sessions it started: `kid`"),
+        "{}",
+        text(&removed.stdout)
+    );
+    assert!(!missing.status.success());
+    assert!(
+        text(&missing.stderr).contains("there is no session `nobody`"),
+        "{}",
+        text(&missing.stderr)
+    );
+    let sessions = text(&corduroy(&workspace, &["sessions"], "").unwrap().stdout);
+    assert_eq!(sessions.trim(), "main");
+    let log = text(&corduroy(&workspace, &["log"], "").unwrap().stdout);
+    for marker in [
+        r#"session/removed {"session":"kid"}"#,
+        r#"session/removed {"session":"side"}"#,
+    ] {
+        assert!(log.contains(marker), "{marker} missing from\n{log}");
+    }
+    assert!(!log.contains(" side [") && !log.contains(" kid ["), "{log}");
+}
+
+#[test]
 fn check_says_what_the_agent_has_and_a_plugin_cannot_read_the_agent_file() {
     let workspace = scratch("cli-check");
     let plugins = plugin("pi-tools").parent().unwrap().to_owned();

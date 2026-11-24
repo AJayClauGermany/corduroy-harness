@@ -24,9 +24,19 @@
 //! made on one thread are therefore delivered in the order they were made. Two threads that
 //! commit at the same moment each deliver their own commit, so a listener may hear the later
 //! of the two first; what a listener must not get wrong it reads from the log, by id.
+//!
+//! A read promises a complete answer about what the log holds, not that the stream holds it
+//! in memory. The stream holds what its store handed it when it was opened (the whole log,
+//! unless the store says otherwise: see [`Log::read`]) and every commit since.
+//! [`EventStream::read`] reads a page, and asks the store for whatever the stream does not
+//! hold, so it is complete in every case and can fail. The reads that cannot fail
+//! ([`events`](EventStream::events), [`session`](EventStream::session),
+//! [`matching`](EventStream::matching), [`after`](EventStream::after),
+//! [`get`](EventStream::get)) are the convenient form: they answer from what the stream holds.
 
 use alloc::borrow::ToOwned;
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -301,6 +311,89 @@ pub trait Log: Send {
     /// Returns a [`LogError`] if the batch was not stored. The stream then refuses every
     /// later commit.
     fn commit(&mut self, batch: &[Event]) -> Result<(), LogError>;
+
+    /// Read back what the stream may not hold: the first `query.limit` stored events that
+    /// match `query` and `keep`, oldest first.
+    ///
+    /// A store that hands the stream every event it holds when it is opened need not answer:
+    /// by default it finds nothing, and [`EventStream::read`] answers from the stream. A
+    /// store that hands over only part of the log must answer for at least every event it
+    /// did not hand over. It may also return events the stream holds; the stream keeps one
+    /// of each.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`LogError`] if the store could not be read. Unlike a refused commit, this
+    /// leaves the stream open.
+    fn read(
+        &mut self,
+        _query: &Query,
+        _keep: &dyn Fn(&Event) -> bool,
+    ) -> Result<Vec<Event>, LogError> {
+        Ok(Vec::new())
+    }
+}
+
+/// Which events a page of [`EventStream::read`] holds: those after an id, oldest first, at
+/// most so many, of one session and on some topics if either is given.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Query {
+    /// Only events with an id above this one. The next page starts after the last event
+    /// of this one.
+    pub after: EventId,
+    /// At most this many events.
+    pub limit: usize,
+    /// Only the events of this session, if one is given.
+    pub session: Option<SessionId>,
+    /// Only events whose topic matches this, if it is given.
+    pub topics: Option<Pattern>,
+}
+
+impl Query {
+    /// The first `limit` events of the log.
+    #[must_use]
+    pub const fn first(limit: usize) -> Self {
+        Self {
+            after: EventId(0),
+            limit,
+            session: None,
+            topics: None,
+        }
+    }
+
+    /// Only events with an id above `id`.
+    #[must_use]
+    pub const fn after(mut self, id: EventId) -> Self {
+        self.after = id;
+        self
+    }
+
+    /// Only the events of `session`.
+    #[must_use]
+    pub fn session(mut self, session: SessionId) -> Self {
+        self.session = Some(session);
+        self
+    }
+
+    /// Only events whose topic matches `topics`.
+    #[must_use]
+    pub fn topics(mut self, topics: impl Into<Pattern>) -> Self {
+        self.topics = Some(topics.into());
+        self
+    }
+
+    /// Whether `event` is one this query asks for, but for its id and the limit.
+    #[must_use]
+    pub fn selects(&self, event: &Event) -> bool {
+        self.session
+            .as_ref()
+            .is_none_or(|session| event.session.as_ref() == Some(session))
+            && self
+                .topics
+                .as_ref()
+                .is_none_or(|topics| topics.matches(&event.topic))
+    }
 }
 
 /// Handle returned by [`EventStream::subscribe`], used to unsubscribe.
@@ -420,11 +513,12 @@ impl EventStream {
         Self::default()
     }
 
-    /// Rebuild a stream from a persisted log. Listeners are not notified of replayed events.
+    /// A stream holding `events`, read back from a log. Nothing is re-executed: listeners
+    /// are not told of these events, which happened before they subscribed.
     ///
     /// New events continue after the highest id in `events`.
     #[must_use]
-    pub fn replay(events: impl IntoIterator<Item = Event>) -> Self {
+    pub fn load(events: impl IntoIterator<Item = Event>) -> Self {
         let log: Vec<Event> = events.into_iter().collect();
         let next_event = log.iter().map(|event| event.id.get()).max().unwrap_or(0);
         let last_time = log.iter().map(|event| event.time).max().unwrap_or(0);
@@ -436,6 +530,18 @@ impl EventStream {
                 ..Inner::default()
             }),
         }
+    }
+
+    /// Number new events after `last` and stamp them no earlier than `time`, if the stream
+    /// holds nothing later: for a stream whose store handed it only part of the log, which
+    /// may leave out the last event stored. Ids are never used twice.
+    #[must_use]
+    pub fn continuing(self, last: EventId, time: u64) -> Self {
+        self.inner.with(|inner| {
+            inner.next_event = inner.next_event.max(last.get());
+            inner.last_time = inner.last_time.max(time);
+        });
+        self
     }
 
     /// Read the time of each commit from `clock` (milliseconds since the Unix epoch) rather
@@ -450,7 +556,7 @@ impl EventStream {
     /// Store every future commit in `log` before it is added to the stream.
     ///
     /// Events already in the stream are not written: a log is attached to an empty stream, or
-    /// to one [`replay`](Self::replay)ed from that same log.
+    /// to one [`load`](Self::load)ed from that same log.
     #[must_use]
     pub fn with_log(self, log: impl Log + 'static) -> Self {
         let log: Box<dyn Log> = Box::new(log);
@@ -526,6 +632,55 @@ impl EventStream {
                 .subscriptions
                 .retain(|subscription| subscription.id != id);
         });
+    }
+
+    /// A page of the log: the first `query.limit` events that match `query`, oldest first.
+    /// Complete whether or not the stream holds them: what it does not hold it asks its
+    /// [`Log`] for (see the [module documentation](self)).
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`LogError`] if the log could not be read. The stream stays open.
+    pub fn read(&self, query: &Query) -> Result<Vec<Event>, LogError> {
+        self.read_where(query, |_| true)
+    }
+
+    /// A page as [`read`](Self::read) gives, of the events for which `keep` also holds.
+    /// The filter is applied before the limit, so a page is short only at the end of the log.
+    /// It is called with the stream locked, so it must not use the stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`LogError`] if the log could not be read. The stream stays open.
+    pub fn read_where(
+        &self,
+        query: &Query,
+        keep: impl Fn(&Event) -> bool,
+    ) -> Result<Vec<Event>, LogError> {
+        let wanted = |event: &Event| query.selects(event) && keep(event);
+        self.inner.with(|inner| {
+            let start = inner.log.partition_point(|event| event.id <= query.after);
+            let held = inner
+                .log
+                .iter()
+                .skip(start)
+                .filter(|event| wanted(event))
+                .take(query.limit)
+                .cloned();
+            let mut page: BTreeMap<EventId, Event> = held.map(|event| (event.id, event)).collect();
+            // The first `limit` of both together are among the first `limit` of each.
+            let stored = match &mut inner.store {
+                Some(store) => store.read(query, &wanted)?,
+                None => Vec::new(),
+            };
+            let stored = stored
+                .into_iter()
+                .filter(|event| event.id > query.after && wanted(event));
+            for event in stored {
+                page.entry(event.id).or_insert(event);
+            }
+            Ok(page.into_values().take(query.limit).collect())
+        })
     }
 
     /// A copy of every event so far, oldest first.
@@ -706,12 +861,12 @@ mod tests {
     }
 
     #[test]
-    fn replay_restores_the_log_and_continues_numbering() {
+    fn a_loaded_stream_holds_the_log_and_continues_numbering() {
         let original = EventStream::new();
         original.emit(user("a")).unwrap();
         original.emit(user("b")).unwrap();
 
-        let restored = EventStream::replay(original.events());
+        let restored = EventStream::load(original.events());
         let next = restored.emit(user("c")).unwrap();
 
         assert_eq!(next.get(), 3);
@@ -734,8 +889,8 @@ mod tests {
         let times: Vec<u64> = stream.events().iter().map(|event| event.time).collect();
         assert_eq!(times, [20, 20, 20, 30]);
 
-        // A replayed stream carries on from the latest time it holds.
-        let restored = EventStream::replay(stream.events()).with_clock(|| 5);
+        // A loaded stream carries on from the latest time it holds.
+        let restored = EventStream::load(stream.events()).with_clock(|| 5);
         restored.emit(user("e")).unwrap();
         assert_eq!(restored.events()[4].time, 30);
     }
@@ -855,6 +1010,100 @@ mod tests {
         assert_eq!(ids(stream.session(&child)), [2]);
         assert_eq!(stream.events()[0].to_string(), "#1 main [user] message");
         assert_eq!(child.as_str(), "child");
+    }
+
+    /// A store that hands the stream nothing when it is opened and answers every read from
+    /// what it keeps, as a store that reads old sessions on request does.
+    struct Shelf {
+        kept: Vec<Event>,
+        broken: Arc<AtomicUsize>,
+    }
+
+    impl Log for Shelf {
+        fn commit(&mut self, batch: &[Event]) -> Result<(), LogError> {
+            self.kept.extend_from_slice(batch);
+            Ok(())
+        }
+
+        fn read(
+            &mut self,
+            query: &Query,
+            keep: &dyn Fn(&Event) -> bool,
+        ) -> Result<Vec<Event>, LogError> {
+            if self.broken.load(Ordering::SeqCst) > 0 {
+                return Err(LogError::new("unreadable"));
+            }
+            Ok(self
+                .kept
+                .iter()
+                .filter(|event| event.id > query.after && query.selects(event) && keep(event))
+                .take(query.limit)
+                .cloned()
+                .collect())
+        }
+    }
+
+    #[test]
+    fn a_read_is_paged_and_narrowed_by_session_and_topic() {
+        let stream = EventStream::new();
+        let main = SessionId::new("main");
+        for topic in ["message", "usage", "message", "message"] {
+            stream.emit(user(topic).session(main.clone())).unwrap();
+        }
+        stream.emit(user("message")).unwrap();
+        let ids = |events: Vec<Event>| events.iter().map(|e| e.id.get()).collect::<Vec<_>>();
+
+        let query = Query::first(2).session(main).topics("message");
+        let first = stream.read(&query).unwrap();
+        let rest = stream.read(&query.after(first[1].id)).unwrap();
+
+        assert_eq!((ids(first), ids(rest)), (vec![1, 3], vec![4]));
+        let odd = stream.read_where(&Query::first(10), |event| event.id.get() % 2 == 1);
+        assert_eq!(ids(odd.unwrap()), [1, 3, 5]);
+    }
+
+    #[test]
+    fn a_read_reaches_the_store_for_what_the_stream_does_not_hold() {
+        // The log holds five events; the store hands the stream only the two of no session.
+        let old = EventStream::new();
+        let side = SessionId::new("side");
+        old.emit(Draft::new(Source::Host, "plugin/activated"))
+            .unwrap();
+        old.emit(user("message").session(side.clone())).unwrap();
+        old.emit(Draft::new(Source::Host, "plugin/activated"))
+            .unwrap();
+        old.emit(user("message").session(side.clone())).unwrap();
+        old.emit(user("message").session(side.clone())).unwrap();
+        let (last, time) = (EventId::new(5), old.events()[4].time);
+        let broken = Arc::new(AtomicUsize::new(0));
+        let shelf = Shelf {
+            kept: old.events(),
+            broken: Arc::clone(&broken),
+        };
+        let held: Vec<Event> = old
+            .events()
+            .into_iter()
+            .filter(|event| event.session.is_none())
+            .collect();
+        let stream = EventStream::load(held)
+            .continuing(last, time)
+            .with_log(shelf);
+        let ids = |events: Vec<Event>| events.iter().map(|e| e.id.get()).collect::<Vec<_>>();
+
+        // Numbering carries on after the last event stored, which the stream never held.
+        let next = stream.emit(user("message").session(side.clone())).unwrap();
+        assert_eq!(next.get(), 6);
+        // The convenient read answers from memory; the paged one is complete, once each.
+        assert_eq!(ids(stream.session(&side)), [6]);
+        let page = stream.read(&Query::first(10).session(side)).unwrap();
+        assert_eq!(ids(page), [2, 4, 5, 6]);
+        assert_eq!(ids(stream.read(&Query::first(3)).unwrap()), [1, 2, 3]);
+
+        // A store that cannot be read fails the read, not the stream.
+        broken.store(1, Ordering::SeqCst);
+        let error = stream.read(&Query::first(10)).unwrap_err();
+        assert_eq!(error.to_string(), "event log: unreadable");
+        assert!(stream.emit(user("later")).is_ok());
     }
 
     #[test]

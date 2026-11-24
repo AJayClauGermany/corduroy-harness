@@ -7,6 +7,8 @@ corduroy [options] continue        finish a run that was cut short or waits for 
 corduroy [options] stop            end a run that was cut short or waits, without finishing it
 corduroy [options] check           load the agent and say what it has, without a model
 corduroy [options] sessions        list the sessions in the log
+corduroy [options] sessions remove <name>
+                                   take a session, and those it started, out of the log
 corduroy [options] log             print the event log
 corduroy init                      write the default agent file to edit
 ```
@@ -54,8 +56,16 @@ plugins that did not start, and exits non-zero if any did not.
 
 **`sessions`** List the sessions in the log, each with the session it was started from.
 
+**`sessions remove <name>`** Take the session out of the log, with every session started from
+it (sub-agents and sessions switched to from it), and say which went. The log is written
+again without their events and with a `session/removed` marker for each, then put in place of
+the old one in one step, so a crash leaves one or the other. Nothing else in the log changes:
+plugin state, other sessions and the events about the agent itself stay. The agent is not put
+together for this, and no other `corduroy` may have the log open. It cannot be undone.
+
 **`log`** Print every event in the log, one per line, with the time it was stored (UTC).
-See [Events](events.md) for how to read a line.
+See [Events](events.md) for how to read a line. The first lines each process writes are its
+`process/start`: what program, version and platform wrote what follows.
 
 **`init`** Write the default agent to `<workspace>/corduroy.toml`. Refuses if the file
 exists. The model is chosen from the environment: Anthropic if `ANTHROPIC_API_KEY` is set,

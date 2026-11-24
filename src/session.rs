@@ -25,6 +25,19 @@
 //! | `signal` | `environment` | `{"name", "payload"}`: what a waiting call was waiting for |
 //! | `compaction` | `host` | `{"summary", "keep_from", "by"}`: the messages before the `message` event `keep_from` are summarised |
 //!
+//! Two belong to no session: each process that opens the log records what it runs as, and a
+//! session removed from the log leaves a marker.
+//!
+//! | Topic | Source | Payload |
+//! | --- | --- | --- |
+//! | `process/start` | `host` | `{"program", "version", "world", "platform"}`, `world` only if the process hosts add-ons: see [`ProcessInfo`] |
+//! | `session/removed` | `user` | `{"session"}`: a person removed that session's events from the log, with the sessions it started: see [`removal`] |
+//!
+//! While a program runs the log only grows. Between runs a store may remove whole sessions,
+//! as maintenance a person asks for, and nothing smaller. Ids are never used again, so a
+//! reader meets gaps in them, a `cause` naming an event no longer there, and a session whose
+//! parent is gone (when its files were edited by hand); none of these is an error.
+//!
 //! A tool call leaves a trail of its own, one commit at a time: `tool/call` with the model's
 //! message, `tool/start` just before the tool runs, `tool/result` as soon as it returns, and
 //! only then the `message` that carries the results of every call of that step to the
@@ -62,8 +75,8 @@
 
 use alloc::borrow::ToOwned;
 use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
 use alloc::collections::btree_map::Entry;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::String;
 use alloc::string::ToString;
@@ -73,8 +86,8 @@ use alloc::vec::Vec;
 use anyhow::{Context as _, Result};
 use corduroy_core::sync::Lock;
 use corduroy_core::{
-    Decision, Draft, Event, EventId, EventStream, LogError, Message, Part, Pattern, Role,
-    SessionId, Source, TOOL_CALL, ToolCall, ToolOutput, ToolResult, Verdict,
+    Decision, Draft, Event, EventId, EventStream, LogError, Message, Part, Query, Role, SessionId,
+    Source, TOOL_CALL, ToolCall, ToolOutput, ToolResult, Verdict,
 };
 use serde_json::{Value, json};
 
@@ -127,6 +140,31 @@ pub fn ended(signal: &str) -> Option<SessionId> {
         .map(SessionId::new)
 }
 
+/// How many events one read of the log asks for.
+const PAGE: usize = 1000;
+
+/// Every event `query` and `keep` select, read a page at a time, so that a store that keeps
+/// part of the log out of memory is asked for it.
+fn read_all(
+    events: &EventStream,
+    mut query: Query,
+    keep: impl Fn(&Event) -> bool,
+) -> Result<Vec<Event>, LogError> {
+    let mut all = Vec::new();
+    loop {
+        let page = events.read_where(&query, &keep)?;
+        let full = page.len() >= query.limit;
+        let Some(last) = page.last().map(|event| event.id) else {
+            return Ok(all);
+        };
+        all.extend(page);
+        if !full {
+            return Ok(all);
+        }
+        query = query.after(last);
+    }
+}
+
 /// Topic of the event that stands a summary in for the messages before a point.
 pub const COMPACTION: &str = "compaction";
 
@@ -136,6 +174,119 @@ const SUMMARY_INTRO: &str = "The start of this conversation was condensed to sav
 
 /// The model's side of the summary, so the conversation still alternates.
 const SUMMARY_ACK: &str = "Understood. I will continue from that summary.";
+
+/// Topic of the marker a session leaves when it is removed from the log.
+pub const SESSION_REMOVED: &str = "session/removed";
+
+/// What removing a session from the log takes. See [`removal`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Removal {
+    /// The sessions whose events go: the one asked for and every session started from it,
+    /// directly or through others.
+    pub sessions: BTreeSet<SessionId>,
+    /// The markers recording it, one for each session, to be stored as one commit after
+    /// what is kept.
+    pub markers: Vec<Draft>,
+}
+
+/// What removing `session` from the log behind `events` takes.
+///
+/// A store that removes sessions asks this of the events it holds, so that which sessions go
+/// and what the record says of it are the same whatever the store.
+///
+/// # Errors
+///
+/// Returns [`HarnessError::UnknownSession`] if the log holds no such session, or
+/// [`HarnessError::Log`] if it could not be read.
+pub fn removal(events: &EventStream, session: &SessionId) -> Result<Removal, HarnessError> {
+    let sessions = SessionInfo::read(events)?;
+    if !sessions.iter().any(|info| info.id == *session) {
+        return Err(HarnessError::UnknownSession(session.clone()));
+    }
+    let mut removed = BTreeSet::from([session.clone()]);
+    // Started in order, so a session's parent is always met before it.
+    for info in &sessions {
+        if info
+            .parent
+            .as_ref()
+            .is_some_and(|parent| removed.contains(parent))
+        {
+            removed.insert(info.id.clone());
+        }
+    }
+    let markers = removed
+        .iter()
+        .map(|id| {
+            Draft::new(Source::User, SESSION_REMOVED)
+                .payload(json!({"session": id.as_str()}).to_string())
+        })
+        .collect();
+    Ok(Removal {
+        sessions: removed,
+        markers,
+    })
+}
+
+/// Topic of the event a process records when it opens the log: what it runs as.
+pub const PROCESS_START: &str = "process/start";
+
+/// What a process that opens a log runs as, recorded once by each as `process/start`.
+///
+/// Whoever reads the log, or resumes a run from it, can then tell whether it was written by
+/// the same build on the same platform: resuming is expected to work there, and is best
+/// effort anywhere else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ProcessInfo {
+    /// The program's name, such as `corduroy`.
+    pub program: String,
+    /// The program's version.
+    pub version: String,
+    /// The plugin world it hosts add-ons against, such as `corduroy:plugin@0.1.0`; none for
+    /// a process without add-ons.
+    pub world: Option<String>,
+    /// What it runs on, as `<architecture>-<operating system>`, such as `x86_64-linux`.
+    pub platform: String,
+}
+
+impl ProcessInfo {
+    /// The program `program` at `version`, on `platform`, with no add-ons.
+    #[must_use]
+    pub fn new(
+        program: impl Into<String>,
+        version: impl Into<String>,
+        platform: impl Into<String>,
+    ) -> Self {
+        Self {
+            program: program.into(),
+            version: version.into(),
+            world: None,
+            platform: platform.into(),
+        }
+    }
+
+    /// Record that the process hosts add-ons built against the plugin world `world`.
+    #[must_use]
+    pub fn world(mut self, world: impl Into<String>) -> Self {
+        self.world = Some(world.into());
+        self
+    }
+
+    /// The `process/start` event recording this.
+    #[must_use]
+    pub fn start(&self) -> Draft {
+        let mut payload = json!({
+            "program": self.program,
+            "version": self.version,
+            "platform": self.platform,
+        });
+        if let (Some(world), Some(fields)) = (&self.world, payload.as_object_mut()) {
+            fields.insert("world".to_owned(), json!(world));
+        }
+        Draft::new(Source::Host, PROCESS_START).payload(payload.to_string())
+    }
+}
 
 /// Name of the session a harness starts with, and the one [`Harness::run`] uses.
 ///
@@ -169,13 +320,18 @@ impl SessionInfo {
             .payload(payload.to_string())
     }
 
-    /// Every session `events` holds, in the order they were started.
-    pub(crate) fn all(events: &EventStream) -> Vec<Self> {
-        events
-            .matching(&Pattern::new(SESSION_START))
+    /// Every session the log behind `events` holds, in the order they were started.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`LogError`] if the log could not be read.
+    pub fn read(events: &EventStream) -> Result<Vec<Self>, LogError> {
+        // Only the harness starts sessions; a plugin's `session/start` is not one.
+        let starts = read_all(events, Query::first(PAGE).topics(SESSION_START), |event| {
+            event.source == Source::Host
+        })?;
+        Ok(starts
             .into_iter()
-            // Only the harness starts sessions; a plugin's `session/start` is not one.
-            .filter(|event| event.source == Source::Host)
             .filter_map(|event| {
                 let payload: Value = serde_json::from_str(&event.payload).ok()?;
                 let parent = payload.get("parent").and_then(Value::as_str);
@@ -186,7 +342,7 @@ impl SessionInfo {
                     task: task.map(str::to_owned),
                 })
             })
-            .collect()
+            .collect())
     }
 }
 
@@ -223,7 +379,7 @@ impl Sessions {
             info,
             journal: None,
         };
-        let mut known: BTreeMap<SessionId, Known> = SessionInfo::all(&events)
+        let mut known: BTreeMap<SessionId, Known> = SessionInfo::read(&events)?
             .into_iter()
             .map(|info| (info.id.clone(), unloaded(info)))
             .collect();
@@ -971,7 +1127,7 @@ impl core::fmt::Debug for Journal {
 
 impl Journal {
     /// A journal for the session `id`, picking up whatever conversation `events` already
-    /// holds for it. Pass a stream rebuilt with [`EventStream::replay`] to resume an earlier
+    /// holds for it. Pass a stream loaded with [`EventStream::load`] to resume an earlier
     /// run.
     ///
     /// # Errors
@@ -979,7 +1135,7 @@ impl Journal {
     /// Fails if a `message` or tool-call event of the session cannot be decoded.
     pub fn new(id: SessionId, events: Arc<EventStream>) -> Result<Self> {
         let mut state = State::new();
-        for event in events.session(&id) {
+        for event in read_all(&events, Query::first(PAGE).session(id.clone()), |_| true)? {
             state.project(&event)?;
         }
         Ok(Self {

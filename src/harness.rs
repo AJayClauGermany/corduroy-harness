@@ -284,7 +284,7 @@ impl Harness {
     }
 
     /// A harness that continues from an existing event stream, such as one rebuilt with
-    /// [`EventStream::replay`] or opened from a log on disk. Its sessions are the ones the
+    /// [`EventStream::load`] or opened from a log on disk. Its sessions are the ones the
     /// stream holds, and each conversation is whatever that session's `message` events add
     /// up to.
     ///
