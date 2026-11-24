@@ -799,7 +799,7 @@ failure has been dealt with.
 
 | Proof | What it shows |
 | --- | --- |
-| A sandboxed kernel | That what the agent starts (an MCP server it wrote included) can be confined through the kernel trait alone. |
+| A sandboxed kernel | That what the agent starts (an MCP server it wrote included) can be confined through the kernel trait alone. What comes out of it ships, as the default agent's shell ([What is safe by default](#what-is-safe-by-default)). |
 | Another harness connected as a plugin | That a long-lived connection exchanging messages fits over a core whose every trait is [called and waited for](#what-the-core-is-made-of). The hardest test of whether the small core forces a design. It has to show four things: a task handed over and its result received through a wait that survives a restart; the other side's progress seen here as events; a stop here reaching the other side; and a message the other side sends unasked getting in. |
 | A second store for the log | That the `Log` trait is enough for a store that is not the file: a folder with a file per session, read on request ([What the record promises](#what-the-record-promises)). |
 | The test-driven pair, end to end | The second [measured use](#what-it-is-for): two agents with different loops, tools and views finishing one task. It needs an add-on to define a loop and sessions to differ. |
@@ -1242,6 +1242,211 @@ The core supplies the choke points, not the sandbox. What it must guarantee:
   applies to it. Anything that comes from a third party, or that the agent writes for
   itself, must be WebAssembly.
 
+Which of these a person gets without setting anything up is decided in the next section.
+
+## What is safe by default
+
+Three things are decided here: what 1.0 promises about safety, what a kernel is given of the
+machine it runs on, and what a workspace may configure. All of it is *planned*. The code is
+as [Sandboxing](#sandboxing) above and the [security model](explanation/security-model.md)
+describe it, and [Order of work](#order-of-work) lists what changes.
+
+**The promise.** What the agent can reach is what you allowed, whatever the model is told
+and whatever a workspace holds. Nothing it builds or loads gives it more.
+
+**What is protected first is the harness.** The things that enforce come first: the core,
+the grants and the record. If those hold, the agent and the workspace are held by them. A
+hostile workspace cannot make the agent do what its grants do not allow, and an agent that
+has been turned cannot change more than it was allowed to. Because the agent extends itself,
+the weight is on the promise's second sentence: it may build and load more, and it never
+ends up with more than the person gave it.
+
+**Who is trusted.**
+
+| | Trusted? | What follows |
+| --- | --- | --- |
+| The model | no: it may be an adversary, and it makes mistakes | Whatever it can do through its tools, someone who gets text in front of it can do: a web page, a file, a tool's result, a hint file. So the limits are on what its tools can reach, never on what it is told. |
+| Add-ons | no, whoever wrote them, the agent included | They do only what their grants allow. |
+| What tools return and what a workspace holds | no | It is text the model reads, and a workspace's agent file is a request (below). |
+| What a kernel starts: a command, an MCP server over stdio | no | It is confined by the kernel that started it. |
+| The core | yes | It is what enforces. |
+| Extensions | yes | All of them are ours until after 1.0. How an extension someone else wrote comes to be trusted is a question for then. |
+| The person, their machine and their account | yes | The harness cannot defend against the account it runs under. |
+| The model's provider | yes, for now | It sees what it is sent. A model served on this machine is the way out. |
+
+**Mistakes are contained, not undone.** What is hard to recover from is made hard or
+impossible to do, by what is granted. A mistake then stays inside what was allowed, and the
+record shows what was done. Restoring files in the workspace is the person's version
+control, and catching a dangerous command before it runs is a gate's work, which is policy.
+Snapshots of a kernel come after 1.0.
+
+**Two sandboxes, and one of them is ours.** An outer one wraps the whole harness: a
+container, a micro-VM, a sandbox runtime. It is the person's choice, and nothing here
+promises it or relies on it. The inner one is the harness's own: capabilities for add-ons,
+and for what a kernel runs, the operating system's confinement (Seatbelt on macOS,
+bubblewrap or Landlock on Linux) inside a kernel extension. It cannot be an add-on, since no
+capability starts a process.
+
+**The default agent's shell is confined.** The confined kernel is built as one of the proofs
+[the freeze waits on](#what-the-freeze-waits-on). It then ships in the standard set and is
+the default agent's shell.
+
+- *The agent's shell is a subset of the person's.* It can be widened as far as their own,
+  and only by them.
+- *The plain shell stays*, chosen by name, for when an outer sandbox is the confinement:
+  one sandbox inside another often does not work.
+- *No silent downgrade.* Where a shell cannot be confined, the kernel does not start. The
+  command says why and names the change that opts into the plain shell, which is the
+  person's choice alone.
+- *Linux and macOS are promised.* What confines a shell on Windows is still to be found
+  (H10 in [Open questions](open-questions.md)); until then the shell there is opt-in. The
+  file tools work everywhere, since they are add-ons.
+
+**A kernel is given things as an add-on is granted them.** Nothing by default, and each
+thing listed, in the patterns every scope uses:
+
+| | The default agent's shell |
+| --- | --- |
+| Files it writes | The workspace, apart from its agent file. |
+| Files it reads | The workspace, and the system's program and library directories, without which no command runs. Nothing of the home directory, so a toolchain installed there is a line the person adds. |
+| Hosts it reaches | None to begin with. The list grows by the person's answers. |
+| Environment variables | A few plain ones the kernel sets itself (`PATH`, `HOME`). Nothing of the command's own environment. |
+
+Other sandboxes made for agents let a command read everything unless told otherwise. Here a
+read is granted like a write, so the person decides which credentials on the disk are
+within reach. The default is just enough to start work with and no more. What is refused
+is recorded, so the person sees what else was wanted and adds it: a refused host by name,
+and a refused file as far as the operating system says which one it was, which the proof has
+to find out.
+
+**Every kernel starts from an empty environment**, the plain shell included, since that
+needs nothing from the operating system. Today the shell starts with the command's own
+environment, which is where the provider's key is.
+
+**The shell reaches only the hosts listed for it.** The list is written as an add-on's
+`http` grant is. The operating system offers a network that is on or off, so the kernel
+passes the shell's traffic through a filter of its own. That filter is a condition of 1.0,
+though it is work in the extension and none in the core: with only on and off, people leave
+it on and the promise is empty.
+
+- *The person does not write the list by hand.* A connection to a host not on it is
+  refused and recorded with the host's name, and the person is offered it. A yes allows it
+  from then on.
+- *A refused connection fails the command.* It does not hold the command while the person
+  decides; the model tries again after the answer. A call that is running cannot wait for a
+  person today, which is the same gap as approving a load (C15), and the two are closed
+  together.
+- *What 1.0 says* is that the shell reaches only the hosts the person allowed. It does not
+  say that data cannot leave: the filter tells hosts apart and not requests, so an allowed
+  host can be sent anything.
+
+Every host the agent can reach is then written down: in an add-on's `http` grant, in a
+kernel's list, or as the address of a provider or an MCP server in an agent file.
+
+**One path for every credential.** A provider's key and an MCP server's token come through
+`Secrets`, as an add-on's secrets do, so a keychain in place of the environment covers all
+of them. The person's own environment is where they come from by default (`env-secret`). A
+credential is then in one of three states as far as a shell is concerned:
+
+| State | What the shell has | How it gets there |
+| --- | --- | --- |
+| Absent | Nothing. | The default for everything but the plain variables. |
+| Masked | The name, set to a placeholder. The filter puts the value in its place in requests to the hosts the secret names, and nowhere else. | It can be asked for while the agent runs. |
+| Passed through | The value. | Only by the person writing it into an agent file, never by an ask. |
+
+- *Masked is in 1.0.* It gives the shell what add-ons already have: a handle and never the
+  value. `git push` works, and printing the variable shows the placeholder.
+- *A secret says which hosts it may go to.* `Secret` is the core's, so this is in the core
+  before the freeze (B9). It also keeps a provider's key from following a `base_url` that
+  an agent file pointed somewhere else.
+- *The filter reads what it writes into.* It needs a certificate of its own that programs
+  in the sandbox trust, and it should read only the traffic to hosts a masked secret names,
+  passing the rest through unread.
+- *Only a key sent over HTTPS can be masked.* An SSH key or a database password is passed
+  through or absent.
+- *The agent asks, and the person answers.* The agent asks for a credential by name,
+  through a tool. It never gives itself one, and it is not shown what the person's own
+  environment holds.
+- *Passing a value through is the person's line in an agent file.* The model can then
+  print it, and what it prints is in the log.
+
+**Two places.** What a person has and what a project has are kept apart:
+
+| Place | Whose | Holds |
+| --- | --- | --- |
+| Account level | The person's. Outside every workspace, and out of reach of every shell and add-on. | Their own agent file, their answers, and for each workspace its log and its compiled-code cache. |
+| Project level | The workspace's: `corduroy.toml` and `.corduroy/`. | The project's agent file, and what the agent builds there: skills, memories, its add-ons. It may be committed and shared. |
+
+- *What enforces is never the agent's to write:* the grants, the log, the command and the
+  add-ons shipped with it, the compiled-code cache, the person's answers. Not through an
+  add-on (protected paths already cover the agent file, the log, the command and the
+  cache), and not through a shell.
+- *What the agent builds is.* Writing a skill or an add-on grants nothing: loading one is
+  still asked at `plugin/load`, within what its loader holds.
+- *A clone brings text and no authority.* A repository someone else wrote can bring hint
+  files, skills and memories, which the model reads and the grants bound. It cannot bring
+  a log, compiled code or grants. The cost is that the record no longer travels with the
+  project's folder.
+- *Account-level things are not committed with a project.* A person may keep them in a
+  repository of their own.
+
+**A workspace's agent file is a request until the person accepts it.** Today it is read the
+moment `corduroy` runs in the directory, so a repository someone else wrote configures the
+agent on this machine.
+
+- *The first time,* the command shows what the file asks for (what the shell reaches, the
+  hosts, the add-ons, the MCP servers, where the model's API is) and the person accepts or
+  declines. The yes is remembered by the file's hash, so a changed file asks again.
+- *Declined,* the person's own agent runs in its place. *With nobody there to ask,* the run
+  stops and says why.
+- *A file named with `--agent`* counts as accepted: naming it is the person's act.
+- *A shipped add-on's name resolves to the shipped one.* Today the agent file's directory is
+  searched first, so a workspace could stand in its own `approval.wasm`.
+
+**One file is one whole agent.** There is no merging in 1.0, only a fallback: the file named
+with `--agent`, else the workspace's accepted file, else the person's own, else the built-in
+default. The first one found is the whole agent. The person's own file is what says "always
+this provider" in every workspace.
+
+**The person's answers are theirs.** Accepted files, allowed hosts, masked credentials and
+add-ons switched off are kept at account level, for each workspace, and never written into
+the project's file: that would change its hash, and put one person's answers into a
+repository others share. So files do not merge, and answers adjust: the agent that runs is
+the accepted file, plus what the person allowed, minus what they switched off. Two people on
+one project can then differ, one with the `memory` add-on and one without. A command lists
+the answers and, when the person wants, writes them into a file.
+
+The exception is an add-on that guards a decision point (`approval`, `inspect`). Taking a
+guard away widens what the agent may do, so it is not switched off by an answer: that takes
+an agent file of the person's own.
+
+**Six guarantees, each with a test.** The promise is kept by these, and none is claimed
+without a test that would fail if it stopped being true. The [security
+model](explanation/security-model.md) becomes the list of them, with the test for each.
+
+| | Guarantee | Today |
+| --- | --- | --- |
+| 1 | An add-on does only what its grants allow. | Built. |
+| 2 | The shell reaches only the files, hosts and variables listed for it. A shell that cannot be confined does not start unless the person chose the plain one. | Not built. |
+| 3 | What enforces is out of the agent's reach: the grants, the log, the command and its add-ons, the person's answers. | For add-ons, protected paths cover the agent file, the log, the command and the cache. Not built: the shipped add-ons, the answers, and anything for a shell. |
+| 4 | Whatever the agent builds or loads holds at most what its loader holds, and a person approved the load. | No amplification and the gate are built. A person cannot answer yet: an ask at `plugin/load` is a denial (C15). |
+| 5 | A workspace changes nothing about what the agent may do until the person accepts its file. | Not built. |
+| 6 | No credential's value reaches an add-on. A shell holds a value only where an agent file the person wrote or accepted says so, and a masked one goes only to the hosts its secret names. | Built for add-ons, not for a shell. |
+
+**What is not promised.**
+
+- *That data cannot leave.* An allowed host, and the model's provider, can be sent anything
+  the agent can read.
+- *That a mistake inside the workspace can be undone.* It is contained, as above.
+- *Anything about the plain shell, an extension, or the machine and the account.*
+- *That a gate catches everything.* Gates are policy: `inspect` is a heuristic, and
+  `read-only` is a tool's own claim.
+
+**A fix may break.** After 1.0, a flaw that breaks one of the six may be fixed by a change
+that breaks a frozen contract, announced as one. How it is announced and how long a release
+is supported are still open (A11), as is whether a review from outside is a condition of 1.0
+(P9).
+
 ## Shipped plugins: the Goose baseline
 
 Each row is a plugin, with the core primitive it waits on. Nothing here is built into the
@@ -1376,6 +1581,17 @@ the step it waits on is done.
     and by `compact`; the form of a question a tool puts to the person; a way for an
     extension to raise a signal and to start a session. Then the connected harness, the
     proof that calling and waiting is enough.
+14. What is [safe by default](#what-is-safe-by-default). *Decided, none of it built:* a
+    secret that names the hosts it may go to, in the core before the freeze; every kernel
+    starting from an empty environment, and every credential through `Secrets`; the
+    confined kernel for Linux and macOS, given its files, hosts and variables as an add-on
+    is granted them, with its filter for hosts and masked credentials in the shell; the
+    default agent on that kernel, and a shell that cannot be confined not starting; the
+    account-level place, holding the person's own agent file, their answers, the log and
+    the compiled-code cache, and a name for it in the agent file's strings; a workspace's
+    agent file accepted by its hash, the fallback order of agent files, and a shipped
+    add-on's name resolved before anything a workspace holds; a test named for each of the
+    six guarantees.
 
 ## Open questions
 
