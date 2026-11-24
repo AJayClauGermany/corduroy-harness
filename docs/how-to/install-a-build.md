@@ -3,7 +3,8 @@
 Every commit on `main` that passes CI is built for Linux (x86-64 and ARM), macOS (Apple
 silicon) and Windows (x86-64) and published as a
 [release](https://github.com/AJayClauGermany/corduroy-harness/releases) named after the
-commit, `build-<short sha>`. The newest is marked latest. Nothing needs Rust.
+commit, `build-<short sha>`. The newest is marked latest, and the ten newest are kept.
+Nothing needs Rust.
 
 Until releases have version numbers, the commit is the version: `corduroy --version` prints
 it.

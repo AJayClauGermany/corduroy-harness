@@ -69,6 +69,8 @@ jobs:
             plugins/target/wasm32-unknown-unknown/release/*.wasm
             dist/corduroy-addons.tar.gz
           if-no-files-found: error
+          # Only the release needs them; they are passed between jobs, not kept.
+          retention-days: 7
 
   build:
     needs: addons
@@ -127,6 +129,8 @@ jobs:
           name: ${{ env.NAME }}
           path: dist/${{ env.NAME }}.*
           if-no-files-found: error
+          # Only the release needs them; they are passed between jobs, not kept.
+          retention-days: 7
 
   publish:
     needs: [addons, build]
@@ -176,3 +180,16 @@ jobs:
             gh release create "$TAG" release/* --target "$SHA" --title "$TAG" \
               --notes-file notes.md --latest
           fi
+      # Builds by commit pile up: keep the newest KEEP, deleting the rest with their tags.
+      # Only `build-*` releases; a versioned release is never touched.
+      - name: Remove older builds
+        env:
+          KEEP: 10
+        run: |
+          gh release list --limit 1000 --json tagName,createdAt \
+            --jq 'sort_by(.createdAt) | reverse | .[] | select(.tagName | startswith("build-")) | .tagName' |
+            tail -n +"$((KEEP + 1))" |
+            while read -r old; do
+              echo "removing $old"
+              gh release delete "$old" --cleanup-tag --yes
+            done

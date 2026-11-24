@@ -63,6 +63,8 @@ Every commit on `main` that passes CI is built and published as a release named 
 once (WebAssembly is the same everywhere), the command on each platform, each packaged by
 `scripts/package.sh` with the add-ons in `plugins/` beside it, then unpacked away from the
 checkout and tried with `corduroy init` and `corduroy check` before anything is published.
+After publishing, it deletes all but the newest ten `build-*` releases (`KEEP` in the
+workflow); other releases are never touched.
 `CORDUROY_COMMIT`, set at build time, is what `corduroy --version` prints. A pull request that
 changes the workflow, the scripts or the plugin path runs everything but the publishing.
 [Install a ready-made build](install-a-build.md) is the user's side.
