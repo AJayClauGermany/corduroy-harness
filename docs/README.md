@@ -31,6 +31,8 @@ New here? Do the two tutorials in order (about half an hour together), then read
 
 Using the `corduroy` command:
 
+- [Install a ready-made build](how-to/install-a-build.md): the command and its add-ons for
+  Linux, macOS or Windows, without Rust.
 - [Connect a model](how-to/connect-a-model.md): Anthropic, OpenAI, Ollama, any compatible
   endpoint, or a small model on your own machine.
 - [Have a second model review the work](how-to/review-with-a-second-model.md): Claude writes,
@@ -57,7 +59,8 @@ Extending corduroy:
 
 Working on corduroy itself:
 
-- [Develop corduroy](how-to/develop-corduroy.md): build, test, lint and what CI runs.
+- [Develop corduroy](how-to/develop-corduroy.md): build, test, lint, what CI runs and how
+  builds are published.
 
 ## Reference
 

@@ -68,6 +68,15 @@ result. Any tool call can wait this way, for a signal brought by `Harness::signa
 
 ## Try it
 
+No Rust needed: every commit on `main` is published as a
+[ready-made build](docs/how-to/install-a-build.md) with its add-ons (Linux, macOS, Windows).
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/AJayClauGermany/corduroy-harness/main/scripts/install.sh | sh
+```
+
+Or from a checkout:
+
 ```bash
 cargo plugins                                   # build the add-ons (WebAssembly plugins)
 ```

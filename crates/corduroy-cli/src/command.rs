@@ -35,8 +35,18 @@ use crate::extension::Extensions;
 use crate::terminal::{self, Out, say};
 
 const USAGE: &str = "usage: corduroy [--agent FILE] [--workspace DIR] [--session NAME] \
-                     [--model NAME] [--provider NAME] [run PROMPT | continue | stop | check | sessions | \
+                     [--model NAME] [--provider NAME] [--version] [run PROMPT | continue | stop | check | sessions | \
                      sessions remove NAME | log | init]";
+
+/// `corduroy` and its version, with the commit it was built from when the build said
+/// (`CORDUROY_COMMIT`, set by the release workflow).
+fn version() -> String {
+    let release = env!("CARGO_PKG_VERSION");
+    option_env!("CORDUROY_COMMIT").map_or_else(
+        || format!("corduroy {release}"),
+        |commit| format!("corduroy {release} ({commit})"),
+    )
+}
 
 /// The command line, read.
 #[derive(Debug, Default)]
@@ -46,6 +56,7 @@ struct Options {
     session: Option<String>,
     model: Option<String>,
     provider: Option<String>,
+    version: bool,
     command: Vec<String>,
 }
 
@@ -60,6 +71,7 @@ fn options(mut args: impl Iterator<Item = String>) -> Result<Options, String> {
             "--model" => options.model = Some(value("--model")?),
             "--provider" => options.provider = Some(value("--provider")?),
             "-h" | "--help" | "help" => return Err(USAGE.to_owned()),
+            "-V" | "--version" => options.version = true,
             // `cargo corduroy -- check` passes one on; it means nothing here.
             "--" => {}
             flag if flag.starts_with("--") => {
@@ -85,13 +97,16 @@ pub fn main_with(extensions: &Extensions) -> ExitCode {
 /// parts in `standard`. Returns the process's exit code.
 pub fn main_standard(standard: &Standard) -> ExitCode {
     let out: Out = Arc::new(Mutex::new(io::stdout()));
-    let result = options(std::env::args().skip(1))
-        .map_err(Into::into)
-        .and_then(|options| {
-            tokio::runtime::Runtime::new()
-                .map_err(Into::into)
-                .and_then(|runtime| runtime.block_on(run(options, standard, &out)))
-        });
+    let parsed = options(std::env::args().skip(1));
+    if let Ok(Options { version: true, .. }) = parsed {
+        say(&out, &version());
+        return ExitCode::SUCCESS;
+    }
+    let result = parsed.map_err(Into::into).and_then(|options| {
+        tokio::runtime::Runtime::new()
+            .map_err(Into::into)
+            .and_then(|runtime| runtime.block_on(run(options, standard, &out)))
+    });
     match result {
         Ok(code) => code,
         Err(error) => {
@@ -475,5 +490,12 @@ mod tests {
         let read = options(args.into_iter().map(str::to_owned)).unwrap();
         assert_eq!(read.session.as_deref(), Some("side"));
         assert_eq!(read.command, ["run", "say", "--", "hi"]);
+    }
+
+    #[test]
+    fn the_version_names_the_release() {
+        let read = options(std::iter::once("--version".to_owned())).unwrap();
+        assert!(read.version);
+        assert!(version().starts_with(&format!("corduroy {}", env!("CARGO_PKG_VERSION"))));
     }
 }

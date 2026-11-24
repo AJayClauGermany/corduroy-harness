@@ -1,0 +1,178 @@
+name: Release
+
+# A ready-to-run build of every commit on main that passes CI: the `corduroy` command for each
+# platform with the add-ons it ships, published as a GitHub release named after the commit
+# (`build-<short sha>`) and marked latest. scripts/install.sh installs the latest one.
+#
+# Until releases are versioned, the commit is the version: `corduroy --version` prints it.
+# Pull requests that change how builds are made run everything but the publishing.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - scripts/package.sh
+      - scripts/install.sh
+      - crates/corduroy-std/src/places.rs
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # The commit being built: the one CI passed, the pull request's head, or the one dispatched.
+  SHA: ${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha || github.sha }}
+
+concurrency:
+  group: release-${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  addons:
+    # Only a push to main in this repository that CI passed. `branches: [main]` above alone
+    # would also match a fork's pull request from a branch it named main.
+    if: >-
+      github.event_name != 'workflow_run' || (
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    outputs:
+      short: ${{ steps.commit.outputs.short }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SHA }}
+      - id: commit
+        run: echo "short=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: plugins
+      # WebAssembly runs the same everywhere: the add-ons are built once, for every platform.
+      - run: cargo plugins --locked
+      - name: Package the add-ons on their own
+        run: scripts/package.sh addons plugins/target/wasm32-unknown-unknown/release corduroy-addons dist
+        env:
+          CORDUROY_COMMIT: ${{ steps.commit.outputs.short }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: addons
+          path: |
+            plugins/target/wasm32-unknown-unknown/release/*.wasm
+            dist/corduroy-addons.tar.gz
+          if-no-files-found: error
+
+  build:
+    needs: addons
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm }
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest, exe: .exe }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      CORDUROY_COMMIT: ${{ needs.addons.outputs.short }}
+      NAME: corduroy-${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SHA }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: addons
+          path: addons
+      # CORDUROY_COMMIT (above) is compiled in: `corduroy --version` names the commit.
+      - run: cargo build --release --locked -p corduroy-cli --target ${{ matrix.target }}
+      - name: Package
+        run: scripts/package.sh "target/${{ matrix.target }}/release/corduroy${{ matrix.exe }}" addons/plugins/target/wasm32-unknown-unknown/release "$NAME" dist
+      # Unpacked somewhere else, with no checkout in reach: the command must find its add-ons
+      # beside itself and start every one of them. `check` needs no model or key.
+      - name: Try the package
+        run: |
+          unpacked="$RUNNER_TEMP/unpacked"
+          workspace="$RUNNER_TEMP/workspace"
+          mkdir -p "$unpacked" "$workspace"
+          if [ -n "${{ matrix.exe }}" ]; then
+            7z x -bso0 -o"$unpacked" "dist/$NAME.zip"
+          else
+            tar -xzf "dist/$NAME.tar.gz" -C "$unpacked"
+          fi
+          corduroy="$unpacked/$NAME/corduroy${{ matrix.exe }}"
+          "$corduroy" --version | grep -F "($CORDUROY_COMMIT)"
+          cd "$workspace"
+          "$corduroy" init
+          "$corduroy" check
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.NAME }}
+          path: dist/${{ env.NAME }}.*
+          if-no-files-found: error
+
+  publish:
+    needs: [addons, build]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: build-${{ needs.addons.outputs.short }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SHA }}
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Collect the archives and their checksums
+        run: |
+          mkdir release
+          find artifacts -name 'corduroy-*.tar.gz' -o -name 'corduroy-*.zip' | xargs -I{} cp {} release/
+          (cd release && sha256sum * > SHA256SUMS)
+          cat release/SHA256SUMS
+      - name: Write the release notes
+        run: |
+          {
+            echo "A build of $(git log -1 --format='%h: %s' "$SHA"), made $(date -u +%Y-%m-%d)."
+            echo
+            echo "Each archive holds the \`corduroy\` command and the add-ons it ships with, in \`plugins/\` beside it. Unpack and run; no Rust needed."
+            echo "\`corduroy-addons.tar.gz\` is the add-ons alone, for a command built from source: point \`CORDUROY_PLUGIN_PATH\` at its \`plugins\` directory."
+            echo
+            echo "On Linux or macOS, install the latest build with:"
+            echo
+            echo '```bash'
+            echo "curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/scripts/install.sh | sh"
+            echo '```'
+            echo
+            echo "See docs/how-to/install-a-build.md."
+          } > notes.md
+      # Created with its files, so the latest release is never one without them. Re-running
+      # for the same commit replaces its archives rather than failing.
+      - name: Publish
+        run: |
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" release/* --clobber
+          else
+            gh release create "$TAG" release/* --target "$SHA" --title "$TAG" \
+              --notes-file notes.md --latest
+          fi

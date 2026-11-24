@@ -56,6 +56,27 @@ finds rather than silencing it. `scripts/check.sh` runs exactly what CI runs: fo
 clippy (including the core and loop built for a microcontroller without `std`), the add-ons,
 every test, doctests and the API docs. A change is done when it passes.
 
+## Builds
+
+Every commit on `main` that passes CI is built and published as a release named after it,
+`build-<short sha>`, by [`release.yml`](../../.github/workflows/release.yml): the add-ons
+once (WebAssembly is the same everywhere), the command on each platform, each packaged by
+`scripts/package.sh` with the add-ons in `plugins/` beside it, then unpacked away from the
+checkout and tried with `corduroy init` and `corduroy check` before anything is published.
+`CORDUROY_COMMIT`, set at build time, is what `corduroy --version` prints. A pull request that
+changes the workflow, the scripts or the plugin path runs everything but the publishing.
+[Install a ready-made build](install-a-build.md) is the user's side.
+
+To make the same archive locally:
+
+```bash
+cargo plugins && cargo build --release -p corduroy-cli
+```
+
+```bash
+scripts/package.sh target/release/corduroy plugins/target/wasm32-unknown-unknown/release corduroy-local
+```
+
 ## Where things go
 
 - A new **tool, prompt, gate or reaction** is an add-on in `plugins/` (or a guest-language

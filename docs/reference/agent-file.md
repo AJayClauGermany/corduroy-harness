@@ -116,9 +116,11 @@ after every native plugin above.
 | `enabled` | boolean | `true` | `false` keeps the entry without loading it. |
 
 **The plugin path.** A relative `path` is looked for, in order, in the agent file's directory,
-each directory in `CORDUROY_PLUGIN_PATH`, and the `plugins/target` directories of the source
-tree the command was built from (where `cargo plugins` and `scripts/guests.sh` put the
-add-ons). That is why the default agent can say `path = "pi_tools.wasm"`.
+each directory in `CORDUROY_PLUGIN_PATH`, the `plugins` directory beside the `corduroy`
+program (symbolic links followed; where a [ready-made build](../how-to/install-a-build.md)
+keeps its add-ons), and the `plugins/target` directories of the source tree the command was
+built from (where `cargo plugins` and `scripts/guests.sh` put the add-ons). That is why the
+default agent can say `path = "pi_tools.wasm"`.
 
 ### Grants
 

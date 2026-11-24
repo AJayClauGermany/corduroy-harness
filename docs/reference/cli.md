@@ -11,6 +11,7 @@ corduroy [options] sessions remove <name>
                                    take a session, and those it started, out of the log
 corduroy [options] log             print the event log
 corduroy init                      write the default agent file to edit
+corduroy --version                 print the version (and commit) of this build
 ```
 
 From a checkout, `cargo corduroy <args>` runs the command built from that tree (the alias
@@ -27,6 +28,7 @@ already ends in `--`). Source:
 | `--model <name>` | the file's `model` | Ask this model instead. |
 | `--provider <name>` | the file's `provider` | Ask this provider instead; it must be one of the file's `[providers.*]`. |
 | `-h`, `--help` | | Print the usage line. |
+| `-V`, `--version` | | Print the version, and the commit a [ready-made build](../how-to/install-a-build.md) was made from. |
 
 ## Commands
 
@@ -116,5 +118,5 @@ The agent file, the log and the cache are out of reach of every add-on's `fs-rea
 | Variable | Used for |
 | --- | --- |
 | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` | the default providers' keys, and `init`'s choice of model |
-| `CORDUROY_PLUGIN_PATH` | more directories to find add-ons in, separated as `PATH` is |
+| `CORDUROY_PLUGIN_PATH` | more directories to find add-ons in, separated as `PATH` is, searched before the `plugins` directory beside the program |
 | whatever `api_key_env`, `[secrets.*] env` and `bearer_token_env` name | keys and secrets the agent file refers to |
