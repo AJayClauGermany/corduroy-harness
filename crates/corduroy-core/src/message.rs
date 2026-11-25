@@ -35,10 +35,18 @@
 //! assert_eq!(answered.role, Role::User);
 //! ```
 
-use crate::model::Role;
 use crate::tool::ToolOutput;
 use alloc::string::String;
 use alloc::vec::Vec;
+
+/// Who said a [`Message`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// The person, or whatever speaks for one: a plugin, or a tool's results.
+    User,
+    /// The model.
+    Assistant,
+}
 
 /// One part of a [`Message`].
 ///

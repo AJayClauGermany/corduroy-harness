@@ -15,10 +15,10 @@ use std::time::{Duration, Instant, SystemTime};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use corduroy_core::{
-    CallError as CoreCallError, Completion, Content, Draft, Event, EventId, EventStream, FiberId,
-    Gates, Grants, HttpClients, HttpRequest, Kernels, ModelError, Models, PLUGIN_LOAD, Query,
-    Requests, Role, Scope, Secrets, Services, SessionId, Source, TOOL_CALL,
-    ToolError as CoreToolError, ToolOutput, Tools, Turn, Verdict, json,
+    CallError as CoreCallError, Content, Draft, Event, EventId, EventStream, FiberId, Gates,
+    Grants, HttpClients, HttpRequest, Kernels, Message, ModelError, ModelRequest, Models,
+    PLUGIN_LOAD, Query, Requests, Scope, Secrets, Services, SessionId, Source, TOOL_CALL,
+    ToolError as CoreToolError, ToolOutput, Tools, Verdict, json,
 };
 use serde_json::{Value, json};
 use wasmtime::StoreLimits;
@@ -748,46 +748,46 @@ impl llm::Host for HostState {
             .models
             .clone()
             .ok_or_else(|| HostError::Failed(unlent("models")))?;
-        let completion = Completion {
-            system: request.system,
-            messages: request
-                .messages
-                .into_iter()
-                .map(|turn| Turn {
-                    role: match turn.role {
-                        llm::Role::User => Role::User,
-                        llm::Role::Assistant => Role::Assistant,
-                    },
-                    text: turn.text,
-                })
-                .collect(),
-        };
-        let messages: Vec<Value> = completion
-            .messages
-            .iter()
-            .map(|turn| {
-                let role = match turn.role {
-                    Role::User => "user",
-                    Role::Assistant => "assistant",
-                };
-                json!({"role": role, "text": turn.text})
-            })
-            .collect();
-        let asked = json!({"model": model, "system": completion.system, "messages": messages});
+        let mut recorded = Vec::with_capacity(request.messages.len());
+        let mut messages = Vec::with_capacity(request.messages.len());
+        for turn in request.messages {
+            let (role, message) = match turn.role {
+                llm::Role::User => ("user", Message::user()),
+                llm::Role::Assistant => ("assistant", Message::assistant()),
+            };
+            recorded.push(json!({"role": role, "text": turn.text}));
+            messages.push(message.text(turn.text));
+        }
+        let asked = json!({"model": model, "system": request.system, "messages": recorded});
         self.outbox.push(self.draft("llm/request", &asked));
+        // The one request the loop fills in too, with no tools: a model a plugin asks
+        // cannot act.
+        let asking = ModelRequest::new(model.clone(), request.system, messages);
         let wait = self.wait;
-        let model_name = model.clone();
-        let answer = bounded(wait, move || {
-            models.complete(&model_name, &completion, wait)
-        })
-        .unwrap_or(Err(ModelError::TimedOut(wait)));
-        let (ok, output) = match &answer {
-            Ok(text) => (true, text.clone()),
-            Err(error) => (false, error.to_string()),
+        let answer = bounded(wait, move || models.complete(asking, wait))
+            .unwrap_or(Err(ModelError::TimedOut(wait)));
+        let mut answered = serde_json::Map::new();
+        answered.insert("model".to_owned(), json!(model));
+        answered.insert("ok".to_owned(), json!(answer.is_ok()));
+        let output = match &answer {
+            Ok(reply) => {
+                // What the call cost and why the model stopped, as far as its provider
+                // says, so the record shows what a plugin's own model calls spend.
+                let counts = reply.usage.counts();
+                answered.extend(counts.map(|(key, count)| (key.to_owned(), json!(count))));
+                if let Some(stop) = reply.stop {
+                    answered.insert("stop".to_owned(), json!(stop.as_str()));
+                }
+                reply.message.text_content()
+            }
+            Err(error) => error.to_string(),
         };
-        let answered = json!({"model": model, "ok": ok, "output": output});
-        self.outbox.push(self.draft("llm/response", &answered));
-        answer.map_err(|error| HostError::Failed(error.to_string()))
+        answered.insert("output".to_owned(), json!(output));
+        self.outbox
+            .push(self.draft("llm/response", &Value::Object(answered)));
+        answer
+            .map(|_| output)
+            .map_err(|error| HostError::Failed(error.to_string()))
     }
 }
 

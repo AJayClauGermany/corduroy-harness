@@ -4,7 +4,7 @@
 //! through `fs-read`, and asks a model of its own through `llm` (often a smaller, cheaper
 //! one) for what the model needs to know: a summary, or the answer to a question about them.
 //!
-//! Configuration: `model`, the model to ask, which the host must serve and the `llm` grant
+//! Configuration: `model`, the model to ask, as `<provider>/<model>`, which the `llm` grant
 //! must reach; `max_bytes`, the most text sent to it (200 KB by default).
 //!
 //! Tool: `summarize`.

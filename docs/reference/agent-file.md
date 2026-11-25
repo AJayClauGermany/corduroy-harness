@@ -46,7 +46,24 @@ is what `provider` refers to.
 | `max_tokens` | integer | The most one answer may take. Default: the model's own limit from oi-kit's catalogue, or 4096 for a model it does not know. |
 | `temperature` | float | Sampling temperature. Default: the model's own. |
 | `thinking` | string | `off`, `low`, `medium`, `high` or `max`, for a model that can think before it answers. |
-| `serve` | list of strings | Models of this provider that add-ons may ask through the `llm` capability. |
+
+A key the entry does not know is an error. Nothing here lists the models add-ons may ask:
+an add-on names a model as `<name>/<model>` (this entry's name, then the provider's own name
+for the model), and its [`llm` grant](capabilities.md) says which it may ask.
+
+### `[providers.<name>.models.<model>]`
+
+What the file states or corrects about one model of the provider, by the provider's name for
+it. A model describes itself as far as its provider knows (oi-kit's catalogue, for the hosted
+ones); a model served on this machine usually reports nothing, so this is where to say what
+it holds. Every key is optional, and what is left out stays as the provider reports it.
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `context_tokens` | integer | How many tokens the model holds at once. [`compact`](shipped-add-ons.md#compact) starts from three quarters of it. |
+| `output_tokens` | integer | The most it may write in one answer. |
+| `images` | boolean | Whether it takes images. |
+| `tools` | boolean | Whether it can be offered tools. |
 
 ## `[kernels.<name>]`
 
@@ -157,7 +174,6 @@ max_turns = 50
 
 [providers.main]
 kind = "anthropic"
-serve = ["claude-sonnet-5-5"]
 thinking = "medium"
 
 [kernels.shell]

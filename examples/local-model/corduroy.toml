@@ -19,7 +19,11 @@ max_turns = 20
 kind = "openai-compatible"
 base_url = "http://127.0.0.1:8080/v1/chat/completions"
 timeout_seconds = 300   # a long answer from a small model on a CPU takes a while
-serve = ["local"]       # plugins (summarize, compact) ask the same model through `llm`
+
+# A model served on this machine reports nothing about itself, so what it holds is stated
+# here: the script's server has a 16k-token context.
+[providers.local.models.local]
+context_tokens = 16384
 
 [kernels.shell]
 kind = "shell"
@@ -78,17 +82,17 @@ grants = { log-read = ["*:message", "*:session/start"] }
 [[plugins]]
 name = "summarize"
 path = "summarize.wasm"
-config = { model = "local" }
-grants = { fs-read = ["{workspace}", "{workspace}/*"], llm = "local" }
+config = { model = "local/local" }   # an add-on names a model as <provider>/<model>
+grants = { fs-read = ["{workspace}", "{workspace}/*"], llm = "local/local" }
 
 [[plugins]]
 name = "subagents"
 path = "subagents.wasm"
 grants = { service = "sessions" }
 
-# The script's server has a 16k-token context; compact well before it fills.
+# Compacts once a request passes three quarters of the context stated above.
 [[plugins]]
 name = "compact"
 path = "compact.wasm"
-config = { model = "local", max_tokens = 12000 }
-grants = { llm = "local" }
+config = { model = "local/local" }
+grants = { llm = "local/local" }

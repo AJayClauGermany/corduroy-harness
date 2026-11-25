@@ -314,7 +314,7 @@ own beyond what these give it.
 | `state` | a durable key-value store of the plugin's own | key |
 | `service` | call a service another plugin provides | service name |
 | `plugins` | load and unload WebAssembly plugins as its children, granting no more than it holds | the loaded plugin's name |
-| `llm` | one completion from a model a provider serves, recorded as `llm/request` and `llm/response` | model name |
+| `llm` | one completion from a model a provider serves, recorded as `llm/request` and `llm/response` with what it cost | model, as `<provider>/<model>` |
 | `secret` | an opaque handle to a named credential, never its value | secret name |
 | `http` | an HTTP request through the client registered for its scheme, with credentials written in by the host | host name |
 | `log-read` | events of any session, by topic, in pages | `<session>:<topic>`, the session with `%` and `:` percent-encoded (empty for harness events) |
@@ -381,7 +381,7 @@ Everything else is a plugin, and a plugin may itself offer primitives to other p
 | Capabilities | sixteen | The mechanism is settled; the set grows (below). |
 | Kernels | built | The trait and registry, and `Kernel::spawn` for long-lived processes with pipes (MCP servers). `ShellKernel` is an implementation, not a primitive, and lives in `corduroy-shell`. |
 | Conversation projection | built | Messages, and the `compaction` event: the messages before `keep_from` stay in the log and the conversation but are hidden from the model, which sees the summary in their place. The harness cuts only before the current turn; when, and the summary, come from the plugin providing the `compaction` service, asked by a loop step (`CompactOperation`). |
-| Model access | built | The loop asks the provider registered under a name in `Providers`, on every request, so a plugin supplies the model and unloading it takes the model away. `Harness::new` registers its argument there for convenience. For plugins, the core's `Models` registry: one completion, synchronously, by model name; a `provider` plugin can serve its models there. *Planned:* one request and reply for the loop and plugins, in the core, and a model that describes itself ([What the core is made of](#what-the-core-is-made-of)). |
+| Model access | built | The loop asks the provider registered under a name in `Providers`, on every request, so a plugin supplies the model and unloading it takes the model away. `Harness::new` registers its argument there for convenience. For plugins, the core's `Models` registry: one completion, synchronously, of a model named `<provider>/<model>`; a `provider` plugin serves its provider's models there. The loop and plugins fill in one request and read one reply, the core's (`ModelRequest`, `ModelReply`, with `Usage` and `StopReason`), and a model describes itself (`ModelInfo`). *Planned:* the general typed part, a cost on the usage, and listing models through `llm` ([What the core is made of](#what-the-core-is-made-of)). |
 | Secrets and outbound requests | built | `Secrets` and `HttpClients` registries. The core checks and records; native plugins hold the values and send the requests, so an HTTP client is a plugin like a kernel is. |
 | Versioning | WIT package version, log schema version | Built: a schema version in each log's header (2, which added the time; 1 is still read), and the rule for the world in [What is stable](#what-is-stable). Still to do: a version on each plugin's stored state, and the check of the world's version when an add-on is loaded ([How the plugin world grows](#how-the-plugin-world-grows)). |
 
@@ -399,8 +399,9 @@ outcome, with the child's session on the ask.
 
 Four things about the core's own shapes are decided here: what a model call is, what a model
 says about itself, that whatever a plugin contributes is called and waited for, and that the
-kinds of contribution are closed. All of it is *planned*: the code still has the shapes the
-table above describes, and [Order of work](#order-of-work) lists what changes.
+kinds of contribution are closed. The model call is built where it says so below: the one
+request and reply, models named by their provider, and a model's description. The rest is
+*planned*, and [Order of work](#order-of-work) lists what changes.
 
 **A plugin asks a model as a function; anything that acts is a session.** Code uses a model
 in one of two ways. As a function: content goes in and an answer comes back (summarise this,
@@ -430,24 +431,31 @@ request and reads the same reply:
 | The request | The model, the system prompt, the conversation as `Message`s, and the tools offered. Only the loop offers tools. It can grow. |
 | The reply | A `Message`, what the request cost, and why the model stopped. It can grow. |
 
-These take the place of the core's `Turn`, `Completion` and bare `String`, and of the
-harness's `ModelRequest`, `ModelReply` and `Usage`, which move into the core. What is added
+Built: `corduroy_core::model` has `ModelRequest`, `ModelReply`, `Usage` and `StopReason`.
+They took the place of the core's `Turn`, `Completion` and bare `String`, and of the
+harness's `ModelRequest`, `ModelReply` and `Usage`, which moved into the core. What is added
 later (a limit on tokens, a new kind of part) is added once and reaches the loop and plugins
 alike. Two ways of asking stay, over the one description: the loop's `Provider`, which is
 asynchronous and lives in the harness, and the core's `Model`, which is called and waited
-for and is what `llm` reaches. Going from one to the other loses nothing, where today it
-keeps only the text.
+for and is what `llm` reaches. Going from one to the other loses nothing, where it used to
+keep only the text.
 
-- *A plugin's call is recorded with its cost.* `llm/response` gains the usage and the reason
-  the model stopped, so a review of the log shows what the agent's own tools spent, and
-  whether code it wrote did make the tokens go further.
-- *A plugin's request carries what a message can*, images included.
+- *A plugin's call is recorded with its cost* (built). `llm/response` has the usage and the
+  reason the model stopped, so a review of the log shows what the agent's own tools spent,
+  and whether code it wrote did make the tokens go further. The loop's `usage` event has the
+  reason too: `finished`, `limit` (cut off at the most it may write), `tool_calls` or
+  `refused`, when the provider says. Which reasons there are in the end, and whether a
+  reply cut off at its limit should end a run differently, is still open (G10).
+- *A plugin's request carries what a message can*, images included. The core's request
+  does; an add-on's is still text until the next point is settled.
 - *How the request crosses the WebAssembly boundary* (a typed record, or the JSON a
-  `message` event holds) is still open (E8).
+  `message` event holds) is still open (E8). Until it is, the `llm` interface is as it was
+  (text in, text out) and the host fills in the core's request from it.
 
-**The grant is the one list of models.** `llm` is scoped by model, and that is the only
-thing that says which models an add-on may ask. The `serve` key of a provider entry, a
-second list that had to be kept in step with the grants, goes. A plugin names a model as
+**The grant is the one list of models** (built). `llm` is scoped by model, and that is the
+only thing that says which models an add-on may ask. The `serve` key of a provider entry, a
+second list that had to be kept in step with the grants, is gone: an entry of `Models` is a
+provider, registered once under its name and asked for any of its models. A plugin names a model as
 `<provider>/<model>`: the provider's name in the agent file, then the provider's own name
 for the model, divided at the first `/`. Grants are written the same way, with the allow and
 deny patterns every scope has, so "only these" and "all but this one" are both a grant. Two
@@ -463,19 +471,23 @@ kind of model; `Part` is already marked for growth. A vector database or a searc
 not a kind of thing in the core: it is a service an extension or an add-on provides, over an
 embedding model if it wants one.
 
-**A model describes itself.** The core has a small description that can grow, in which
-every field may be unknown: what the model takes (text, images, tools), what it returns,
-how much context it holds, how much it may write. `Model` and `Provider` each gain a method
-with a default that knows nothing. A provider fills in what it knows, the agent file states
-or corrects it for a model, and the loop and plugins read it in one place. "Unknown" is an
-answer every reader has to cope with, since a model served on this machine often reports
-nothing. `compact` then starts from a share of the model's own context, and its fixed
-number becomes an override; one number for every session cannot be right once sessions
+**A model describes itself** (built). The core has a small description that can grow
+(`ModelInfo`), in which every field may be unknown: what the model takes (images, tools),
+how much context it holds, how much it may write. What it returns joins them with the
+typed part above. `Model` and `Provider` each have a method with a default that knows
+nothing (`describe`). A provider fills in what it knows (`corduroy-providers` from oi-kit's
+catalogue), the agent file states or corrects it for a model
+(`[providers.<name>.models.<model>]`), and the loop and plugins read it in one place.
+"Unknown" is an answer every reader has to cope with, since a model served on this machine
+often reports nothing. `compact` starts from a share of the model's own context, three
+quarters, which the harness passes on with each question to the `compaction` service, and
+its fixed number is an override; one number for every session cannot be right once sessions
 differ in their model.
 
-- *The agent can see its models, if it is given the means.* Through `llm`, a plugin lists
-  the models its grant reaches, with their descriptions, as `tools.list` leaves out what a
-  scope does not reach. The agent sees them only when an add-on that offers this is loaded.
+- *The agent can see its models, if it is given the means* (planned). Through `llm`, a
+  plugin lists the models its grant reaches, with their descriptions, as `tools.list` leaves
+  out what a scope does not reach. The agent sees them only when an add-on that offers this
+  is loaded. It waits on the form of E8, and on a provider saying which models it has.
 - *A session keeps its model.* Choosing is for the next session or a child, not for the run
   under way. What else `session/start` carries is in
   [What an extension can reach](#what-an-extension-can-reach).
@@ -484,7 +496,8 @@ differ in their model.
   (`session/start`, decided there and not yet built).
 - *Cost is reported for each call, not described.* It comes with the usage, as far as the
   provider says, and goes into the log: the tokens read, the tokens written, those spent on
-  reasoning, and what the call cost if the provider states it. A figure that is absent means
+  reasoning (built, for the loop's calls and a plugin's), and what the call cost if the
+  provider states it (planned: the unit it is written in is still open, G17). A figure that is absent means
   the provider did not say; zero means it said the call was free, as a model on this
   machine may. A change of price needs nothing: each call records what it cost when it was
   made.
@@ -701,9 +714,9 @@ runtime's notification, and `tests/executor.rs` drives a run, a tool call and a 
 hand-written `block_on`. The `tokio` feature (on by default) only moves each tool call to
 tokio's blocking pool when the loop runs on a tokio runtime, so a long tool does not hold up
 the runtime's other tasks; anywhere else a tool runs where the loop runs, as it must on a
-device with one thread. Offering a provider's models to plugins (`ProviderPlugin::serving`)
-bridges a synchronous call to an asynchronous provider with a thread and a runtime, so it
-needs `tokio`. CI lints the loop for `thumbv7em-none-eabihf` as it does the core.
+device with one thread. Offering a provider's models to plugins bridges a synchronous call
+to an asynchronous provider with a thread and a runtime, so the `provider` plugin does it
+only with `tokio`. CI lints the loop for `thumbv7em-none-eabihf` as it does the core.
 
 **The standard extensions** (`corduroy-std`) are what the shipped command carries over the
 core and the loop, for an ordinary computer running macOS, Windows or Linux: tokio, the JSON
@@ -1988,14 +2001,16 @@ the step it waits on is done.
     the folder store, as the second store the freeze waits on; then the live channel, a
     streaming method on `Provider`, output from a running tool and checkpoints, tried
     against a real provider before their shapes are fixed.
-13. What [the core is made of](#what-the-core-is-made-of). *Decided, none of it built:* the
-    one request and reply in the core, with the general typed part, usage that counts
-    reasoning and carries a cost, and the reason a model stopped; `Model` and the `llm`
-    interface taking them, with a plugin's calls recording their usage; models named
-    `<provider>/<model>` and the `serve` key gone; a model's description, read by the loop
-    and by `compact`; the form of a question a tool puts to the person; a way for an
-    extension to raise a signal and to start a session. Then the connected harness, the
-    proof that calling and waiting is enough.
+13. What [the core is made of](#what-the-core-is-made-of). *Done:* the one request and
+    reply in the core, with usage that counts reasoning and the reason a model stopped;
+    `Model` taking them, and a plugin's calls recording their usage and that reason; models
+    named `<provider>/<model>` and the `serve` key gone; a model's description, from the
+    provider and the agent file, read by the loop and by `compact`. *Still to do:* the
+    general typed part; a cost on the usage, once its unit is decided; the `llm` interface
+    carrying the whole request and reply and listing the models a grant reaches, once the
+    form is (E8); the form of a question a tool puts to the person; a way for an extension
+    to raise a signal and to start a session. Then the connected harness, the proof that
+    calling and waiting is enough.
 14. What is [safe by default](#what-is-safe-by-default). *Decided, none of it built:* a
     secret that names the hosts it may go to, in the core before the freeze; every kernel
     starting from an empty environment, and every credential through `Secrets`; the

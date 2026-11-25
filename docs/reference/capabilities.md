@@ -34,7 +34,7 @@ through. See [Grants](agent-file.md#grants) for how to write one in the agent fi
 | `state` | a durable key-value store of its own (`get`, `set`, `remove`, `keys`), kept on the log | key | `"*"` |
 | `service` | call a service another plugin provides | service name | `"sessions"` |
 | `plugins` | load and unload add-ons as its children, granting no more than it holds | the loaded plugin's name | `"*"` |
-| `llm` | one completion from a model a provider [serves](agent-file.md#providersname), recorded as `llm/request` and `llm/response` | model name | `"claude-haiku-5-5"` |
+| `llm` | one completion from a model of a [provider](agent-file.md#providersname), recorded as `llm/request` and `llm/response` with what it cost | model, as `<provider>/<model>` | `"main/claude-haiku-5-5"`, `"main/*"` |
 | `secret` | an opaque handle to a named credential, never its value | secret name | `"github"` |
 | `http` | an HTTP request through the host's client, which writes credentials in and follows no redirects | host name | `"api.github.com"` |
 | `log-read` | read events of any session, by topic, in pages of up to 1000 | `<session>:<topic>` (session percent-encodes `%` and `:`; empty for harness events) | `["*:message", "*:session/start"]` |

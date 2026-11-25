@@ -21,21 +21,19 @@ model = "claude-sonnet-5-5"
 
 [providers.main]
 kind = "anthropic"
-serve = ["claude-sonnet-5-5"]
 
 [providers.reviewer]
 kind = "openai"
-serve = ["gpt-5"]          # models add-ons may ask through `llm`
 
 [[plugins]]
 name = "review"
 path = "review.wasm"
-config = { model = "gpt-5", kernel = "shell", dir = "{workspace}" }
-grants = { fs-read = ["{workspace}", "{workspace}/*"], kernel = "shell", llm = "gpt-5" }
+config = { model = "reviewer/gpt-5", kernel = "shell", dir = "{workspace}" }   # <provider>/<model>
+grants = { fs-read = ["{workspace}", "{workspace}/*"], kernel = "shell", llm = "reviewer/gpt-5" }
 ```
 
 `corduroy check` lists `providers main, reviewer` and `tool review (read-only)`. Use any
-model your key can reach: change it in `serve`, `config.model` and the `llm` grant together.
+model your key can reach: change it in `config.model` and the `llm` grant together.
 
 The workspace must be a git repository: `review` sends what `git diff HEAD` shows and the
 files git does not track yet. Commit before a task, and the review covers exactly that task.
@@ -51,7 +49,7 @@ corduroy run "Add a --verbose flag to the CLI. When it works, call review with w
 
 ```text
 ▸ review {"goal":"add a --verbose flag"}
-  ✓ Review by gpt-5 of the changes against `HEAD`: …
+  ✓ Review by reviewer/gpt-5 of the changes against `HEAD`: …
 ```
 
 `review` is read-only, so the `approval` gate's `smart` mode lets it run without asking.
@@ -59,7 +57,7 @@ corduroy run "Add a --verbose flag to the CLI. When it works, call review with w
 should read whole; `instructions` in the config tells every review what to look for:
 
 ```toml
-config = { model = "gpt-5", kernel = "shell", dir = "{workspace}", instructions = "Check error handling and that new code has tests." }
+config = { model = "reviewer/gpt-5", kernel = "shell", dir = "{workspace}", instructions = "Check error handling and that new code has tests." }
 ```
 
 ## The other way round: GPT writes, Claude reviews
@@ -70,17 +68,15 @@ model = "gpt-5"
 
 [providers.main]
 kind = "openai"
-serve = ["gpt-5"]
 
 [providers.reviewer]
 kind = "anthropic"
-serve = ["claude-sonnet-5-5"]
 
 [[plugins]]
 name = "review"
 path = "review.wasm"
-config = { model = "claude-sonnet-5-5", kernel = "shell", dir = "{workspace}" }
-grants = { fs-read = ["{workspace}", "{workspace}/*"], kernel = "shell", llm = "claude-sonnet-5-5" }
+config = { model = "reviewer/claude-sonnet-5-5", kernel = "shell", dir = "{workspace}" }
+grants = { fs-read = ["{workspace}", "{workspace}/*"], kernel = "shell", llm = "reviewer/claude-sonnet-5-5" }
 ```
 
 ## A reviewer with tools: two sessions

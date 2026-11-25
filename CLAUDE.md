@@ -175,6 +175,10 @@ as design guidance, not noise.
   `Providers` on every request (`provider::Routed`); never hold a provider elsewhere.
   `Harness::new` registers its argument there. Plugins reach models through the core's
   `Models` registry (the `llm` capability), never through the loop's provider.
+- **One model call.** The loop and a plugin fill in the same `corduroy_core::ModelRequest`
+  and read the same `ModelReply`; what a request or a reply gains is added there once. A
+  model a plugin asks is named `<provider>/<model>` and offered no tools, and an add-on's
+  `llm` grant is the only list of the models it may ask: never add a second one.
 - **Secrets never reach a plugin or the log.** `secret` hands out a `credential` handle;
   host functions that take one write the value into what they send and record only the
   secret's name. Do not record response bodies, which may echo it. An `HttpClient` must not

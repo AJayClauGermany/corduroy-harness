@@ -11,11 +11,15 @@ use corduroy_core::sync::Lock;
 use corduroy_core::{Message, ToolCall};
 use serde_json::Value;
 
-use crate::provider::{ModelReply, ModelRequest, Provider, ProviderError, Usage};
+use corduroy_core::{ModelReply, ModelRequest, Usage};
+
+use crate::provider::{Provider, ProviderError};
 
 /// What a [`ScriptedProvider`] was asked on one request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
+    /// The model asked, by the provider's own name for it.
+    pub model: String,
     /// The system prompt.
     pub system: String,
     /// Names of the tools on offer.
@@ -66,6 +70,7 @@ pub fn call(id: &str, tool: &str, input: &Value) -> Message {
 impl Provider for ScriptedProvider {
     async fn complete(&self, request: &ModelRequest) -> Result<ModelReply, ProviderError> {
         let asked = Request {
+            model: request.model.clone(),
             system: request.system.clone(),
             tools: request.tools.iter().map(|tool| tool.name.clone()).collect(),
             messages: request.messages.len(),

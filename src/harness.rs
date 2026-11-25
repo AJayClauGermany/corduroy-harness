@@ -18,8 +18,8 @@ use corduroy_core::call::Serve;
 use corduroy_core::sync::Lock;
 use corduroy_core::{
     App, ContextError, EventStream, FiberId, GATES, Gates, HTTP, HttpClients, LogError, MODELS,
-    Message, Models, PROMPTS, Plugin, Prompts, Registry, Role, SECRETS, SERVICES, Secrets,
-    Services, SessionId, TOOLS, ToolCall, ToolResult, Tools,
+    Message, ModelInfo, ModelRequest, Models, PROMPTS, Plugin, Prompts, Registry, Role, SECRETS,
+    SERVICES, Secrets, Services, SessionId, TOOLS, ToolCall, ToolResult, Tools,
 };
 #[cfg(feature = "std")]
 use corduroy_core::{KERNELS, Kernels};
@@ -29,7 +29,7 @@ use crate::compact::CompactOperation;
 use crate::gates::GateOperation;
 use crate::loops::{DEFAULT_LOOP, LOOPS, Loops, Run, StandardLoop, Step};
 use crate::operation::{Next, Operation};
-use crate::provider::{DEFAULT_PROVIDER, ModelRequest, PROVIDERS, Provider, Providers};
+use crate::provider::{DEFAULT_PROVIDER, PROVIDERS, Provider, Providers};
 use crate::session::{
     Answer, Ask, Effect, End, Journal, MAIN, Progress, Session, SessionInfo, Sessions, Wait, ended,
 };
@@ -938,10 +938,10 @@ impl Harness {
     /// compaction and the gates.
     pub(crate) fn standard_operations(&self) -> Vec<Arc<dyn Operation>> {
         let builtin: [Arc<dyn Operation>; 2] = [
-            Arc::new(CompactOperation::new(
-                Arc::clone(&self.services),
-                Arc::clone(&self.sessions),
-            )),
+            Arc::new(
+                CompactOperation::new(Arc::clone(&self.services), Arc::clone(&self.sessions))
+                    .for_model(self.model_info()),
+            ),
             Arc::new(GateOperation::new(
                 Arc::clone(&self.gates),
                 Arc::clone(&self.tools),
@@ -1045,12 +1045,25 @@ impl Harness {
                 let usage = Effect::Usage {
                     model: request.model.clone(),
                     usage: reply.usage,
+                    stop: reply.stop,
                 };
                 journal.apply(vec![Effect::from(message), usage])?;
                 Ok(Step::Applied("model".to_owned()))
             }
             Err(error) => Ok(Step::End(End::Failed(error.to_string()))),
         }
+    }
+
+    /// What the provider the loop asks says about the loop's model, with whatever the host
+    /// stated or corrected. Nothing is known if no such provider is registered, or if it
+    /// does not say.
+    #[must_use]
+    pub fn model_info(&self) -> ModelInfo {
+        self.providers
+            .get(&self.provider)
+            .map_or_else(ModelInfo::unknown, |provider| {
+                provider.describe(&self.model)
+            })
     }
 
     /// The system prompt for a request of `session`: the host's text, then each plugin's

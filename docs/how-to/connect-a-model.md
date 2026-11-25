@@ -55,6 +55,16 @@ timeout_seconds = 300
 ```
 
 The server answers to any model name. `scripts/local-model.sh stop` stops it.
+
+A model served on this machine reports nothing about itself. State what it holds, under the
+name you gave as `model`, so that `compact` condenses a long conversation before the context
+fills (it starts at three quarters of it):
+
+```toml
+[providers.main.models.local]
+context_tokens = 16384
+```
+
 [`examples/local-model/corduroy.toml`](../../examples/local-model/corduroy.toml) is a whole
 agent set up this way.
 
@@ -92,20 +102,23 @@ corduroy --provider local --model qwen3 run "summarise README.md"
 ## Let add-ons ask a model
 
 Add-ons such as `summarize` and `compact` ask a model of their own through the `llm`
-capability. A provider offers a model to them only if it lists it under `serve`, and each
-add-on's `llm` grant must reach it:
+capability. An add-on names a model as `<provider>/<model>`: the provider's name in the agent
+file, then the provider's own name for the model. Its `llm` grant is the one list of the
+models it may ask, written the same way:
 
 ```toml
 [providers.main]
 kind = "anthropic"
-serve = ["claude-haiku-5-5"]
 
 [[plugins]]
 name = "summarize"
 path = "summarize.wasm"
-config = { model = "claude-haiku-5-5" }
-grants = { fs-read = ["{workspace}", "{workspace}/*"], llm = "claude-haiku-5-5" }
+config = { model = "main/claude-haiku-5-5" }
+grants = { fs-read = ["{workspace}", "{workspace}/*"], llm = "main/claude-haiku-5-5" }
 ```
+
+A grant is a pattern, so `llm = "main/*"` is every model of that provider, and
+`llm = { allow = "main/*", deny = "main/claude-opus-*" }` all of them but some.
 
 Using a smaller model here than the main one saves the main model's context and cost.
 

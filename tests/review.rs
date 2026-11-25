@@ -56,17 +56,16 @@ fn agent(
 ) -> Result<Harness, Box<dyn Error>> {
     let harness = Harness::new(Arc::<ScriptedProvider>::clone(main))?;
     harness.plugin(shell_kernel("shell", work));
-    harness
-        .plugin(provider("helper", Arc::<ScriptedProvider>::clone(helper)).serving(["reviewer"]));
+    harness.plugin(provider("helper", Arc::<ScriptedProvider>::clone(helper)));
     harness.plugin(
         WasmRuntime::new()?
             .with_root(work)
             .load(plugin("review"))?
             .grant("fs-read", Scope::subtree(&work.to_string_lossy()))
             .grant("kernel", Scope::none().allow("shell"))
-            .grant("llm", Scope::none().allow("reviewer"))
+            .grant("llm", Scope::none().allow("helper/reviewer"))
             .config(
-                json!({"model": "reviewer", "dir": work, "instructions": "Mind overflow."})
+                json!({"model": "helper/reviewer", "dir": work, "instructions": "Mind overflow."})
                     .to_string(),
             ),
     );
@@ -105,7 +104,7 @@ async fn the_change_and_new_files_go_to_the_other_model_and_its_answer_comes_bac
 
     assert_eq!(
         outputs(&harness)[0],
-        "Review by reviewer of the changes against `HEAD`:\n\nlib.rs:2 wraps silently."
+        "Review by helper/reviewer of the changes against `HEAD`:\n\nlib.rs:2 wraps silently."
     );
     let asked = &helper.requests()[0];
     assert!(

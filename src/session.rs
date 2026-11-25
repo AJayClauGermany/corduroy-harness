@@ -17,7 +17,7 @@
 //! | `gate/answer` | `user` | `{"id", "tool", "allow", "reason"}`, caused by its `tool/call`: a person's answer to a gate that asked |
 //! | `tool/start` | `host` | `{"id", "tool"}`, caused by its `tool/call`: the tool is about to run |
 //! | `tool/result` | `environment` | `{"id", "tool", "ok", "output"}`, and `"content"` when the result is not one block of text, caused by its `tool/call` |
-//! | `usage` | `agent` | `{"model", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"}`, each count only if the provider gave it; the cache counts are part of `input_tokens` |
+//! | `usage` | `agent` | `{"model", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens", "stop"}`, each count only if the provider gave it; the cache counts are part of `input_tokens` and the reasoning count of `output_tokens`; `stop` is why the model stopped (`finished`, `limit`, `tool_calls` or `refused`), if the provider said |
 //! | `turn/end` | `host` | `{"status"}`: `finished`, `turn-limit`, `failed` (with `"reason"`), `stopped` or `yielded` |
 //! | `run/restart` | `host` | `{"attempt"}`: an unfinished run was picked up again |
 //! | `run/stop` | `user` | `{}`: a person asked the run to stop |
@@ -87,13 +87,12 @@ use anyhow::{Context as _, Result};
 use corduroy_core::sync::Lock;
 use corduroy_core::{
     Decision, Draft, Event, EventId, EventStream, LogError, Message, Part, Query, Role, SessionId,
-    Source, TOOL_CALL, ToolCall, ToolOutput, ToolResult, Verdict,
+    Source, StopReason, TOOL_CALL, ToolCall, ToolOutput, ToolResult, Usage, Verdict,
 };
 use serde_json::{Value, json};
 
 use crate::harness::HarnessError;
 use crate::message::{decode, decode_content, encode, encode_content};
-use crate::provider::Usage;
 
 /// Topic of the events that make up the conversation.
 pub const MESSAGE: &str = "message";
@@ -595,6 +594,8 @@ pub enum Effect {
         model: String,
         /// What it cost.
         usage: Usage,
+        /// Why the model stopped, if its provider said.
+        stop: Option<StopReason>,
     },
     /// Note what the gates decided about a tool call the model asked for.
     Gated {
@@ -1184,8 +1185,8 @@ impl Journal {
                 Effect::Message(message) => {
                     self.draft_message(&mut batch, &message);
                 }
-                Effect::Usage { model, usage } => {
-                    let payload = usage_payload(&model, usage);
+                Effect::Usage { model, usage, stop } => {
+                    let payload = usage_payload(&model, usage, stop);
                     batch
                         .drafts
                         .push(Draft::new(Source::Agent, USAGE).payload(payload.to_string()));
@@ -1608,20 +1609,18 @@ fn transcript(messages: &[&Message]) -> String {
     lines.join("\n")
 }
 
-/// The payload of a `usage` event: the model, and each count the provider gave.
-fn usage_payload(model: &str, usage: Usage) -> Value {
+/// The payload of a `usage` event: the model, each count the provider gave, and why the
+/// model stopped if the provider said.
+fn usage_payload(model: &str, usage: Usage, stop: Option<StopReason>) -> Value {
     let mut payload = serde_json::Map::new();
     payload.insert("model".to_owned(), json!(model));
-    let counts = [
-        ("input_tokens", usage.input_tokens),
-        ("output_tokens", usage.output_tokens),
-        ("cache_read_tokens", usage.cache_read_tokens),
-        ("cache_write_tokens", usage.cache_write_tokens),
-    ];
-    for (name, count) in counts {
-        if let Some(count) = count {
-            payload.insert(name.to_owned(), json!(count));
-        }
+    payload.extend(
+        usage
+            .counts()
+            .map(|(name, count)| (name.to_owned(), json!(count))),
+    );
+    if let Some(stop) = stop {
+        payload.insert("stop".to_owned(), json!(stop.as_str()));
     }
     Value::Object(payload)
 }
@@ -1667,12 +1666,17 @@ mod tests {
 
     #[test]
     fn usage_records_only_the_counts_the_provider_gave() {
-        let plain = usage_payload("m", Usage::new(Some(10), None));
+        let plain = usage_payload("m", Usage::new(Some(10), None), None);
         assert_eq!(plain, json!({"model": "m", "input_tokens": 10}));
-        let cached = usage_payload("m", Usage::new(Some(10), Some(2)).with_cache(Some(8), None));
+        let cached = Usage::new(Some(10), Some(2))
+            .with_cache(Some(8), None)
+            .with_reasoning(Some(1));
         assert_eq!(
-            cached,
-            json!({"model": "m", "input_tokens": 10, "output_tokens": 2, "cache_read_tokens": 8})
+            usage_payload("m", cached, Some(StopReason::Limit)),
+            json!({
+                "model": "m", "input_tokens": 10, "output_tokens": 2, "cache_read_tokens": 8,
+                "reasoning_tokens": 1, "stop": "limit"
+            })
         );
     }
 

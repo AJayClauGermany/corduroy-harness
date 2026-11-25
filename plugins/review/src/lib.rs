@@ -9,7 +9,7 @@
 //! explores the workspace on its own is a session of its own, which needs the model a session
 //! runs on to be chosen per session (`docs/open-questions.md`, G12).
 //!
-//! Configuration: `model`, the model to ask, which the host must serve and the `llm` grant
+//! Configuration: `model`, the model to ask, as `<provider>/<model>`, which the `llm` grant
 //! must reach; `kernel`, the kernel `git` runs in (`shell` by default); `dir`, the repository
 //! (the kernel's directory by default); `base`, what the change is compared with (`HEAD` by
 //! default: what is not committed yet); `max_bytes`, the most text sent (200 KB by default);

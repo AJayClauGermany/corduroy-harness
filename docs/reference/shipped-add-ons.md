@@ -98,8 +98,9 @@ Tools: `recall_sessions`, `recall_search` (both read-only). Grants: `log-read` o
 
 Files and directories summarised by a model of its own, so the main model reads less.
 
-Tool: `summarize` (`paths`, `question`; read-only). Config: `model` (required; must be served
-and reachable by the `llm` grant), `max_bytes` (200 KB). Grants: `fs-read`, `llm`.
+Tool: `summarize` (`paths`, `question`; read-only). Config: `model` (required, as
+`<provider>/<model>`; the `llm` grant must reach it), `max_bytes` (200 KB). Grants: `fs-read`,
+`llm`.
 
 ## review
 
@@ -110,8 +111,8 @@ tools of its own; it sees what it is sent. In the default agent it is the other 
 model when both `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` are set, else the same model.
 
 Tool: `review` (`goal`, `base`, `paths`: more files to read whole; read-only). With no
-change and no `paths`, the reviewer is not asked. Config: `model` (required; must be served
-and reachable by the `llm` grant), `kernel` (`shell`), `dir` (the repository; the kernel's
+change and no `paths`, the reviewer is not asked. Config: `model` (required, as
+`<provider>/<model>`; the `llm` grant must reach it), `kernel` (`shell`), `dir` (the repository; the kernel's
 directory by default), `base` (`HEAD`), `max_bytes` (200 KB), `instructions` (more for the
 reviewer to look for). Grants: `kernel`, `fs-read`, `llm`.
 
@@ -121,7 +122,9 @@ Auto-compaction: provides the `compaction` service the harness asks before each 
 request passes `max_tokens` input tokens, or the conversation passes `max_messages`, the
 start of it is summarised; the messages stay in the log, hidden from the model.
 
-Config: `model` (required), `max_tokens` (100 000), `max_messages` (off). Grants: `llm`.
+Config: `model` (required, as `<provider>/<model>`), `max_tokens` (three quarters of what the
+session's model holds, as its [description](agent-file.md#providersnamemodelsmodel) says;
+100 000 if it does not say), `max_messages` (off). Grants: `llm`.
 
 ## subagents
 

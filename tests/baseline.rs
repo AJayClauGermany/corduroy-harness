@@ -265,18 +265,18 @@ async fn summarize_reads_files_for_a_model_of_its_own() {
     ])
     .unwrap();
     let helper = Arc::new(ScriptedProvider::new([say("Two Rust files.")]));
-    harness.plugin(provider("helper", Arc::<ScriptedProvider>::clone(&helper)).serving(["small"]));
+    harness.plugin(provider("helper", Arc::<ScriptedProvider>::clone(&helper)));
     harness.plugin(
         load(
             &work,
             "summarize",
             &[
                 ("fs-read", within(&work)),
-                ("llm", Scope::none().allow("small")),
+                ("llm", Scope::none().allow("helper/small")),
             ],
         )
         .unwrap()
-        .config(json!({"model": "small"}).to_string()),
+        .config(json!({"model": "helper/small"}).to_string()),
     );
 
     harness.run("what is in src?").await.unwrap();
