@@ -88,8 +88,9 @@ to: two agents doing test-driven development, one writing tests without being ab
 the code, the other writing code without being able to see the tests, passing work back and
 forth until it is done. Each has its own loop, its own tools and its own limits on what it
 can see, and either may be another harness. Expressing that needs an add-on to be able to
-define a loop and sessions to be able to differ; neither is possible yet, and
-[Open questions](open-questions.md) holds both (E12, G12).
+define a loop and sessions to be able to differ; neither is possible yet. How sessions
+differ is decided ([What an extension can reach](#what-an-extension-can-reach)), and how an
+add-on defines a loop is still in [Open questions](open-questions.md) (E12).
 
 **What is left out.** Nothing is refused for good. The test for anything proposed is whether
 it serves the agent adapting itself, for this use; what does not is neither built in nor
@@ -372,10 +373,10 @@ Everything else is a plugin, and a plugin may itself offer primitives to other p
 | --- | --- | --- |
 | Plugin tree (`App`, `Context`, effects, `inject`) | built | A name belongs to one plugin at a time, and never to another event source (`host`, `agent`, `user`, `environment`). Built for WebAssembly: a call that traps kills the instance, and the next call makes a new one and activates it again, keeping the plugin's registrations; after `Limits::restarts` restarts (default 3) the next trap stops the plugin until it is reloaded (`plugin/trapped`, `plugin/restarted`, `plugin/stopped`). Still to do: the same limit in the plugin tree itself, so a stopped plugin shows as suspended in `App` rather than only refusing calls. |
 | Event log | built | A fallible `Log` trait. A step's events are one atomic commit, stored before any listener or the model sees them, and stamped with the time it was stored: one reading of the clock per commit, never earlier than the commit before. The core has the trait and the in-memory stream; stores are separate crates. |
-| Sessions | built | Many sessions, each with an id and an optional parent. Every event of a run names its session; events about the plugin tree name none. Whatever is done for a session (a tool call, rendering a prompt part, asking a gate, delivering an event of the session) is done in its call scope (`corduroy_core::call`), so the events a plugin raises then carry the session, and a plugin can ask which session it serves (the `session` capability) and keep something per session: `todo` keeps a list for each, so a sub-agent's plan does not overwrite its parent's. A session may be started by another for a task (a child), and nests at most `MAX_DEPTH` deep. |
+| Sessions | built | Many sessions, each with an id and an optional parent. Every event of a run names its session; events about the plugin tree name none. Whatever is done for a session (a tool call, rendering a prompt part, asking a gate, delivering an event of the session) is done in its call scope (`corduroy_core::call`), so the events a plugin raises then carry the session, and a plugin can ask which session it serves (the `session` capability) and keep something per session: `todo` keeps a list for each, so a sub-agent's plan does not overwrite its parent's. A session may be started by another for a task (a child), and nests at most `MAX_DEPTH` deep. *Planned:* a session started with a model, a loop, instructions, grants and limits of its own, which whatever it starts cannot exceed ([What an extension can reach](#what-an-extension-can-reach)). |
 | Tool lifecycle | built | `tool/call`, `tool/start` and `tool/result` are each committed as they happen, per call; `ToolSpec::replay_safe` says whether a call that was running at a crash may be repeated, and `read_only` whether it changes anything. A run can be stopped (`Harness::stop`): a running tool learns it through its call scope (`call::stopping`, the `session` capability's `stopping`), the calls not yet begun are answered as not run, and the run ends as stopped. A result is a list of content blocks, text or images (`ToolOutput`, `content` in the WIT), which reach the model as they are; `tool/result` records the result's text as `output` and, when it is anything but one block of text, the blocks as `content`, so a finished result is handed over from the log after a crash. Still to do: progress and cancellation, which need no change to this contract (see [Open questions](#open-questions)). |
 | Gates | built | A fourth registry. A gate is asked at a named decision point before something happens and answers allow, deny or ask; the strictest answer wins and is recorded. Reachable from WebAssembly through the `gate` export. Decision points are declared: the core declares `tool/call` and `plugin/load`, an extension declares the points it asks at, and asking at an undeclared point is denied. Still to do: letting a person answer an ask at `plugin/load`. See [Events, gates and hooks](#events-gates-and-hooks). |
-| Waits and signals | built | A run whose tool call a gate asked about waits for `Harness::answer`. In general, a tool call may wait for a named signal: whatever serves it says so through `corduroy_core::call::wait_for`, the call gets a placeholder and a `tool/wait`, the loop stops the run before the model is asked again, and a `signal` event (`Harness::signal`) brings the result. A child session's end is such a signal, which the harness raises itself. All of it is in the log, so a wait survives a restart. Still to do: a way for an extension to raise a signal; a timer is then an extension ([What the core is made of](#what-the-core-is-made-of)). |
+| Waits and signals | built | A run whose tool call a gate asked about waits for `Harness::answer`. In general, a tool call may wait for a named signal: whatever serves it says so through `corduroy_core::call::wait_for`, the call gets a placeholder and a `tool/wait`, the loop stops the run before the model is asked again, and a `signal` event (`Harness::signal`) brings the result. A child session's end is such a signal, which the harness raises itself. All of it is in the log, so a wait survives a restart. Still to do: a way for a plugin to raise a signal, and a driver that takes the run on; a timer is then an extension ([What an extension can reach](#what-an-extension-can-reach)). |
 | Services | built | A fifth registry, `Services`: calls between plugins in JSON text, with the caller's name, across the WebAssembly boundary in both directions. See [Plugins extending plugins](#plugins-extending-plugins). |
 | Capabilities | sixteen | The mechanism is settled; the set grows (below). |
 | Kernels | built | The trait and registry, and `Kernel::spawn` for long-lived processes with pipes (MCP servers). `ShellKernel` is an implementation, not a primitive, and lives in `corduroy-shell`. |
@@ -416,9 +417,10 @@ wrote is code that takes the place of model calls; where the tool needs a little
 it asks a model a question; where the work needs an agent, that is a session. The
 [test-driven pair](#what-it-is-for) is then an add-on that starts two sessions and passes
 work between them, not an add-on running two loops of its own. The cost is that an add-on
-cannot make a new shape of loop out of bare model calls, so how an add-on says what a
-session's steps are (E12) and what may differ between sessions (G12) carry that weight;
-both are still in [Open questions](open-questions.md).
+cannot make a new shape of loop out of bare model calls, so two things carry that weight.
+What may differ between sessions is decided
+([What an extension can reach](#what-an-extension-can-reach)); how an add-on says what a
+session's steps are is still in [Open questions](open-questions.md) (E12).
 
 **One description of a model call, in the core.** Whatever asks a model fills in the same
 request and reads the same reply:
@@ -475,10 +477,11 @@ differ in their model.
   the models its grant reaches, with their descriptions, as `tools.list` leaves out what a
   scope does not reach. The agent sees them only when an add-on that offers this is loaded.
 - *A session keeps its model.* Choosing is for the next session or a child, not for the run
-  under way. What `session/start` carries is G12.
+  under way. What else `session/start` carries is in
+  [What an extension can reach](#what-an-extension-can-reach).
 - *Rules about the choice are policy.* That a child may not run on its parent's model, or on
-  one of the same family, is a gate's to say, at a decision point for starting a session,
-  which does not exist yet (D3).
+  one of the same family, is a gate's to say, at the decision point for starting a session
+  (`session/start`, decided there and not yet built).
 - *Cost is reported for each call, not described.* It comes with the usage, as far as the
   provider says, and goes into the log: the tokens read, the tokens written, those spent on
   reasoning, and what the call cost if the provider states it. A figure that is absent means
@@ -508,8 +511,9 @@ are native and have threads.
 - *Something outside may speak first.* A pull request is opened, or a connected harness says
   something nobody here was waiting for. It arrives through an extension as an event, and
   starts a session or resumes one. Automations built on that may ship after 1.0; the way
-  for an extension to raise a signal and to start a session has to exist before the freeze
-  (G4).
+  for an extension to raise a signal and to start a session has to exist before the freeze,
+  and is decided: the `sessions` service records, and the host's driver takes the run on
+  ([What an extension can reach](#what-an-extension-can-reach)).
 
 This is the working answer, and one of the proofs [the freeze waits
 on](#what-the-freeze-waits-on), another harness connected as a plugin, is what confirms it
@@ -529,7 +533,7 @@ sessions and events, and none of the candidates passed it:
 | Search, a vector database | A service. |
 | Stored bytes (images and large results, which the log holds as text) | Not something plugins contribute. Where a store keeps a large payload is the store's business; whether a message may name bytes kept elsewhere is still open (C20). |
 | Asking the person a question | Not a gate, which decides whether something may happen, and not a registry: a tool that asks and waits for the reply. It is in 1.0, and needs one agreed form before front ends are written: an event a front end must show, and a signal that carries the reply (D10). |
-| Schedules and timers | An extension that raises signals (G4). |
+| Schedules and timers | An extension that raises signals ([What an extension can reach](#what-an-extension-can-reach)). |
 
 ## Three tiers: core, extensions, add-ons
 
@@ -751,6 +755,274 @@ once without tools, plan before acting, review before answering.
 
 An `Operation` is still how one step is added to the standard loop; a `Loop` is how the order
 itself is replaced.
+
+## What an extension can reach
+
+Five things are decided here: what a session is started with and held to, what something
+outside a run may do, who takes a run on, what may run at once, and what a step an extension
+wrote may read and write. All of it is *planned*. The code is as [The loop](#the-loop) above
+and [Durability](#durability) describe it: every session runs alike, and only the host can
+raise a signal. [Order of work](#order-of-work) lists what changes.
+
+**A session holds grants of its own, and whatever it starts holds no more.** Today a grant
+belongs to an add-on and never to a session: every session is offered every tool, and `read`
+reads the whole workspace for whichever session calls it. A session is to be started with
+grants in the shape an add-on's have (`fs-read`, `fs-write`, `kernel`, `http`, `llm`,
+`tools`, `log-read` and the rest), and they are the whole of what may be done on its behalf:
+which files, which hosts, which models, which tools. It is the
+[property that leads](#what-it-is-for), applied to a session.
+
+- *Both must allow.* A host call made for a session passes the add-on's grant and the
+  session's: a resource has to be in both, as `Scope::within` already says of an add-on a
+  plugin loads. An add-on that serves two sessions does for each only what that session may.
+- *Narrowing only.* Whatever a session starts holds a part of what it holds itself, and
+  never more. The rule is the same whatever is started: a child session, or work handed to
+  another harness through a plugin, which acts here only through that plugin and so within
+  the session it acts for.
+- *What is not narrowed is held as the starter holds it.* A child started with nothing said
+  is as capable as its starter, as `delegate`'s is today. The session a person starts holds
+  what the agent file allows, with nothing narrowed.
+- *The tools offered are the session's `tools` grant.* The model is offered, and may call,
+  only the tools that scope reaches. The registry stays one flat set, and a tool is in a
+  session by its name.
+- *The record is among what a session sees.* `log-read` is narrowed like the rest, so one
+  agent of a pair does not read the other's session.
+- *A tool from an extension or an MCP server is offered or not.* It is code the grants do
+  not reach into, so a session's file grants do not hold it, and offering one to a narrowed
+  session is the decision about what that session reaches through it. A server's tools can
+  be offered in part, by name: those that read and not those that write.
+- *A session that needs more asks.* What it was refused is recorded, as a refusal to an
+  add-on is, and it asks the ordinary way: a gate's ask, a question to the person, a message
+  to whoever started it. Only the person's answer lifts a ceiling.
+- *The grants ride in the call scope.* The core's call scope says which session a thread
+  serves. It is to say what that session is granted as well, so the WebAssembly host and a
+  kernel read the grants where they already read the session. That is in the core, and is
+  marked before the freeze. Work handed to another thread has to take the scope with it, or
+  it is done under no session's limits at all (B17 in [Open questions](open-questions.md)).
+- *It is the fourth guarantee, one step further.* The
+  [six](#what-is-safe-by-default) gain no seventh: the fourth is read as covering a session
+  started as well as an add-on loaded, and its test covers both.
+
+**A kernel serves sessions.** What a session may read has to hold for `cat` as it does for
+`read`, so a kernel keeps the sessions it serves apart and holds each to its grants.
+
+- *Nothing new among the core's kinds.* A kernel is called on the chain of a tool call, so
+  it reads the session, and with the above its grants, from the call scope.
+- *State for each session.* A shell kernel keeps a shell for each session that uses it,
+  started on first use. A child does not inherit its starter's variables or directory, a
+  sub-agent no longer moves its parent's working directory, and one session's cell does not
+  wait behind another's.
+- *Confined to both.* A session's shell reaches what the kernel was
+  [given](#what-is-safe-by-default) and the session is granted, a resource being in both.
+  The operating system fixes a process's confinement when the process starts, which is why
+  there is a shell for each session and not one shell whose limits change with its caller.
+- *Why not a kernel for each role.* A kernel is a line the person writes in an agent file.
+  If a narrower shell needed a kernel of its own, the agent could never build a narrower
+  role itself, and [the second use](#what-it-is-for) is the agent doing exactly that.
+- *No silent downgrade.* A kernel says whether it can hold a session to its grants: a method
+  on `Kernel` with a default that says no, marked before the freeze. One that cannot (the
+  plain shell, and for now any shell on Windows) is refused to a narrowed session.
+- *The registry stops locking a whole kernel.* `Kernels` holds each kernel behind one lock
+  today, so every cell waits for the one before it. That shape freezes with the core, and
+  changes first (B5).
+- *What a kernel starts for no session is held by the kernel alone.* An MCP server started
+  through `Kernel::spawn` serves every session, with what the kernel was given.
+
+Whether "everything but this directory" can be said to the operating system is for the
+[confined kernel](#what-the-freeze-waits-on) to find out. Landlock, for one, grants a
+directory with what is under it, and has no rule that refuses a directory inside one it
+allowed.
+
+**What a session is started with.** Five things, written into its `session/start`, so the
+log says what each session ran as:
+
+| | What it is |
+| --- | --- |
+| Model | `<provider>/<model>`, one the starter's `llm` grant reaches. Kept for the session's life, [as decided](#what-the-core-is-made-of). |
+| Loop | A name in `Loops`. |
+| Instructions | The text its system prompt starts with. Plugins' prompt parts follow it, rendered for the session and so under its grants. |
+| Grants | As above. |
+| Limits | A set that can grow. Turns are its first entry, counted as the session's loop counts them. A budget of time, tokens or cost has a place to go (G20). |
+
+Gates are not on the list. They hold for every session, since taking a guard away widens
+what an agent may do. A gate is told the session, and may treat sessions differently.
+
+- *The values are recorded, not a name for them.* A session picked up after its agent file
+  changed runs as it started. A `session/start` that says none of this, as every log written
+  so far does, runs as the agent is configured.
+- *Fixed for life.* Nothing a session is started with changes while it lives. The grants are
+  a ceiling that only the person's answer lifts (a host allowed, a credential masked), and
+  the answer is recorded. A starter that wants a wider child starts another one.
+- *Who says.* The person, for a session they start: the agent file and the command line.
+  Whoever starts a child, for the child, within its own session.
+- *Instructions replace.* A child's instructions take the place of the agent's own: a test
+  writer should not inherit a prompt that describes the code. A starter that wants the
+  agent's own text as well names it with a marker the harness fills in, so an add-on never
+  has to read that text to pass it on.
+- *Coming back to a session.* It runs as it started. `--model` or `--provider` naming
+  something else for a session that exists is an error, which says what the session runs on
+  and that a new session is how to choose again.
+- *Starting a session is a decision point.* The loop declares `session/start`, and the gates
+  are asked with who is starting it (the person, a session's agent through a tool, a
+  plugin), its parent, and what it would be started with. That a reviewer does not run on
+  its starter's model, or that an orchestrator does not start orchestrators, is then a
+  gate's to say. A session a gate asked about is recorded and waits, in the log, for the
+  person's answer.
+- *What a grant of `sessions` means.* An add-on granted the `sessions` service can start an
+  agent as capable as the session it serves, whatever the add-on's own grants are. That is
+  accepted, and stated: it is what `delegate` is for. The gate and the limit on depth are
+  what bound it.
+- *One file is one agent.* A role is written by whoever starts the session, because the
+  agent has to be able to invent one. A role the person wants fixed lives in the
+  configuration of the add-on that starts it, as `review`'s configuration names its model
+  today. Named agents in an agent file can come after 1.0 as keys of their own, breaking
+  nothing. A second agent file is a second harness, which stays possible
+  [as a plugin](#what-it-is-for).
+
+**What something outside a run may do.** A connected harness says something, a webhook
+fires, a timer goes off. None of it happens inside a tool call, and today only the host,
+which holds the `Harness`, can act on it. The `sessions` service, which today starts a child
+from inside a tool call, gains three things that work from anywhere:
+
+| | What it does |
+| --- | --- |
+| Raise a signal | Brings a waiting tool call its result. A signal is named `<plugin>/<what>`, and a plugin raises only those under its own name; the harness's own, such as a child's end, go under a name no plugin can hold. A signal that arrives before its wait was recorded is kept, and answers the wait when it comes. Today it would be dropped, and a quick reply lost. |
+| Start a session | With a first message, and what a session is started with. It has no parent, and its `session/start` records who started it. It passes the gate like any other. |
+| Send a session a message | To a session with no run under way, it starts one. To one that is working or waiting, it is recorded at once and starts the next run when this one ends. Either way the message is recorded with who sent it, so a review tells it from the person. |
+
+- *The same holds for the person.* A message typed while a run is under way waits in the log
+  for the run to end. A run is still what lies between its first message and its `turn/end`.
+- *Steering is not promised.* Slipping a message in before the model's next request is
+  something an extension can build as a step of the loop. What the harness promises is the
+  queue.
+- *Add-ons too.* It is one service, reached through the `service` grant as `delegate`
+  reaches it today. An extension reaches the same three, and reading (which sessions there
+  are, how each stands, which calls wait for its signals), through a handle it lists in
+  `inject`. The ceilings differ. An extension is trusted, so a session it starts may hold
+  what the agent file allows. Outside any session, a session an add-on starts holds at most
+  the add-on's own grants. An automation the agent wrote can then start a run when an event
+  fires, without holding more than it was given.
+- *A stop reaches a plugin whose call has returned as an event.* A run that waits for a
+  plugin's signal and is stopped is ended here, and the plugin hears of it as it hears of
+  anything else (`run/stop`), and tells the other side.
+- *A scheduler is then an extension,* and is not in 1.0.
+
+**The host takes the run on.** A call from outside only records: the signal, the message or
+the session's start goes into the log, and the call returns. The harness has one driver,
+which the host runs, and it takes on every session the log says is ready. No plugin runs a
+loop.
+
+- *Why not the extension's own thread.* The thread a reply arrives on would have to run the
+  agent's loop until the run ended or waited again. Every such extension would need an
+  executor and the whole harness in its hands; there would be as many drivers as extensions
+  and nobody deciding the order, or how many sessions run at once; a stop and the display
+  would have to find runs on other people's threads; and an add-on, which is called and
+  returns, could never do it. With one driver the same call works from an extension, from
+  an add-on, and on a device with one thread.
+- *It is an operating system's split.* The host is the kernel: plugins ask it for things,
+  and are told when something arrives.
+- *Nothing is lost between recording and running.* What was recorded and not yet run is
+  taken on by the next process, under the rules a [resume](#durability) already follows.
+- *A wait names its plugin.* Since a signal is `<plugin>/<what>`, a run waiting for a plugin
+  that is not loaded can be said to be, where today it would wait in silence.
+- *A host that drives by hand still can.* `Harness::run_in`, `answer` and `signal` stay for a
+  program that embeds the harness and awaits its runs itself.
+
+What the command does follows from it:
+
+| | Takes on | When its run waits |
+| --- | --- | --- |
+| `corduroy` (talk to the agent) | Whatever arrives, for any session. Work for another session runs in the background, with a notice. | Stays, as a conversation does. |
+| `corduroy run <prompt>` | Its own session, and what that session waits for. | For a signal, it stays until the signal comes: leaving would end the process, and with it the connection the reply would come on. For a person's answer with nobody there, it exits and the run waits in the log, as today. |
+| A mode that stays up | Whatever arrives, with no terminal and no protocol of its own. It is what the other side of a [connected harness](#what-the-freeze-waits-on) runs as. | Stays. |
+
+- *Ctrl-C.* It stops a run that is working, as today. While a run only waits, it ends the
+  command and the run stays waiting in the log; `corduroy stop` is what ends the run.
+- *The notice is the front end's.* A line in a terminal, a toast in a desktop application.
+- *A session from outside can be held for the person.* It passes the gate at
+  `session/start`, so a policy can ask before it goes on in the background.
+- *A protocol for front ends is still open* (H11). The mode that stays up serves plugins,
+  not other programs.
+
+**The session is the unit of concurrency.** The driver makes the question real: the
+person's run, a session started from outside and several children can all be ready
+together.
+
+| | Rule |
+| --- | --- |
+| Inside a session | One thing at a time: one run, one step, one tool call, in order. |
+| Across sessions | The driver may run them side by side. How many is a setting. One is allowed, and is what a device with one thread gets. Nothing may depend on two sessions overlapping. |
+| What is shared | Takes one caller at a time. The log puts commits in one order, and plugins are loaded and unloaded between steps. |
+
+- *Fan-out is several children.* Three `delegate` calls in one message start three sessions.
+  The driver runs them together, and the parent goes on when each has answered. Children
+  are no longer run one after another. How deep they nest is still a limit (G16).
+- *No parallel tool calls in the loop at 1.0.* A tool that runs a set of calls together, and
+  counts as one call of its session, is something an extension may offer. It has to be an
+  extension, since an add-on makes one host call at a time, and calls to one add-on still
+  take turns within a session. So that a form in the loop can come later, the record's
+  contract says now that each call's own trail is in order (`tool/call`, `tool/start`,
+  `tool/result`) and the trails of different calls may interleave.
+- *An add-on is an instance for each session.* Today one instance serves every session, one
+  call at a time, so a build running in `bash` for one session holds `read` and `edit` for
+  every other. The host is to keep an instance for each session that calls an add-on, and
+  one for what belongs to no session. An add-on's memory is then a session's, and is never
+  shared: what must be shared or kept goes through `state`. It costs memory, little for a
+  Rust add-on and 9 to 13 MB an instance for JavaScript and Python. It is said now because
+  it cannot be said later: an add-on that came to count on one memory for the whole agent
+  would break.
+- *Each session has its own shell,* as above.
+- *A device runs one session at a time.* [Without the standard
+  library](#without-the-standard-library) the call scope is one for the whole program, and
+  that is the contract there: the driver takes one session, then the next.
+- *Two sessions and one file.* The harness sees every write an add-on makes and none that a
+  shell command makes, so it does not promise that two sessions never write the same file.
+  It does two things. Grants keep agents apart: a directory each. And the shipped `write`
+  and `edit` refuse a file that changed since the session last read it, with an error that
+  says so. That catches another session, a command and the person's own editor alike,
+  without knowing which it was; where a tool made the earlier write, the log shows it.
+- *In which order listeners hear the commits of sessions that run together* is still open
+  (C3).
+
+**A step reads everything, and writes through effects.** The rules ask whatever runs a tool
+to leave the call's trail through the journal, and the trail's methods are private to the
+harness. Meanwhile `Journal::record` and `apply` are public, so a loop can write any message
+into a conversation with no trail at all. The read side is closed and the write side open,
+and it is to be the other way round.
+
+- *Read everything.* A session's snapshot shows each message with its event's id; the
+  conversation as the model is sent it; for each call, what the gates said and how far it
+  got (not started, running, finished with its result, waiting for a signal); what a
+  compaction could summarise; how the last run ended; and what the session was started
+  with. With that an extension can write a compaction strategy, as a step that returns
+  `Effect::Compacted`.
+- *Write through effects and the run's parts.* An operation returns effects. A loop uses
+  what `Run` offers, with one part added: run a single tool call, and leave its whole trail.
+  Nobody outside the harness writes half a trail, or a message the journal did not make.
+- *Trusted is not leave to be careless.* An extension holds the host's authority, and the
+  write side is closed to it all the same. That a tool is
+  [never run twice](#what-the-record-promises) unless it said that is safe is promised of
+  every run, and one extension writing a careless trail would break it for all of them.
+- *An operation reads and returns; a loop acts.* `Operation::run` is given a context in
+  place of the bare session: the snapshot, what the session was started with, whether the
+  run is stopping, and the registries. The context can grow. An operation still only says
+  what to record. A step that calls a tool or asks the model is a loop, which can wrap the
+  standard one; and a tool that needs an agent's work starts a session.
+- *A loop is not handed the whole harness.* `Run::harness` gives a loop `run_in` on any
+  session, which goes around the driver. A loop is to get the registries and the settings,
+  and to reach other sessions as everything else does: start, signal, message, list, read.
+- *The journal is the host's.* A program that embeds the harness and drives it by hand
+  keeps it. Loops and operations do not write on it.
+
+**What is not promised.**
+
+- *That a session's limits reach inside a tool from an extension or an MCP server.* Offering
+  the tool is the decision.
+- *That two sessions never write one file,* least of all from a shell. A lock on files is
+  not part of 1.0.
+- *That sessions do run at once,* or in which order the driver takes them.
+- *Steering a run under way,* named agents in an agent file, a scheduler, and a protocol
+  for front ends.
 
 ## What is stable
 
@@ -1572,7 +1844,7 @@ model](explanation/security-model.md) becomes the list of them, with the test fo
 | 1 | An add-on does only what its grants allow. | Built. |
 | 2 | The shell reaches only the files, hosts and variables listed for it. A shell that cannot be confined does not start unless the person chose the plain one. | Not built. |
 | 3 | What enforces is out of the agent's reach: the grants, the log, the command and its add-ons, the person's answers. | For add-ons, protected paths cover the agent file, the log, the command and the cache. Not built: the shipped add-ons, the answers, and anything for a shell. |
-| 4 | Whatever the agent builds or loads holds at most what its loader holds, and a person approved the load. | No amplification and the gate are built. A person cannot answer yet: an ask at `plugin/load` is a denial (C15). |
+| 4 | Whatever the agent builds or loads holds at most what its loader holds, and a person approved the load. | No amplification and the gate are built. A person cannot answer yet: an ask at `plugin/load` is a denial (C15). Not built: a session with grants of its own, which this guarantee is read as covering ([What an extension can reach](#what-an-extension-can-reach)). |
 | 5 | A workspace changes nothing about what the agent may do until the person accepts its file. | Not built. |
 | 6 | No credential's value reaches an add-on. A shell holds a value only where an agent file the person wrote or accepted says so, and a masked one goes only to the hosts its secret names. | Built for add-ons, not for a shell. |
 
@@ -1746,6 +2018,20 @@ the step it waits on is done.
     To check on the way: that an add-on importing no capability still says which world it
     was built for, in each guest language, and that the three toolchains accept a WIT in
     which a function says which version it arrived in.
+16. What [an extension can reach](#what-an-extension-can-reach). *Decided, none of it
+    built:* in the core before the freeze, the call scope carrying a session's grants, a
+    kernel saying whether it can hold a session to them, and a `Kernels` registry that does
+    not lock a whole kernel; `session/start` carrying a model, a loop, instructions, grants
+    and limits, with `session/start` declared as a decision point and a session keeping
+    what it started with; host calls checked against the add-on's grant and the session's;
+    a shell for each session, confined to both; the `sessions` service raising a signal,
+    starting a session and sending a message from anywhere, with signals named
+    `<plugin>/<what>` and a message for a busy session queued in the log; the driver, and
+    the command's three ways of running it; an instance of an add-on for each session;
+    children of one message run together; the session's snapshot readable, a single tool
+    call with its trail on `Run`, a context for `Operation::run`, and `Run` no longer
+    handing out the harness; `write` and `edit` refusing a file that changed since it was
+    read.
 
 ## Open questions
 

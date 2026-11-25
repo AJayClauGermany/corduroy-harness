@@ -111,7 +111,8 @@ come back to the reviewer's session.
   thinks long over a large diff can run out of time; review smaller changes, or lower
   `max_bytes`.
 - The reviewer is asked once and has no tools. Within a run, a sub-agent (`delegate`)
-  always runs on the main model: choosing a child session's model is not decided yet (see
-  [Open questions](../open-questions.md#g12-what-can-differ-between-sessions)).
+  always runs on the main model. That a child session is started with a model, tools and
+  limits of its own is decided and not built yet (see
+  [What an extension can reach](../design.md#what-an-extension-can-reach)).
 - What the reviewer is sent is recorded in the log as `llm/request`, and its answer as
   `llm/response`, so `corduroy log` shows every review.

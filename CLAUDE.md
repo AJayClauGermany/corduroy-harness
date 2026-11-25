@@ -196,8 +196,16 @@ as design guidance, not noise.
   that must reach the caller: propagate the `LogError` where there is a caller to give it to.
 - **Each tool call has its own trail.** `PluginTools` commits `tool/start` before a tool runs
   and `tool/result` when it returns; `continue_run` reads them to tell a call that never
-  started, one that was running and one that finished. Anything else that runs tools must
-  do the same through the session's `Journal`.
+  started, one that was running and one that finished. The trail is the harness's to write:
+  a loop runs calls through `Run`, and nothing outside the harness records half of one by
+  hand (see "What an extension can reach" in `docs/design.md`).
+- **An operation reads and returns; a loop acts.** An `Operation` looks at the session and
+  says what to record. A step that calls a tool or asks the model is a `Loop`, built from
+  `Run`'s parts; a tool that needs an agent's work starts a session.
+- **The session is the unit of concurrency.** Inside a session one thing happens at a time:
+  one run, one step, one tool call. Sessions may run side by side, so nothing may depend on
+  two of them overlapping, or on their not doing so; do not add state that is shared
+  between sessions without a lock, or a wait on another session's run.
 - **A tool is repeated after a crash only if it says so.** `ToolSpec::replay_safe` (and
   `replay-safe` in the WIT) is true only when calling twice equals calling once.
 - **Decisions go through gates, observations through events.** A step that needs an answer
