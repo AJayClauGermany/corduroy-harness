@@ -238,7 +238,8 @@ pub struct McpEntry {
 pub struct PluginEntry {
     /// The name it is loaded under.
     pub name: String,
-    /// The component: absolute, relative to the agent file, or found on the plugin path.
+    /// The component: absolute, or found on the plugin path, which ends with the agent
+    /// file's directory.
     pub path: String,
     /// Its configuration, passed to `activate` as JSON.
     #[serde(default)]

@@ -23,18 +23,15 @@ pub struct Places {
 impl Places {
     /// The places for an agent working in `workspace`, described by `file`.
     ///
-    /// The plugin path is the agent file's directory, then each directory in
-    /// `CORDUROY_PLUGIN_PATH`, then the `plugins` directory beside the running program (where
-    /// a downloaded build keeps its add-ons), then the plugins of the source tree this was
-    /// built from.
+    /// The plugin path is each directory in `CORDUROY_PLUGIN_PATH`, then the `plugins`
+    /// directory beside the running program (where a downloaded build keeps its add-ons),
+    /// then the plugins of the source tree this was built from, and only then the agent
+    /// file's directory. What ships with the command comes before what a workspace holds, so
+    /// a repository cannot stand its own `approval.wasm` in for the shipped one; what the
+    /// person names in their own environment comes before both.
     #[must_use]
     pub fn new(workspace: PathBuf, file: Option<PathBuf>) -> Self {
-        let mut plugin_path: Vec<PathBuf> = file
-            .as_deref()
-            .and_then(Path::parent)
-            .map(Path::to_owned)
-            .into_iter()
-            .collect();
+        let mut plugin_path: Vec<PathBuf> = Vec::new();
         if let Some(extra) = std::env::var_os("CORDUROY_PLUGIN_PATH") {
             plugin_path.extend(std::env::split_paths(&extra));
         }
@@ -42,6 +39,7 @@ impl Places {
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins/target");
         plugin_path.push(source.join("wasm32-unknown-unknown/release"));
         plugin_path.push(source.join("guests"));
+        plugin_path.extend(file.as_deref().and_then(Path::parent).map(Path::to_owned));
         Self {
             data: workspace.join(DATA_DIR),
             workspace,
@@ -137,5 +135,16 @@ mod tests {
             .position(|dir| dir.ends_with("wasm32-unknown-unknown/release"))
             .unwrap();
         assert!(at(&beside).unwrap() < source);
+    }
+
+    #[test]
+    fn what_ships_with_the_command_comes_before_what_is_beside_the_agent_file() {
+        let file = PathBuf::from("/work/corduroy.toml");
+        let places = Places::new(PathBuf::from("/work"), Some(file));
+        let at = |dir: &Path| places.plugin_path.iter().position(|entry| entry == dir);
+        let beside_file = at(Path::new("/work")).unwrap();
+        // A workspace's own `approval.wasm` never stands in for the shipped one.
+        assert!(at(&beside_program().unwrap()).unwrap() < beside_file);
+        assert_eq!(beside_file, places.plugin_path.len() - 1);
     }
 }

@@ -42,11 +42,12 @@ corduroy-<platform>/
   LICENSE, README.md
 ```
 
-The command looks for an add-on's `path` in the agent file's directory, then
-`CORDUROY_PLUGIN_PATH`, then the `plugins` directory beside itself (a link to the command is
-followed first), so the default agent finds its add-ons wherever the folder is unpacked. Keep
-the two together. Add-ons of your own go beside your agent file or on `CORDUROY_PLUGIN_PATH`;
-see the [plugin path](../reference/agent-file.md#plugins).
+The command looks for an add-on's `path` in `CORDUROY_PLUGIN_PATH`, then the `plugins`
+directory beside itself (a link to the command is followed first), then the agent file's
+directory, so the default agent finds its add-ons wherever the folder is unpacked. Keep the
+two together. Add-ons of your own go beside your agent file, under a file name no shipped
+add-on has, or on `CORDUROY_PLUGIN_PATH`; see the
+[plugin path](../reference/agent-file.md#plugins).
 
 ## The add-ons alone
 

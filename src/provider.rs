@@ -11,7 +11,7 @@
 //! A request and its reply are the core's ([`ModelRequest`], [`ModelReply`]): the loop and a
 //! plugin fill in the same one. Two ways of asking stay over that one description: a
 //! [`Provider`], which is asynchronous and what the loop asks, and the core's
-//! [`Model`](corduroy_core::Model), which is called and waited for.
+//! [`corduroy_core::Model`], which is called and waited for.
 //!
 //! A [`Provider`] speaks the core's [`Message`](corduroy_core::Message)s. Whatever a model's API wants is the
 //! provider's business: `corduroy-providers` converts for the providers it builds, and

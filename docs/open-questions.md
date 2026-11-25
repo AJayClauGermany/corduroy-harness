@@ -1200,11 +1200,11 @@ say for a new session.
 
 ### H6. Where does an installed command find the shipped add-ons?
 
-`Places::new` ends the plugin path with the source tree the command was built from
-(`crates/corduroy-std/src/places.rs:39`), and begins it with the agent file's directory. A
-shipped add-on's name is to resolve to the shipped one before anything a workspace holds
-([What is safe by default](design.md#what-is-safe-by-default)), so the order changes with
-the layout.
+`Places::new` looks beside the program and then in the source tree the command was built
+from (`crates/corduroy-std/src/places.rs:41`), and only then in the agent file's directory:
+a shipped add-on's name resolves to the shipped one before anything a workspace holds
+([What is safe by default](design.md#what-is-safe-by-default)). `CORDUROY_PLUGIN_PATH`,
+which is the person's, still comes first.
 
 *Direction.* Decide the installed layout (beside the binary, a data directory, embedded),
 and with it where the account-level place is on each platform and what the agent file's

@@ -132,12 +132,15 @@ after every native plugin above.
 | `grants` | table | none | Each capability it is granted, with its scope (below). |
 | `enabled` | boolean | `true` | `false` keeps the entry without loading it. |
 
-**The plugin path.** A relative `path` is looked for, in order, in the agent file's directory,
-each directory in `CORDUROY_PLUGIN_PATH`, the `plugins` directory beside the `corduroy`
-program (symbolic links followed; where a [ready-made build](../how-to/install-a-build.md)
-keeps its add-ons), and the `plugins/target` directories of the source tree the command was
-built from (where `cargo plugins` and `scripts/guests.sh` put the add-ons). That is why the
-default agent can say `path = "pi_tools.wasm"`.
+**The plugin path.** A relative `path` is looked for, in order, in each directory in
+`CORDUROY_PLUGIN_PATH`, the `plugins` directory beside the `corduroy` program (symbolic links
+followed; where a [ready-made build](../how-to/install-a-build.md) keeps its add-ons), the
+`plugins/target` directories of the source tree the command was built from (where
+`cargo plugins` and `scripts/guests.sh` put the add-ons), and last the agent file's
+directory. That is why the default agent can say `path = "pi_tools.wasm"`. The add-ons that
+ship with the command come before anything beside the agent file, so a repository's own
+`approval.wasm` never stands in for the shipped one; give an add-on of your own another file
+name, or a path from `{workspace}`.
 
 ### Grants
 

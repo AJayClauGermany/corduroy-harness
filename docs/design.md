@@ -1828,8 +1828,9 @@ agent on this machine.
 - *Declined,* the person's own agent runs in its place. *With nobody there to ask,* the run
   stops and says why.
 - *A file named with `--agent`* counts as accepted: naming it is the person's act.
-- *A shipped add-on's name resolves to the shipped one.* Today the agent file's directory is
-  searched first, so a workspace could stand in its own `approval.wasm`.
+- *A shipped add-on's name resolves to the shipped one* (built). The agent file's directory
+  is searched last, after the add-ons that ship with the command, so a workspace cannot
+  stand in its own `approval.wasm`.
 
 **One file is one whole agent.** There is no merging in 1.0, only a fallback: the file named
 with `--agent`, else the workspace's accepted file, else the person's own, else the built-in
@@ -2019,9 +2020,9 @@ the step it waits on is done.
     default agent on that kernel, and a shell that cannot be confined not starting; the
     account-level place, holding the person's own agent file, their answers, the log and
     the compiled-code cache, and a name for it in the agent file's strings; a workspace's
-    agent file accepted by its hash, the fallback order of agent files, and a shipped
-    add-on's name resolved before anything a workspace holds; a test named for each of the
-    six guarantees.
+    agent file accepted by its hash, and the fallback order of agent files; a test named for
+    each of the six guarantees. *Done:* a shipped add-on's name resolved before anything a
+    workspace holds.
 15. How [the plugin world grows](#how-the-plugin-world-grows). *Decided, none of it built:*
     a check of the world's version when an add-on is loaded, with a message naming the
     version it was built for, the host's and what is missing; each capability's sentence
