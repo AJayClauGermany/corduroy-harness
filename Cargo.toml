@@ -34,6 +34,8 @@ critical-section = "1.2.0"
 # Synchronous embedding: no async runtime, and no WASI, so plugins get no ambient authority.
 wasmtime = { version = "51.0.0", default-features = false, features = ["component-model", "cranelift", "runtime", "cache", "parallel-compilation"] }
 wit-component = "0.263.0"
+# The same version, to read the world's WIT in the WebAssembly host's tests.
+wit-parser = "0.263.0"
 # The `random` capability. The version wasmtime's tree already carries.
 getrandom = "0.3.4"
 # Hashes of plugin components, for the compiled-code cache and `plugin/load`. The version

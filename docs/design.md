@@ -383,7 +383,7 @@ Everything else is a plugin, and a plugin may itself offer primitives to other p
 | Conversation projection | built | Messages, and the `compaction` event: the messages before `keep_from` stay in the log and the conversation but are hidden from the model, which sees the summary in their place. The harness cuts only before the current turn; when, and the summary, come from the plugin providing the `compaction` service, asked by a loop step (`CompactOperation`). |
 | Model access | built | The loop asks the provider registered under a name in `Providers`, on every request, so a plugin supplies the model and unloading it takes the model away. `Harness::new` registers its argument there for convenience. For plugins, the core's `Models` registry: one completion, synchronously, of a model named `<provider>/<model>`; a `provider` plugin serves its provider's models there. The loop and plugins fill in one request and read one reply, the core's (`ModelRequest`, `ModelReply`, with `Usage` and `StopReason`), and a model describes itself (`ModelInfo`). *Planned:* the general typed part, a cost on the usage, and listing models through `llm` ([What the core is made of](#what-the-core-is-made-of)). |
 | Secrets and outbound requests | built | `Secrets` and `HttpClients` registries. The core checks and records; native plugins hold the values and send the requests, so an HTTP client is a plugin like a kernel is. |
-| Versioning | WIT package version, log schema version | Built: a schema version in each log's header (2, which added the time; 1 is still read), and the rule for the world in [What is stable](#what-is-stable). Still to do: a version on each plugin's stored state, and the check of the world's version when an add-on is loaded ([How the plugin world grows](#how-the-plugin-world-grows)). |
+| Versioning | WIT package version, log schema version | Built: a schema version in each log's header (2, which added the time; 1 is still read), and the rule for the world in [What is stable](#what-is-stable). and the check of the world's version when an add-on is loaded ([How the plugin world grows](#how-the-plugin-world-grows)). Still to do: a version on each plugin's stored state. |
 
 **Child sessions, a service rather than a capability (built).** The plan was a `session`
 capability to start a child session and await it. It became a service the harness
@@ -1119,10 +1119,8 @@ Two rules came with the capabilities that reach outside:
 
 Four things about the plugin world after 1.0 are decided here: what is promised to an add-on
 that is already built, how the capabilities grow, that the exports do not, and which
-versions a host accepts. All of it is *planned*. Today the host drops the version when it
-reads a component's imports, so an add-on built for another world loads and then fails when
-it is instantiated, with the engine's own error; [Order of work](#order-of-work) lists what
-changes.
+versions a host accepts. The check of versions at load is built; the rest is *planned*, and
+[Order of work](#order-of-work) lists what changes.
 
 **A built add-on loads on every 1.x host.** The promise is about the built thing, the
 `.wasm` file, and not only its source. An add-on built against the world of 1.0 loads on
@@ -1232,14 +1230,16 @@ a semantic version does:
 | Anything else: an export, a shared type, a function that exists, something removed | major |
 
 The host checks when it loads an add-on, before anything is instantiated, and says what it
-found in its own words:
+found in its own words (built: `corduroy-wasm` reads the version from the component's
+imports; it used to drop it, so an add-on built for another world loaded and then failed
+when it was instantiated, with the engine's own error):
 
 | Add-on built for | On a 1.x host |
 | --- | --- |
 | An earlier 1.x | Loads, always. |
 | A later 1.x | Loads if every interface and function it imports is there. Otherwise it is refused, with a message naming the version it was built for, the host's, and what is missing. |
 | Another major version | Refused, naming both versions. |
-| Any version, before 1.0 | The host promises to load its own version only. |
+| Any version, before 1.0 | The host promises to load its own version only. It refuses another minor version, as it will another major one, naming both. |
 
 - *The check is on what the add-on imports, not on the number.* An add-on built against 1.3
   that uses only what 1.0 had loads on a 1.1 host. A Rust add-on imports only the functions
@@ -1250,7 +1250,12 @@ found in its own words:
 - *The engine already matches versions this way.* wasmtime's linker resolves an import of
   `@1.0` against a definition of `@1.2`, and the other way round (checked in the pinned
   51.0.0). The host's own check is there for the message, and so that the rule is ours and
-  not a property of one engine.
+  not a property of one engine. One part of the message is still the engine's: an
+  interface this host lacks is named by the host, and a function it lacks inside an
+  interface it has is named in the engine's words, after the two versions.
+- *An add-on that imports nothing says nothing.* The version is read from the imports, so
+  an add-on that imports no capability is loaded whatever it was built for. Whether each
+  guest language can be made to say it some other way is still to check.
 - *Nothing is promised across a major version, and nothing is ruled out.* A 1.x host
   accepts 1.x. Whether a 2.x host also loads add-ons built for 1.x, by carrying the old
   world beside its own (the engine can link both, and the host would then implement and
@@ -2023,10 +2028,10 @@ the step it waits on is done.
     agent file accepted by its hash, and the fallback order of agent files; a test named for
     each of the six guarantees. *Done:* a shipped add-on's name resolved before anything a
     workspace holds.
-15. How [the plugin world grows](#how-the-plugin-world-grows). *Decided, none of it built:*
-    a check of the world's version when an add-on is loaded, with a message naming the
-    version it was built for, the host's and what is missing; each capability's sentence
-    read again before the freeze; the interfaces already known to be wanted (progress from
+15. How [the plugin world grows](#how-the-plugin-world-grows). *Done:* a check of the
+    world's version when an add-on is loaded, with a message naming the version it was
+    built for, the host's and what is missing. *Decided, not built:* each capability's
+    sentence read again before the freeze; the interfaces already known to be wanted (progress from
     a running tool, a tool call that waits for a signal) in the 1.0 world; the cases and
     open tails the shared types need, since none can be added within 1.x; a prefix for the
     service names the harness defines; a reference page for the script host's `host`
