@@ -38,12 +38,11 @@ reshapes entries further down.
 
 | Order | Group | Questions |
 | --- | --- | --- |
-| 7 | What an extension can reach | G1, G2, G4, G12, G18 |
 | 8 | How people meet it | H1, H11, H14, I4 |
 
 Everything not in this table is detail that hangs off one of these, or a mechanical choice
 (which types may grow, which names are final) best made in one sitting per section once its
-group is settled. The first six groups are decided, and every question below is read
+group is settled. The first seven groups are decided, and every question below is read
 against them. Why this exists, and the two uses 1.0 is measured against, are in
 [What it is for](design.md#what-it-is-for). What freezes, what is only stable and what
 "frozen" allows are in [What is stable](design.md#what-is-stable), with the four proofs
@@ -59,7 +58,10 @@ safety, what a kernel is given of the machine, and what a workspace may configur
 [What is safe by default](design.md#what-is-safe-by-default). What is promised to an add-on
 already built, how the capabilities grow, that the exports are closed at six, and which
 versions of the world a host accepts are in
-[How the plugin world grows](design.md#how-the-plugin-world-grows).
+[How the plugin world grows](design.md#how-the-plugin-world-grows). What a session is
+started with and held to, what something outside a run may do, who takes a run on, what
+runs at once, and what a step an extension wrote may read and write are in
+[What an extension can reach](design.md#what-an-extension-can-reach).
 
 ## P. Purpose and place
 
@@ -80,6 +82,12 @@ default agent's kernel is confined, so a server it starts, one the agent wrote i
 held to the files, hosts and variables that kernel was given. A server reached over HTTP is
 an address in an agent file. MCP has authorization and a way for a server to ask the person
 for input; whether either can stand where a gate does has not been checked.
+
+A session's grants do not reach inside a server either
+([What an extension can reach](design.md#what-an-extension-can-reach)). A session's shell
+is confined to what the session is granted, but a server is started for no session and
+keeps all the kernel was given, so its tools are offered to a narrowed session or not, by
+name, and whoever offers one has decided what that session reaches through it.
 
 *Direction.* Decide whether one kernel's reach is the right grain, since every server a
 kernel starts shares it with the shell, or whether a server gets a kernel of its own. Read
@@ -297,11 +305,16 @@ kernel that is an embedded interpreter"
 ([Without the standard library](design.md#without-the-standard-library)), which the core
 cannot express.
 
+One part is decided ([What an extension can reach](design.md#what-an-extension-can-reach)):
+the registry stops holding a whole kernel behind one lock, since a kernel keeps a shell for
+each session and sessions run side by side. So the standard mutex leaves the registry's
+type either way, and `Kernel` gains a defaulted method that says whether it can hold a
+session to its grants.
+
 *Direction.* A device is not promised by 1.0, so this cannot hold the freeze up, but the
-shape of `Kernels` freezes with the core. Either split the trait (`exec` and `reset`
-everywhere; `spawn` and `Process` with `std`) and take the standard mutex out of the
-registry's type, or say that kernels need an operating system and take the sentence out of
-Design.
+shape of `Kernels` freezes with the core. With the lock moved inside each kernel, either
+split the trait (`exec` and `reset` everywhere; `spawn` and `Process` with `std`), or say
+that kernels need an operating system and take the sentence out of Design.
 
 ### B6. What does a cell return, and what can a spawned process be given?
 
@@ -315,15 +328,6 @@ names is all a process gets.
 
 *Direction.* Make `Cell` and `Spawn` growable now. Decide separately whether rich output
 belongs in 1.0; the trait can gain defaulted methods later.
-
-### B7. Is a kernel shared by every session?
-
-A kernel is registered under one name, runs one cell at a time, and is shared by a session
-and its children: a sub-agent changes its parent's working directory and waits behind its
-parent's cells.
-
-*Direction.* Decide whether "a kernel per session" is a core idea or a naming convention
-left to extensions (`<kernel>/<session>`), and say so.
 
 ### B8. Is an HTTP exchange always one whole body?
 
@@ -364,10 +368,14 @@ method before 1.0 so the order has a growth point.
 ### B11. Are tools one flat, global set?
 
 `Tools` is one registry for the whole agent, with no record of which plugin registered an
-entry. Per-session tool sets ([G12](#g12-what-can-differ-between-sessions)) would be built
-over it, not in it.
+entry.
 
-*Direction.* Confirm, and confirm that ownership can be added later as a new method.
+That it stays one flat set is decided: the tools a session is offered are its `tools` grant,
+a scope over the one registry, and not a registry of its own
+([What an extension can reach](design.md#what-an-extension-can-reach)).
+
+*Direction.* What is left is ownership: confirm that which plugin registered a tool can be
+added later as a new method.
 
 ### B12. What does a pattern mean, for good?
 
@@ -406,38 +414,36 @@ which cannot.
 `apply`. Afterwards a native plugin holds the stream itself, names its own `Source` and
 attaches the session by hand; an add-on gets both from the host.
 
+A connected harness is the first that needs it: the other side's progress is to be seen
+here as events of the session it works for
+([What the freeze waits on](design.md#what-the-freeze-waits-on)), and it arrives on the
+extension's own thread, outside any call.
+
 *Direction.* An emitter bound to the plugin's name that takes the session from the call
-scope, so there is one convention before extensions settle on their own.
+scope, or is told it when there is no call, so there is one convention before extensions
+settle on their own.
 
 ### B17. Does the call scope follow work to another thread?
 
 It is thread-local (`core/call.rs:56`). An extension that hands a tool call to another
 thread loses the session, the waits and the stop flag, and there is no way to carry them.
 
-*Direction.* A handle that captures the current scope and enters it elsewhere.
+It now loses more. The scope is to carry what the session is granted
+([What an extension can reach](design.md#what-an-extension-can-reach)), so work done on a
+thread without it is done under no session's limits at all.
 
-### B18. Is one call scope for the whole program acceptable without `std`?
-
-Without `std` there is one scope, "wrong for anything that serves two sessions at once"
-(`core/call.rs:25-27`).
-
-*Direction.* A device serving two sessions at once is not something 1.0 is measured against.
-Confirm it as the contract for devices, unless the answer to
-[G18](#g18-what-may-run-at-once-in-one-harness) gives a better one for nothing.
+*Direction.* A handle that captures the current scope and enters it elsewhere, in the core
+before the freeze. An add-on is to have an instance for each session, so its own host calls
+keep their session whatever the thread; what loses it is native code that calls a tool or a
+kernel from a thread of its own. Say what such a call is served as.
 
 ### B19. Is polling the only way to learn of a stop?
 
-`call::stopping()` is asked "now and then". Nothing wakes work that is blocked.
+`call::stopping()` is asked "now and then". Nothing wakes work that is blocked. A plugin
+whose call has returned, and which waits to raise a signal, hears of a stop as an event
+([What an extension can reach](design.md#what-an-extension-can-reach)).
 
 *Direction.* Confirm; a notification can be added.
-
-### B20. How are signals named?
-
-A signal is a bare string (`call::wait_for`). The harness uses names of its own for a
-child's end; nothing keeps two extensions' signals apart.
-
-*Direction.* A naming rule (`<plugin>/<what>`), stated before extensions raise signals
-([G4](#g4-how-does-an-extension-raise-a-signal-resume-a-run-or-start-a-session)).
 
 ### B21. Are the reserved names and event sources a closed set?
 
@@ -484,8 +490,15 @@ the same kind of question.
 
 `Source::User` has no identity. Nothing records who sent a message or who answered an ask.
 
-*Direction.* Decide whether identity is a field the front end puts in the payload of
-`message` and `gate/answer`, and whether that is enough for a host with many users.
+One case is decided: a message a plugin sends a session is recorded with who sent it, so a
+review tells it from the person
+([What an extension can reach](design.md#what-an-extension-can-reach)). Its form is not: a
+field on `message`, or a source of its own
+([B21](#b21-are-the-reserved-names-and-event-sources-a-closed-set)).
+
+*Direction.* Decide the form for a plugin's message first, since it is in the log. Then
+whether a person's identity is a field the front end puts in the payload of `message` and
+`gate/answer`, and whether that is enough for a host with many users.
 
 ## C. Core: the event stream and the log
 
@@ -495,7 +508,12 @@ Each is delivered by the thread that made it, so a listener may hear the later f
 ([Design, open questions](design.md#open-questions)). One delivery queue would fix the
 order and change when a commit returns.
 
-*Direction.* Decide which is the frozen behaviour.
+It matters more than it did: sessions are to run side by side, each one thing at a time
+([What an extension can reach](design.md#what-an-extension-can-reach)), so two threads
+committing at once is the ordinary case.
+
+*Direction.* Decide which is the frozen behaviour. The least that fits the decision is
+that one session's commits are heard in order, and nothing is said about two sessions'.
 
 ### C4. Do listeners run on the committing thread?
 
@@ -556,8 +574,16 @@ The table is in `src/session.rs`, the reference is `docs/reference/events.md`, a
 emits five topics of its own. They do not agree today (the reference lacks
 `plugin/suspended` and `plugin/dropped`).
 
+[What an extension can reach](design.md#what-an-extension-can-reach) decides several things
+that are in the log and have no shape yet: what `session/start` holds (a model, a loop,
+instructions, grants, limits, and who started the session), a message that waits for a run
+to end, a signal kept for a wait not yet recorded, and an answer to an ask about a session.
+A message that waits cannot be a `message` event until its run begins, since a run is read
+as starting at the last message a person wrote.
+
 *Direction.* One list, checked by a test, marked with which topics are contract and which
-are diagnostics.
+are diagnostics. Shape the new ones as they are built, under the rule that old logs still
+read: a `session/start` that says nothing runs as the agent is configured.
 
 ### C12. Which spelling do JSON keys use?
 
@@ -596,9 +622,15 @@ more things a person is offered while a call runs, a host the shell was refused 
 credential the agent asked for. Neither holds the call: it fails, the person answers, and
 the model tries again.
 
+A third point is decided to ask a person: a session a gate asked about at `session/start`
+is recorded and waits, in the log, for the answer
+([What an extension can reach](design.md#what-an-extension-can-reach)). A session started
+from outside, which would run in the background, is the case.
+
 *Direction.* Decide whether an ask at any declared point can wait for a person, since that
-shapes `gate/answer`, and whether a refusal the person may lift afterwards is an ask of
-that kind or an event of its own.
+shapes `gate/answer`, which names a tool call today and has to name a session or a load as
+well; and whether a refusal the person may lift afterwards is an ask of that kind or an
+event of its own.
 
 ### C18. How many processes may use one log?
 
@@ -669,13 +701,15 @@ call was decided against. "Allow, and remember" is left to the gate's own memory
 The core declares two. Design names "the user's input and the request about to be sent to
 the model" as the likely next. A point the loop asks at is the loop's to declare.
 
-A third follows from [What the core is made of](design.md#what-the-core-is-made-of):
-starting a session. Which model a child session may run on (not its parent's, not one of
-the same family) is policy, and a gate can only say so if it is asked when a session starts.
+A third is decided ([What an extension can reach](design.md#what-an-extension-can-reach)):
+the loop declares `session/start`, and the gates are asked with who is starting the session
+(the person, a session's agent through a tool, a plugin), its parent, and what it would be
+started with: its model, loop, instructions, grants and limits. Which model a child may run
+on, and whether an orchestrator may start orchestrators, are then a gate's to say.
 
-*Direction.* Decide whether the loop declares those three before 1.0, since gates written by
-third parties will key on the names, and what the request at a session's start holds
-([G12](#g12-what-can-differ-between-sessions)).
+*Direction.* Decide whether the loop declares the other two before 1.0, since gates written
+by third parties will key on the names. For `session/start`, what is left is the request's
+JSON ([D2](#d2-are-the-gate-requests-json-shapes-contract)).
 
 ### D4. Is name order, first strictest, the final rule?
 
@@ -686,6 +720,11 @@ Gates are asked in name order and the first to give the strictest kind is record
 ### D5. Can a grant name one method of a service?
 
 The `service` capability is scoped by service name, so a grant gives every method.
+
+`sessions` is now the case for it. Starting a child, starting a session from outside,
+raising a signal and sending a session a message are four different things to allow, and
+one grant gives all four
+([What an extension can reach](design.md#what-an-extension-can-reach)).
 
 *Direction.* Decide whether the resource is `service` or `service:method` before grants are
 written against it.
@@ -712,15 +751,6 @@ holds (the question, the choices if there are any), what a reply may be (a choic
 value, a refusal to answer), the signal that carries it, and that a question with nobody
 there waits in the log as an ask does. An add-on can provide the tool only if its call can
 wait ([E6](#e6-can-an-add-ons-tool-call-wait-for-a-signal)).
-
-### D11. Can a person say something to a run that is under way?
-
-A session with an unfinished run refuses a new prompt (`src/harness.rs:93`). Stopping is
-the only thing a person can do to it.
-
-*Direction.* Decide whether a message may be queued for the run's next step, and how the
-log shows it, since "a run is from its first message to its `turn/end`" is part of the
-record's contract.
 
 ### D12. Is there one place that says where an agent may send data?
 
@@ -776,10 +806,14 @@ Where it goes is decided: waiting changes how a run proceeds, which no grant of 
 covers, so it is an interface of its own, in the 1.0 world
 ([How the plugin world grows](design.md#how-the-plugin-world-grows)).
 
+How a signal is named is decided too: `<plugin>/<what>`, raised only by the plugin whose
+name it carries, through the `sessions` service, which an add-on reaches as well
+([What an extension can reach](design.md#what-an-extension-can-reach)).
+
 *Direction.* What is left is its shape, before extensions start raising signals: what the
-call hands back to the add-on once it has said its result will come with a signal, how the
-signal is named ([B20](#b20-how-are-signals-named)), and what the grant is scoped by. The
-tool that asks the person
+call hands back to the add-on once it has said its result will come with a signal, and what
+the grant is scoped by (the part of the name after the plugin's is the natural resource).
+The tool that asks the person
 ([D10](#d10-what-form-does-a-tools-question-to-the-person-take)) is its first user.
 
 ### E8. How does a model call cross the boundary?
@@ -825,9 +859,16 @@ does not run a loop of its own by asking a model with tools through `llm`. Whate
 a session the harness runs, so an add-on's loop is something it tells the harness, not
 something it carries out.
 
+[What an extension can reach](design.md#what-an-extension-can-reach) says where such a loop
+is used: a session is started with the name of its loop, so whatever an add-on defines has
+to be a name in `Loops` that a session can be started with. It also draws the line a loop
+from an add-on has to respect: only a loop acts, through the run's parts, and nobody
+outside the harness writes a tool call's trail.
+
 *Direction.* Choose between the two forms left: a service the harness asks at each step, or
-a description of a loop that a native step carries out. Models and kernels can still be
-"never"; one that does come is a service an extension registers in the core's registry.
+a description of a loop that a native step carries out. Either way it is registered under a
+name by native code on the add-on's behalf. Models and kernels can still be "never"; one
+that does come is a service an extension registers in the core's registry.
 
 ### E13. When is a value JSON text and when a typed record?
 
@@ -863,7 +904,12 @@ what the grant is scoped by.
 A call through `tools.call` is gated with no session and leaves no `tool/start`
 (`crates/corduroy-wasm/src/plugin/host.rs:439`), unlike a call the model makes.
 
-*Direction.* The same trail as any call, with the session from the call scope.
+The session is no longer optional here. A session is to hold a `tools` grant of its own,
+and a call an add-on makes for it has to pass that grant as well as the add-on's
+([What an extension can reach](design.md#what-an-extension-can-reach)).
+
+*Direction.* The same trail as any call, with the session from the call scope, checked
+against that session's `tools` grant.
 
 ### E16. Are loads by a plugin durable?
 
@@ -879,7 +925,10 @@ harness defines, and a prefix is to be set aside for such names, so that a later
 be a name an add-on already answers to
 ([How the plugin world grows](design.md#how-the-plugin-world-grows)). Today the names are
 bare: the loop asks for `compaction`, the harness provides `sessions`, and an add-on may
-list any name in `provides`.
+list any name in `provides`. `sessions` is about to grow: raising a signal, starting a
+session and sending one a message from anywhere
+([What an extension can reach](design.md#what-an-extension-can-reach)), so its name and its
+methods' payloads are the first to settle.
 
 *Direction.* Choose the prefix before 1.0, since the names in `provides` are inside built
 add-ons. Decide whether `compaction` and `sessions` move under it, what happens to an
@@ -925,58 +974,20 @@ see a later protection.
 
 *Direction.* Share the list, or document the order.
 
-### F6. Is an add-on one instance for the whole agent?
+### F6. How long does a session's instance of an add-on live?
 
-Yes: one instance serves every session, one call at a time. A slow tool in one session
-holds up that add-on's tools in every other.
+An add-on is to have an instance for each session that calls it, and one for what belongs
+to no session, with no memory shared between them
+([What an extension can reach](design.md#what-an-extension-can-reach)). Today there is one
+instance, and the restart limit, the queue of events and `activate` all assume it.
 
-*Direction.* Decide whether the host may keep several instances of an add-on (its durable
-state is already in the host, not in its memory). This is part of whether one harness can
-serve many sessions well ([G18](#g18-what-may-run-at-once-in-one-harness)).
+*Direction.* Decide when a session's instance is made and let go (first call, the run's
+end, a while unused), since a JavaScript or Python instance holds 9 to 13 MB; which
+instance hears an event of a session nobody has called the add-on for yet; and whether
+restarts are counted for each instance or for the add-on
+([F3](#f3-does-the-restart-count-ever-reset)).
 
 ## G. The loop and the extension tier
-
-### G1. What does an `Operation` see?
-
-`run(&self, session: &Session)` (`src/operation.rs:77`), with no room for more. The built-in
-steps reach further, through crate-private parts.
-
-*Direction.* A context argument, as `Loop` has `Run`.
-
-### G2. What of the journal is public?
-
-`gated`, `compactable`, `transcript_before`, `start_call`, `finish_call` and `wait_call`
-are crate-private (`src/session.rs:1109-1256`), and `Sessions` is not a service. So an
-extension cannot write the compaction strategy design promises, nor run a tool with the
-trail the architecture rules demand.
-
-*Direction.* Decide the public read side of a session and the public form of a tool call's
-trail.
-
-### G3. How may a loop run tools?
-
-Only through `Run::call_tools`: every call of a message, one after another
-(`src/tools.rs:52`).
-
-*Direction.* A single-call primitive, and a decision on whether calls of one message may
-run in parallel (which the log's order must then allow for).
-
-### G4. How does an extension raise a signal, resume a run or start a session?
-
-Only `Harness::signal` raises one, and a plugin has no harness. Timers, webhooks,
-background jobs and a connection to another harness therefore cannot be extensions of the
-shipped command.
-
-[What the core is made of](design.md#what-the-core-is-made-of) makes this a condition of
-the freeze. Calling and waiting is the core's contract because whatever outlasts a call
-comes back as a signal, and something outside may speak first (a pull request opened, a
-message from a connected harness nobody was waiting for) and has to be able to start a
-session or resume one. A timer is one such extension, and need not ship at 1.0.
-
-*Direction.* A service the harness provides for raising a signal and for starting a
-session, and a defined owner for taking the run on once a signal arrives. The connected
-harness among the proofs [the freeze waits on](design.md#what-the-freeze-waits-on) is its
-first user.
 
 ### G5. Which harness types are in the stable set?
 
@@ -984,7 +995,14 @@ first user.
 `Provider`, `Providers`. An embedder also depends on `Harness`, `Run`, `Journal`, `Session`,
 `Status` and `Outcome`.
 
-*Direction.* List them, and make the ones that will grow growable: `HarnessError`
+[What an extension can reach](design.md#what-an-extension-can-reach) changes who uses
+which. The journal is the host's: a loop or an operation reads a session's snapshot and
+does not write on a journal. `Operation::run` takes a context; `Run` gains a single tool
+call and no longer hands out the `Harness`; and extensions get a handle on sessions (start,
+signal, message, list, read) and the host a driver.
+
+*Direction.* List them, with the new ones, by who may use each: an extension, or only a
+program that embeds the harness. Make the ones that will grow growable: `HarnessError`
 (`src/harness.rs:55`), `Outcome` (`:185`), `Answer`, `SessionInfo`, `Ask`, `Wait`
 (`src/session.rs`), the fields of `Status::Waiting`.
 
@@ -1043,31 +1061,6 @@ configuration. The request is the core's now, and a plugin's model call fills in
 one ([What the core is made of](design.md#what-the-core-is-made-of)), so a setting put
 there is one an add-on can use too.
 
-### G12. What can differ between sessions?
-
-Nothing: model, provider, system prompt, loop and tools are the harness's, and a child
-session gets the same. A sub-agent with fewer tools or a cheaper model cannot be expressed.
-
-[What it is for](design.md#what-it-is-for) needs it: two agents working on one task, each
-with its own loop, its own tools and its own limits on what it can read.
-
-Two things are decided about the model
-([What the core is made of](design.md#what-the-core-is-made-of)): a session keeps the one it
-started with, and whoever starts a child may choose its model from those it is allowed,
-knowing what each can do.
-
-The first use asked for is exactly this: one model writing a change and another, from
-another vendor, reviewing it. What can be built without deciding this is the `review` add-on
-(the other model asked once through `llm`, with no tools) and two sessions run from the
-command line with `--provider` and `--model`
-([Have a second model review the work](how-to/review-with-a-second-model.md)). There the model
-belongs to the process, not the session: nothing in the log says which model a session ran
-on, and coming back to a session without the flags runs it on the main model. A reviewer that
-is a child session on its own model, with its own tools, waits on this.
-
-*Direction.* Decide what `session/start` may carry, since that is in the log. At least the
-model, the loop, the tools offered and the grants its tool calls run under.
-
 ### G13. Can a person send more than text?
 
 `run_in` takes `&str` (`src/harness.rs:611`). `Message` and the provider adapter already
@@ -1090,12 +1083,16 @@ watch for a stop.
 
 *Direction.* Decide whether a per-call limit is the harness's job or each tool's.
 
-### G16. How do child sessions run?
+### G16. How deep may child sessions nest?
 
-One at a time, at most three deep (`MAX_DEPTH`, a constant in `src/children.rs`).
+At most three deep (`MAX_DEPTH`, a constant in `src/children.rs`). That the children of one
+message run together is decided
+([What an extension can reach](design.md#what-an-extension-can-reach)), and the limit on
+depth is one of the two things that bound an add-on granted `sessions`.
 
-*Direction.* Decide whether depth is configuration, and whether children of one message may
-run together.
+*Direction.* Decide whether depth is configuration, a limit a session is started with, or
+the constant; and whether a session started from outside, which has no parent, counts from
+nothing.
 
 ### G17. Where is usage added up?
 
@@ -1105,18 +1102,6 @@ their usage too, and that usage carries a cost where the provider states one, is
 
 *Direction.* Decide whether totals are the harness's to keep or a reader's to compute, and
 in what unit a cost is written, since it is in the log.
-
-### G18. What may run at once in one harness?
-
-`run_in` takes `&self`, so sessions can run side by side. They share one plugin tree behind
-one lock, the kernels ([B7](#b7-is-a-kernel-shared-by-every-session)) and each add-on's
-single instance ([F6](#f6-is-an-add-on-one-instance-for-the-whole-agent)). Within a
-session, tool calls and child sessions run one after another.
-
-*Direction.* A service holding many people's sessions is not promised by 1.0; several
-agents cooperating on one task is what 1.0 is measured against, and they are sessions of one
-harness or harnesses connected to it. Write the concurrency contract for that case first:
-what is safe to do at once, and what quietly waits its turn.
 
 ### G19. Who decides what the model sees?
 
@@ -1132,8 +1117,13 @@ between the projection and the provider) or always means a custom `Loop`.
 `max_turns` and the restart limit. There is no budget of tokens, cost or time, for a run, a
 session or a child.
 
-*Direction.* Decide whether budgets are the loop's own, or policy asked at a decision point
-before each model request ([D3](#d3-which-decision-points-exist-at-10)).
+Where a limit is written is decided: a session is started with a set of limits that can
+grow, turns being the first, counted as its loop counts them
+([What an extension can reach](design.md#what-an-extension-can-reach)).
+
+*Direction.* Decide which budgets join that set, and whether each is the loop's own to keep
+or policy asked at a decision point before each model request
+([D3](#d3-which-decision-points-exist-at-10)).
 
 ### G21. Who retries, and who falls back?
 
@@ -1188,7 +1178,15 @@ two or three APIs come first.
 Provider, model, system prompt and turn limit. Not the loop (so a `Loop` an extension
 registers can never be chosen), the restart limit, extra steps, or the WebAssembly limits.
 
-*Direction.* Decide which become keys and which are a `Standard` part.
+The file is where the person says what a session they start is started with: its model,
+loop, instructions and limits, holding everything the file allows
+([What an extension can reach](design.md#what-an-extension-can-reach)). So the loop has to
+become a key, and the turn limit one entry of a set. How many sessions the driver runs side
+by side is a setting with nowhere to be written yet.
+
+*Direction.* Add the loop and the number of sessions run at once. Decide which of the rest
+become keys and which are a `Standard` part, and which of them the command line may also
+say for a new session.
 
 ### H5. Can the `Standard`'s own types grow?
 
@@ -1242,17 +1240,14 @@ Driving a harness means linking it. An editor, a web page or a program in anothe
 needs a protocol over a socket or a pipe. The design calls such things front ends that
 "need nothing from the core beyond sessions and signals".
 
+Part of what a server needs is decided
+([What an extension can reach](design.md#what-an-extension-can-reach)): the command gets a
+mode that stays up with no terminal and takes on whatever arrives, and the host's driver
+runs every session that is ready. That mode serves plugins and speaks no protocol of its
+own. A front end's notice of work in the background (a line, a toast) is the front end's.
+
 *Direction.* Decide whether 1.0 ships a server front end, and which protocol it speaks. If
 it does, the events and the harness's verbs become a wire format that freezes like the log.
-
-### H12. Is an agent file one agent?
-
-One model, one system prompt, one set of tools. The design leaves "sub-recipes" for later.
-Named agents in one file (a planner, a reviewer) follow from
-[G12](#g12-what-can-differ-between-sessions).
-
-*Direction.* Decide with G12 whether a file may define several, and how a session picks
-one.
 
 ### H14. What is in the standard set at 1.0?
 
@@ -1324,9 +1319,13 @@ is described only in `sdk/js/script-host/host.js`.
 ([What it is for](design.md#what-it-is-for)). The pieces exist (`plugin-manager`, off by
 default; the script host; the `tools` capability). Three things it leans on do not: loads
 that survive a restart ([E16](#e16-are-loads-by-a-plugin-durable)), a person approving a
-load ([C15](#c15-can-a-person-answer-an-ask-at-pluginload)), and a scheduler (an extension
-that raises signals, [G4](#g4-how-does-an-extension-raise-a-signal-resume-a-run-or-start-a-session)).
+load ([C15](#c15-can-a-person-answer-an-ask-at-pluginload)), and a scheduler.
+
+The scheduler waits: it is an extension that raises signals and starts sessions, the way
+for it to do so is decided, and it is not in 1.0
+([What an extension can reach](design.md#what-an-extension-can-reach)). An automation the
+agent wrote can start a run when an event fires, holding at most its own grants; what it
+cannot do until there is a scheduler is wake at a time.
 
 *Direction.* The first two are conditions of the freeze: something the agent built must
-still be there tomorrow, and the person must be the one who allowed it. The scheduler
-serves unattended work, which 1.0 is not measured by; decide whether it waits.
+still be there tomorrow, and the person must be the one who allowed it.
