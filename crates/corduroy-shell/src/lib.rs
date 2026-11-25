@@ -6,6 +6,12 @@
 //! PowerShell ([`ShellKernel::powershell`]) is there on every Windows, and on the others too
 //! where `pwsh` is installed. The core defines what a kernel is; implementations such as this one,
 //! or a sandboxed kernel that runs cells in a container, live outside it.
+//!
+//! The shell, and every process the kernel starts, begins from an empty environment and not
+//! from the program's own, which is where a model provider's key is. It is given the plain
+//! variables a process needs to run at all ([`PLAIN`]), each as the program itself has it,
+//! and beyond those only what it was told to: [`ShellKernel::with_env`] sets a variable, and
+//! [`ShellKernel::passing`] hands one of the program's own through by name.
 
 use std::fmt;
 use std::io::{BufRead as _, BufReader, Read, Write};
@@ -26,6 +32,54 @@ use corduroy_core::{
     Cell, KERNELS, Kernel, KernelError, Kernels, MAX_OUTPUT, Plugin, Process, Spawn, plugin_fn,
 };
 
+/// The environment variables every process a kernel starts is given.
+///
+/// Each has the value the program itself has for it, if it has one: where programs are
+/// found, whose account this is, the language and time zone, and what a process on Windows
+/// cannot start without. Nothing else of the program's environment reaches a shell, so a key
+/// kept there does not.
+pub const PLAIN: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TZ",
+    "TMPDIR",
+    "TERM",
+    // Windows.
+    "SystemRoot",
+    "SystemDrive",
+    "windir",
+    "ComSpec",
+    "PATHEXT",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "USERNAME",
+    "USERDOMAIN",
+    "COMPUTERNAME",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "ALLUSERSPROFILE",
+    "PUBLIC",
+    "ProgramData",
+    "ProgramFiles",
+    "ProgramFiles(x86)",
+    "ProgramW6432",
+    "CommonProgramFiles",
+    "CommonProgramFiles(x86)",
+    "CommonProgramW6432",
+    "PSModulePath",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+    "OS",
+];
+
 /// A plugin that provides a persistent shell as the kernel `name`, working in `dir`.
 ///
 /// Unloading the plugin stops the shell and removes the kernel.
@@ -40,11 +94,14 @@ pub fn shell_kernel(name: impl Into<String>, dir: impl Into<PathBuf>) -> impl Pl
 pub fn shell_kernel_of(name: impl Into<String>, shell: ShellKernel) -> impl Plugin + 'static {
     let name = name.into();
     let (program, dir, dialect) = (shell.program, shell.dir, shell.dialect);
+    let (env, passed) = (shell.env, shell.passed);
     plugin_fn(format!("kernel-{name}"), &[KERNELS], move |ctx| {
         let kernels = ctx.service::<Kernels>(KERNELS)?;
         let mut fresh = ShellKernel::program(program.clone());
         fresh.dir.clone_from(&dir);
         fresh.dialect = dialect;
+        fresh.env.clone_from(&env);
+        fresh.passed.clone_from(&passed);
         let kernel: Arc<Mutex<dyn Kernel>> = Arc::new(Mutex::new(fresh));
         kernels.register(ctx, name.clone(), kernel)?;
         Ok(())
@@ -60,6 +117,10 @@ pub struct ShellKernel {
     program: String,
     dialect: Dialect,
     dir: Option<PathBuf>,
+    /// Variables set for the shell and for what the kernel starts, beyond the plain ones.
+    env: Vec<(String, String)>,
+    /// Variables of the program's own environment handed through, by name.
+    passed: Vec<String>,
     session: Option<Session>,
     cells: u64,
 }
@@ -91,6 +152,8 @@ impl ShellKernel {
             program: program.into(),
             dialect: Dialect::Posix,
             dir: None,
+            env: Vec::new(),
+            passed: Vec::new(),
             session: None,
             cells: 0,
         }
@@ -127,9 +190,44 @@ impl ShellKernel {
         self
     }
 
+    /// Set the environment variable `name` to `value` for the shell and for every process
+    /// the kernel starts. The value is in the open: whatever runs there can print it.
+    #[must_use]
+    pub fn with_env(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env.push((name.into(), value.into()));
+        self
+    }
+
+    /// Hand the program's own environment variable `name` through to the shell and to every
+    /// process the kernel starts, if the program has it. Passing a credential this way puts
+    /// its value within reach of whatever runs there.
+    #[must_use]
+    pub fn passing(mut self, name: impl Into<String>) -> Self {
+        self.passed.push(name.into());
+        self
+    }
+
+    /// Give `command` the environment a process of this kernel starts from: none of the
+    /// program's own, then the [`PLAIN`] variables and those passed through, as the program
+    /// has them, then the variables set for the kernel.
+    fn environment(&self, command: &mut Command) {
+        command.env_clear();
+        let handed = PLAIN
+            .iter()
+            .copied()
+            .chain(self.passed.iter().map(String::as_str));
+        for name in handed {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
+        command.envs(self.env.iter().map(|(name, value)| (name, value)));
+    }
+
     fn start(&self) -> Result<Session, KernelError> {
         let unavailable = |error: std::io::Error| KernelError::Unavailable(error.to_string());
         let mut command = Command::new(&self.program);
+        self.environment(&mut command);
         if self.dialect == Dialect::PowerShell {
             // Commands from standard input, one line at a time, with nothing asked of a person.
             // A terminal of no capabilities, or .NET on Unix writes the codes that set one up
@@ -198,9 +296,12 @@ impl Kernel for ShellKernel {
     }
 
     /// Start `spawn` in the kernel's directory, as its own process group, with its standard
-    /// error discarded. It is found on the `PATH`, as the shell would find it.
+    /// error discarded. It is found on the `PATH`, as the shell would find it, and its
+    /// environment is the kernel's with the variables `spawn` names: nothing of the
+    /// program's own beyond that.
     fn spawn(&mut self, spawn: &Spawn) -> Result<Box<dyn Process>, KernelError> {
         let mut command = Command::new(&spawn.program);
+        self.environment(&mut command);
         command
             .args(&spawn.args)
             .envs(spawn.env.iter().map(|(name, value)| (name, value)))
@@ -441,6 +542,63 @@ mod tests {
 
     fn run(kernel: &mut ShellKernel, code: &str) -> Cell {
         kernel.exec(code, PATIENT).unwrap()
+    }
+
+    /// A variable the test program has and no kernel is given: cargo sets it for every test.
+    const OURS: &str = "CARGO_MANIFEST_DIR";
+
+    #[test]
+    fn a_shell_starts_from_an_empty_environment_with_the_plain_variables() {
+        assert!(std::env::var_os(OURS).is_some(), "cargo sets {OURS}");
+        let mut kernel = ShellKernel::new();
+        let shown = format!("printf '%s' \"${{{OURS}-unset}}\"");
+
+        // Nothing of the program's own environment: a provider's key is not there to print.
+        assert_eq!(run(&mut kernel, &shown).output, "unset");
+        // Where programs are found is, or no command would run.
+        assert_eq!(
+            run(&mut kernel, "printf '%s' \"$PATH\"").output,
+            std::env::var("PATH").unwrap()
+        );
+    }
+
+    #[test]
+    fn a_shell_is_given_only_the_variables_it_was_told_to() {
+        let mut kernel = ShellKernel::new()
+            .with_env("GREETING", "hello")
+            .passing(OURS)
+            .passing("CORDUROY_NOT_SET_ANYWHERE");
+        let shown = format!(
+            "printf '%s %s %s' \"$GREETING\" \"${{{OURS}-unset}}\" \
+             \"${{CORDUROY_NOT_SET_ANYWHERE-unset}}\""
+        );
+
+        let ours = std::env::var(OURS).unwrap();
+        assert_eq!(
+            run(&mut kernel, &shown).output,
+            format!("hello {ours} unset")
+        );
+    }
+
+    #[test]
+    fn a_process_the_kernel_starts_gets_the_same_environment_and_what_it_names() {
+        let mut kernel = ShellKernel::new().with_env("GREETING", "hello");
+        let spawn = Spawn {
+            program: "sh".into(),
+            args: vec![
+                "-c".into(),
+                format!("echo \"$GREETING $OWN ${{{OURS}-unset}}\""),
+            ],
+            env: vec![("OWN".into(), "named".into())],
+        };
+
+        let mut process = kernel.spawn(&spawn).unwrap();
+        let mut line = String::new();
+        BufReader::new(process.stdout().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+
+        assert_eq!(line.trim(), "hello named unset");
     }
 
     #[test]

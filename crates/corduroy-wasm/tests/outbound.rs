@@ -7,9 +7,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use corduroy_core::{
-    App, Completion, Draft, EventStream, GATES, Gates, HTTP, HttpClient, HttpClients, HttpRequest,
-    HttpResponse, MODELS, Model, ModelError, Models, PROMPTS, Pattern, Prompts, SECRETS, SERVICES,
-    Scope, Secret, Secrets, Services, SessionId, Source, TOOLS, Tools,
+    App, Draft, EventStream, GATES, Gates, HTTP, HttpClient, HttpClients, HttpRequest,
+    HttpResponse, MODELS, Message, Model, ModelError, ModelReply, ModelRequest, Models, PROMPTS,
+    Pattern, Prompts, SECRETS, SERVICES, Scope, Secret, Secrets, Services, SessionId, Source,
+    StopReason, TOOLS, Tools, Usage,
 };
 use corduroy_test_support::plugin;
 use corduroy_wasm::{Limits, WasmPlugin, WasmRuntime};
@@ -82,43 +83,98 @@ fn payloads(app: &App, topic: &str) -> Vec<Value> {
 #[test]
 fn a_plugin_asks_the_models_its_grant_names_and_the_exchange_is_recorded() {
     let mut host = host(EventStream::new()).unwrap();
-    let small: Arc<dyn Model> = Arc::new(|request: &Completion, timeout: Duration| {
-        let prompt = &request.messages[0].text;
-        Ok(format!("{prompt}, within {}ms", timeout.as_millis()))
+    // Registered once, under the provider's name, for every model of it.
+    let local: Arc<dyn Model> = Arc::new(|request: &ModelRequest, timeout: Duration| {
+        if request.model == "broken" {
+            return Err(ModelError::Failed("overloaded".into()));
+        }
+        let prompt = request.messages[0].text_content();
+        let said = format!(
+            "{} heard {prompt}, within {}ms",
+            request.model,
+            timeout.as_millis()
+        );
+        let usage = Usage::new(Some(12), Some(7)).with_reasoning(Some(3));
+        Ok(ModelReply::new(Message::assistant().text(said), usage).stopped(StopReason::Finished))
     });
-    host.models.insert("small", small).unwrap();
-    let broken: Arc<dyn Model> =
-        Arc::new(|_: &Completion, _: Duration| Err(ModelError::Failed("overloaded".into())));
-    host.models.insert("broken", broken).unwrap();
-    host.app
-        .plugin(testbed(vec![("llm", Scope::none().allow("small").allow("broken"))]).unwrap());
+    host.models.insert("local", local).unwrap();
+    let grant = Scope::none().allow("local/*").deny("local/large");
+    host.app.plugin(testbed(vec![("llm", grant)]).unwrap());
 
     let answered = call(
         &host,
         "ask",
-        &json!({"model": "small", "system": "terse", "prompt": "hello"}),
+        &json!({"model": "local/small", "system": "terse", "prompt": "hello"}),
     )
     .unwrap();
-    let refused = call(&host, "ask", &json!({"model": "large", "prompt": "hi"})).unwrap();
-    let failed = call(&host, "ask", &json!({"model": "broken", "prompt": "hi"})).unwrap();
+    let refused = call(
+        &host,
+        "ask",
+        &json!({"model": "local/large", "prompt": "hi"}),
+    )
+    .unwrap();
+    let elsewhere = call(
+        &host,
+        "ask",
+        &json!({"model": "other/small", "prompt": "hi"}),
+    )
+    .unwrap();
+    let failed = call(
+        &host,
+        "ask",
+        &json!({"model": "local/broken", "prompt": "hi"}),
+    )
+    .unwrap();
 
-    // The host passes its own bound on the wait to the model.
-    assert_eq!(answered, "hello, within 1500ms");
+    // The model is told its provider's own name for it, and the host's bound on the wait.
+    assert_eq!(answered, "small heard hello, within 1500ms");
+    // The grant is the one list of models: "all of this provider's but one" is a grant.
     assert!(
-        refused["denied"].as_str().unwrap().contains("large"),
+        refused["denied"].as_str().unwrap().contains("local/large"),
         "{refused}"
+    );
+    assert!(
+        elsewhere["denied"]
+            .as_str()
+            .unwrap()
+            .contains("other/small"),
+        "{elsewhere}"
     );
     assert_eq!(failed["failed"], "the model failed: overloaded");
     let requests = payloads(&host.app, "llm/request");
     assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["model"], "local/small");
     assert_eq!(requests[0]["system"], "terse");
     assert_eq!(
         requests[0]["messages"][0],
         json!({"role": "user", "text": "hello"})
     );
+    // What a plugin's own model call cost is in the record, with why the model stopped.
     let responses = payloads(&host.app, "llm/response");
-    assert_eq!(responses[0]["ok"], true);
-    assert_eq!(responses[1]["ok"], false);
+    assert_eq!(
+        responses[0],
+        json!({
+            "model": "local/small", "ok": true, "output": "small heard hello, within 1500ms",
+            "input_tokens": 12, "output_tokens": 7, "reasoning_tokens": 3, "stop": "finished"
+        })
+    );
+    assert_eq!(
+        responses[1],
+        json!({"model": "local/broken", "ok": false, "output": "the model failed: overloaded"})
+    );
+}
+
+#[test]
+fn a_model_named_without_its_provider_is_unknown() {
+    let mut host = host(EventStream::new()).unwrap();
+    host.app
+        .plugin(testbed(vec![("llm", Scope::any())]).unwrap());
+
+    let asked = call(&host, "ask", &json!({"model": "small", "prompt": "hi"})).unwrap();
+
+    let why = asked["failed"].as_str().unwrap();
+    assert!(why.contains("unknown model `small`"), "{why}");
+    assert!(why.contains("<provider>/<model>"), "{why}");
 }
 
 /// The requests a client was sent.

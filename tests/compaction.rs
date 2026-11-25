@@ -5,14 +5,13 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use corduroy_harness::core::Message;
 use corduroy_harness::core::{
-    CallError, EventStream, Pattern, Scope, Service, SessionId, TOOLS, ToolSpec, Tools, plugin_fn,
-    tool_fn,
+    CallError, EventStream, Message, ModelInfo, ModelReply, ModelRequest, Pattern, Scope, Service,
+    SessionId, StopReason, TOOLS, ToolSpec, Tools, Usage, plugin_fn, tool_fn,
 };
 use corduroy_harness::scripted::{ScriptedProvider, call, say};
 use corduroy_harness::wasm::WasmRuntime;
-use corduroy_harness::{COMPACTION, Harness, MAIN, Status, provider};
+use corduroy_harness::{COMPACTION, Harness, MAIN, Provider, ProviderError, Status, provider};
 use corduroy_test_support::plugin;
 use serde_json::{Value, json};
 
@@ -142,14 +141,14 @@ async fn the_compact_plugin_summarises_with_a_model_of_its_own() {
     ]));
     let harness = harness(&model, Arc::new(EventStream::new()));
     let writer = Arc::new(ScriptedProvider::new([say("We talked about one and two.")]));
-    harness.plugin(provider("writer", Arc::<ScriptedProvider>::clone(&writer)).serving(["small"]));
+    harness.plugin(provider("writer", Arc::<ScriptedProvider>::clone(&writer)));
     harness.plugin(
         WasmRuntime::new()
             .unwrap()
             .load(plugin("compact"))
             .unwrap()
-            .grant("llm", Scope::none().allow("small"))
-            .config(json!({"model": "small", "max_messages": 4}).to_string()),
+            .grant("llm", Scope::none().allow("writer/small"))
+            .config(json!({"model": "writer/small", "max_messages": 4}).to_string()),
     );
 
     harness.run("first").await.unwrap();
@@ -169,4 +168,61 @@ async fn the_compact_plugin_summarises_with_a_model_of_its_own() {
     let cut = harness.events().matching(&Pattern::new(COMPACTION));
     let cut: Value = serde_json::from_str(&cut[0].payload).unwrap();
     assert_eq!(cut["by"], COMPACTION);
+}
+
+/// A model that holds a thousand tokens and says each request took eight hundred of them.
+struct Small(ScriptedProvider);
+
+#[async_trait::async_trait]
+impl Provider for Small {
+    async fn complete(&self, request: &ModelRequest) -> Result<ModelReply, ProviderError> {
+        let reply = self.0.complete(request).await?;
+        let usage = Usage::new(Some(800), Some(5));
+        Ok(ModelReply::new(reply.message, usage).stopped(StopReason::Finished))
+    }
+
+    fn describe(&self, _model: &str) -> ModelInfo {
+        ModelInfo::unknown().with_context(1000)
+    }
+}
+
+#[tokio::test]
+async fn the_compact_plugin_is_due_at_a_share_of_what_the_model_says_it_holds() {
+    let model = Small(ScriptedProvider::new([say("one"), say("two")]));
+    let harness = Harness::new(Arc::new(model)).unwrap();
+    let writer = Arc::new(ScriptedProvider::new([say("We talked about one.")]));
+    harness.plugin(provider("writer", Arc::<ScriptedProvider>::clone(&writer)));
+    // No `max_tokens`: the plugin starts from the context the harness passes on, where the
+    // 100 000 tokens it falls back on would never be reached here.
+    harness.plugin(
+        WasmRuntime::new()
+            .unwrap()
+            .load(plugin("compact"))
+            .unwrap()
+            .grant("llm", Scope::none().allow("writer/*"))
+            .config(json!({"model": "writer/small"}).to_string()),
+    );
+
+    harness.run("first").await.unwrap();
+    assert_eq!(
+        harness.events().matching(&Pattern::new(COMPACTION)).len(),
+        0
+    );
+    harness.run("second").await.unwrap();
+
+    let seen = seen_by_model(&harness);
+    assert!(seen[0].contains("We talked about one."), "{seen:?}");
+    assert_eq!(writer.requests().len(), 1);
+    // Why the model stopped is recorded with what the request cost.
+    let usage = harness.events().matching(&Pattern::new("usage"));
+    let usage: Value = serde_json::from_str(&usage[0].payload).unwrap();
+    assert_eq!(usage["input_tokens"], 800);
+    assert_eq!(usage["stop"], "finished");
+    // And the session says so, for a step of the loop to act on, also once read back.
+    let main = SessionId::new(MAIN);
+    let stopped = harness.journal(&main).unwrap().session().stopped();
+    assert_eq!(stopped, Some(StopReason::Finished));
+    let reloaded = Harness::open(Arc::new(EventStream::load(harness.events().events()))).unwrap();
+    let stopped = reloaded.journal(&main).unwrap().session().stopped();
+    assert_eq!(stopped, Some(StopReason::Finished));
 }

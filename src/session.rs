@@ -17,7 +17,7 @@
 //! | `gate/answer` | `user` | `{"id", "tool", "allow", "reason"}`, caused by its `tool/call`: a person's answer to a gate that asked |
 //! | `tool/start` | `host` | `{"id", "tool"}`, caused by its `tool/call`: the tool is about to run |
 //! | `tool/result` | `environment` | `{"id", "tool", "ok", "output"}`, and `"content"` when the result is not one block of text, caused by its `tool/call` |
-//! | `usage` | `agent` | `{"model", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"}`, each count only if the provider gave it; the cache counts are part of `input_tokens` |
+//! | `usage` | `agent` | `{"model", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens", "stop"}`, each count only if the provider gave it; the cache counts are part of `input_tokens` and the reasoning count of `output_tokens`; `stop` is why the model stopped (`finished`, `limit`, `tool_calls` or `refused`), if the provider said |
 //! | `turn/end` | `host` | `{"status"}`: `finished`, `turn-limit`, `failed` (with `"reason"`), `stopped` or `yielded` |
 //! | `run/restart` | `host` | `{"attempt"}`: an unfinished run was picked up again |
 //! | `run/stop` | `user` | `{}`: a person asked the run to stop |
@@ -87,13 +87,12 @@ use anyhow::{Context as _, Result};
 use corduroy_core::sync::Lock;
 use corduroy_core::{
     Decision, Draft, Event, EventId, EventStream, LogError, Message, Part, Query, Role, SessionId,
-    Source, TOOL_CALL, ToolCall, ToolOutput, ToolResult, Verdict,
+    Source, StopReason, TOOL_CALL, ToolCall, ToolOutput, ToolResult, Usage, Verdict,
 };
 use serde_json::{Value, json};
 
 use crate::harness::HarnessError;
 use crate::message::{decode, decode_content, encode, encode_content};
-use crate::provider::Usage;
 
 /// Topic of the events that make up the conversation.
 pub const MESSAGE: &str = "message";
@@ -486,6 +485,8 @@ pub struct Session {
     messages: Vec<Message>,
     /// The summary that stands in for the messages before index `.1`, for the model.
     summary: Option<(String, usize)>,
+    /// Why the model stopped the last time it answered, if its provider said.
+    stopped: Option<StopReason>,
 }
 
 impl Session {
@@ -569,6 +570,14 @@ impl Session {
             .count()
     }
 
+    /// Why the model stopped the last time it answered, if its provider said: whether it
+    /// finished, asked for tools, was cut off at the most it may write, or declined. A step
+    /// of the loop can act on it, say by asking the model to go on after a cut-off answer.
+    #[must_use]
+    pub const fn stopped(&self) -> Option<StopReason> {
+        self.stopped
+    }
+
     /// The model's last answer, if the conversation ends with one that asks for nothing.
     #[must_use]
     pub fn answer(&self) -> Option<String> {
@@ -595,6 +604,8 @@ pub enum Effect {
         model: String,
         /// What it cost.
         usage: Usage,
+        /// Why the model stopped, if its provider said.
+        stop: Option<StopReason>,
     },
     /// Note what the gates decided about a tool call the model asked for.
     Gated {
@@ -775,6 +786,8 @@ struct State {
     compaction: Option<(String, EventId)>,
     /// The input tokens of the last model request, unless a compaction came after it.
     input_tokens: u64,
+    /// Why the model stopped the last time it answered, if its provider said.
+    stopped: Option<StopReason>,
     /// Tool calls that waited for a signal, by tool-call id, with the payload once it came.
     waits: BTreeMap<String, Waited>,
     /// The tool calls waiting for a response, by tool-call id.
@@ -809,8 +822,8 @@ struct Batch {
     closed: Vec<String>,
     /// What the gates decided about tool calls, by tool-call id.
     gated: Vec<(String, Gated)>,
-    /// The input tokens of a model request recorded in this batch.
-    input_tokens: Option<u64>,
+    /// A model request recorded in this batch: its input tokens, and why the model stopped.
+    asked: Option<(u64, Option<StopReason>)>,
 }
 
 impl Batch {
@@ -854,6 +867,7 @@ impl State {
             message_ids: Vec::new(),
             compaction: None,
             input_tokens: 0,
+            stopped: None,
             waits: BTreeMap::new(),
             calls: BTreeMap::new(),
             unfinished: false,
@@ -935,6 +949,22 @@ impl State {
     }
 
     /// The session as a step sees it.
+    /// Note what the `usage` event `payload` says about a model request: the tokens it read,
+    /// and why the model stopped.
+    fn used(&mut self, payload: &str) {
+        let usage: Value = serde_json::from_str(payload).unwrap_or(Value::Null);
+        // Written by this version at the top, by those before it under `usage`.
+        self.input_tokens = usage
+            .get("input_tokens")
+            .or_else(|| usage.pointer("/usage/input_tokens"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        self.stopped = usage
+            .get("stop")
+            .and_then(Value::as_str)
+            .and_then(StopReason::parse);
+    }
+
     fn session(&self, id: &SessionId) -> Session {
         let summary = self
             .compaction
@@ -944,6 +974,7 @@ impl State {
             id: id.clone(),
             messages: self.messages.clone(),
             summary,
+            stopped: self.stopped,
         }
     }
 
@@ -979,15 +1010,7 @@ impl State {
                     .with_context(|| format!("event {} is not a message", event.id))?;
                 self.push(event.id, message);
             }
-            USAGE => {
-                let usage: Value = serde_json::from_str(&event.payload).unwrap_or(Value::Null);
-                // Written by this version at the top, by those before it under `usage`.
-                self.input_tokens = usage
-                    .get("input_tokens")
-                    .or_else(|| usage.pointer("/usage/input_tokens"))
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0);
-            }
+            USAGE => self.used(&event.payload),
             COMPACTION => {
                 let payload: Value = serde_json::from_str(&event.payload)
                     .with_context(|| format!("event {} is not a compaction", event.id))?;
@@ -1184,12 +1207,12 @@ impl Journal {
                 Effect::Message(message) => {
                     self.draft_message(&mut batch, &message);
                 }
-                Effect::Usage { model, usage } => {
-                    let payload = usage_payload(&model, usage);
+                Effect::Usage { model, usage, stop } => {
+                    let payload = usage_payload(&model, usage, stop);
                     batch
                         .drafts
                         .push(Draft::new(Source::Agent, USAGE).payload(payload.to_string()));
-                    batch.input_tokens = Some(usage.input_tokens.unwrap_or(0));
+                    batch.asked = Some((usage.input_tokens.unwrap_or(0), stop));
                 }
                 Effect::Compacted {
                     summary,
@@ -1556,8 +1579,8 @@ impl State {
         for call in batch.closed {
             self.calls.remove(&call);
         }
-        if let Some(tokens) = batch.input_tokens {
-            self.input_tokens = tokens;
+        if let Some((tokens, stopped)) = batch.asked {
+            (self.input_tokens, self.stopped) = (tokens, stopped);
         }
     }
 }
@@ -1608,20 +1631,18 @@ fn transcript(messages: &[&Message]) -> String {
     lines.join("\n")
 }
 
-/// The payload of a `usage` event: the model, and each count the provider gave.
-fn usage_payload(model: &str, usage: Usage) -> Value {
+/// The payload of a `usage` event: the model, each count the provider gave, and why the
+/// model stopped if the provider said.
+fn usage_payload(model: &str, usage: Usage, stop: Option<StopReason>) -> Value {
     let mut payload = serde_json::Map::new();
     payload.insert("model".to_owned(), json!(model));
-    let counts = [
-        ("input_tokens", usage.input_tokens),
-        ("output_tokens", usage.output_tokens),
-        ("cache_read_tokens", usage.cache_read_tokens),
-        ("cache_write_tokens", usage.cache_write_tokens),
-    ];
-    for (name, count) in counts {
-        if let Some(count) = count {
-            payload.insert(name.to_owned(), json!(count));
-        }
+    payload.extend(
+        usage
+            .counts()
+            .map(|(name, count)| (name.to_owned(), json!(count))),
+    );
+    if let Some(stop) = stop {
+        payload.insert("stop".to_owned(), json!(stop.as_str()));
     }
     Value::Object(payload)
 }
@@ -1667,12 +1688,17 @@ mod tests {
 
     #[test]
     fn usage_records_only_the_counts_the_provider_gave() {
-        let plain = usage_payload("m", Usage::new(Some(10), None));
+        let plain = usage_payload("m", Usage::new(Some(10), None), None);
         assert_eq!(plain, json!({"model": "m", "input_tokens": 10}));
-        let cached = usage_payload("m", Usage::new(Some(10), Some(2)).with_cache(Some(8), None));
+        let cached = Usage::new(Some(10), Some(2))
+            .with_cache(Some(8), None)
+            .with_reasoning(Some(1));
         assert_eq!(
-            cached,
-            json!({"model": "m", "input_tokens": 10, "output_tokens": 2, "cache_read_tokens": 8})
+            usage_payload("m", cached, Some(StopReason::Limit)),
+            json!({
+                "model": "m", "input_tokens": 10, "output_tokens": 2, "cache_read_tokens": 8,
+                "reasoning_tokens": 1, "stop": "limit"
+            })
         );
     }
 
@@ -1770,6 +1796,7 @@ mod tests {
                 Message::user().result(ToolResult::new("1", true, "text")),
             ],
             summary: Some(("they talked".into(), 2)),
+            stopped: None,
         };
 
         let view = session.for_model();

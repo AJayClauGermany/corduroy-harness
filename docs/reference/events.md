@@ -40,7 +40,7 @@ Source: the table in [`src/session.rs`](../../src/session.rs).
 | `tool/result` | environment | `{"id", "tool", "ok", "output"}`, plus `"content"` when the result is not one block of text |
 | `tool/wait` | host | `{"id", "tool", "signal"}`: the call's result comes with that signal |
 | `signal` | environment | `{"name", "payload"}`: what a waiting call waited for |
-| `usage` | agent | `{"model", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"}`, each count only if the provider gave it |
+| `usage` | agent | `{"model", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens", "stop"}`, each count only if the provider gave it; `stop` is why the model stopped (`finished`, `limit`: cut off at the most it may write, `tool_calls` or `refused`), if the provider said |
 | `compaction` | host | `{"summary", "keep_from", "by"}`: the messages before `keep_from` are summarised |
 | `run/restart` | host | `{"attempt"}`: an unfinished run was picked up again |
 | `run/stop` | user | `{}`: a person asked the run to stop |
@@ -77,7 +77,7 @@ These belong to no session.
 | `plugin/log` | the plugin | a line it wrote with the `log` capability |
 | `capability/denied` | host | `{"plugin", "capability", "resource"}`: a call outside a grant |
 | `state/set`, `state/remove` | the plugin | a write to its `state` store; the store is rebuilt from these |
-| `llm/request`, `llm/response` | the plugin | a completion through `llm` |
+| `llm/request`, `llm/response` | the plugin | a completion through `llm`: `{"model", "system", "messages"}`, then `{"model", "ok", "output"}` with the counts and `stop` of a `usage` event, as far as the provider gave them. The model is named `<provider>/<model>` |
 | `http/request`, `http/response` | the plugin | a request through `http`; secrets named, never shown; bodies left out |
 
 Add-ons may emit topics of their own through the `events` capability (`skills/changed`,

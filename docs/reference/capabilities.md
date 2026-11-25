@@ -34,7 +34,7 @@ through. See [Grants](agent-file.md#grants) for how to write one in the agent fi
 | `state` | a durable key-value store of its own (`get`, `set`, `remove`, `keys`), kept on the log | key | `"*"` |
 | `service` | call a service another plugin provides | service name | `"sessions"` |
 | `plugins` | load and unload add-ons as its children, granting no more than it holds | the loaded plugin's name | `"*"` |
-| `llm` | one completion from a model a provider [serves](agent-file.md#providersname), recorded as `llm/request` and `llm/response` | model name | `"claude-haiku-5-5"` |
+| `llm` | one completion from a model of a [provider](agent-file.md#providersname), recorded as `llm/request` and `llm/response` with what it cost | model, as `<provider>/<model>` | `"main/claude-haiku-5-5"`, `"main/*"` |
 | `secret` | an opaque handle to a named credential, never its value | secret name | `"github"` |
 | `http` | an HTTP request through the host's client, which writes credentials in and follows no redirects | host name | `"api.github.com"` |
 | `log-read` | read events of any session, by topic, in pages of up to 1000 | `<session>:<topic>` (session percent-encodes `%` and `:`; empty for harness events) | `["*:message", "*:session/start"]` |
@@ -91,13 +91,22 @@ answer it.
 
 ## Versioning
 
-The package is `corduroy:plugin@0.1.0`. Before 1.0 a host is promised to load only add-ons
-built for its own version of the world, and it does not check yet: an add-on built for
-another fails when it is instantiated.
+The package is `corduroy:plugin@0.1.0`. Before 1.0 a host loads only add-ons built for its
+own version of the world. It reads the version from what an add-on imports and refuses one
+built for another when it is loaded, naming both:
+
+```text
+not a valid plugin: it was built for the plugin world corduroy:plugin@0.2.0 and this host's
+is corduroy:plugin@0.1.0: before 1.0 a host loads only add-ons built for its own version.
+Build it again, against this host's world
+```
+
+A patch version (`0.1.1`) changes wording and no shape, so it loads.
 
 From 1.0, an add-on that is already built loads on every 1.x host. A minor version adds a
 capability, or a function to one where its grant already covers what the function does;
 neither breaks an existing add-on. Changing an export, a shared type or a function that
 exists is a new major version. A newer add-on on an older host loads only if everything it
-imports is there. See
+imports is there, and is otherwise refused at load with the version it was built for, the
+host's and what is missing. See
 [How the plugin world grows](../design.md#how-the-plugin-world-grows).

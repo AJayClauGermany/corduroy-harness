@@ -105,6 +105,7 @@ pub mod tools;
 pub use children::SESSIONS;
 pub use compact::CompactOperation;
 pub use corduroy_core as core;
+pub use corduroy_core::{ModelInfo, ModelReply, ModelRequest, StopReason, Usage};
 #[cfg(feature = "wasm")]
 pub use corduroy_wasm as wasm;
 pub use gates::GateOperation;
@@ -112,8 +113,7 @@ pub use harness::{Harness, HarnessError, OPERATIONS, Operations, Outcome, Status
 pub use loops::{DEFAULT_LOOP, LOOPS, Loop, Loops, Run, StandardLoop, Step};
 pub use operation::{Next, Operation};
 pub use provider::{
-    DEFAULT_PROVIDER, ModelReply, ModelRequest, PROVIDERS, Provider, ProviderError, ProviderPlugin,
-    Providers, Usage, provider,
+    DEFAULT_PROVIDER, PROVIDERS, Provider, ProviderError, ProviderPlugin, Providers, provider,
 };
 pub use session::{
     Answer, Ask, COMPACTION, Effect, End, Journal, MAIN, PROCESS_START, ProcessInfo, Removal,

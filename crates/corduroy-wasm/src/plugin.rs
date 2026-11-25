@@ -19,6 +19,7 @@ mod bindings;
 mod host;
 mod instance;
 mod paths;
+mod world;
 
 use bindings::corduroy::plugin::{
     clock, events, fs_read, fs_write, http, kernel, llm, log, log_read, plugins, random, secret,
@@ -26,8 +27,9 @@ use bindings::corduroy::plugin::{
 };
 use host::{HostState, Lent, Loader};
 use instance::{Blueprint, Instance};
+use world::Admits;
 
-/// The package every host interface belongs to.
+/// The package every host interface belongs to, as an import names it.
 const PACKAGE: &str = "corduroy:plugin/";
 
 /// The plugin world this host is built against, as `wit/corduroy.wit` names its package: a
@@ -90,21 +92,32 @@ impl WasmPlugin {
         component: Component,
         hash: String,
     ) -> Result<Self, WasmError> {
+        // What the component imports: the capabilities it needs, the interfaces this host
+        // does not have, and the version of the world it was built against.
         let mut requires = Vec::new();
+        let mut unknown = Vec::new();
+        let mut built = None;
         for (import, _) in component.component_type().imports(runtime.engine()) {
-            match capability_of(import) {
-                Some("types") => {}
-                Some(capability) if CAPABILITIES.contains(&capability) => {
-                    requires.push(capability.to_owned());
-                }
-                _ => {
-                    return Err(WasmError::Invalid(format!(
-                        "it imports `{import}`, which no capability provides"
-                    )));
-                }
+            let Some((interface, version)) = world::import(import) else {
+                return Err(WasmError::Invalid(format!(
+                    "it imports `{import}`, which no capability provides"
+                )));
+            };
+            built = built.max(version);
+            if CAPABILITIES.contains(&interface) {
+                requires.push(interface.to_owned());
+            } else if interface != "types" {
+                unknown.push(interface.to_owned());
             }
         }
-        Ok(Self {
+        // Before anything is instantiated, and in the host's own words: an add-on built for
+        // another world would otherwise fail when it is started, with the engine's error.
+        let admits = built.map_or(Admits::Yes, |built| world::admits(world::HOST, built));
+        let built = built.unwrap_or(world::HOST);
+        if let Some(refused) = world::refusal(admits, built, unknown.first().map(String::as_str)) {
+            return Err(WasmError::Invalid(refused));
+        }
+        let plugin = Self {
             runtime,
             name,
             component,
@@ -112,7 +125,15 @@ impl WasmPlugin {
             grants: Grants::none(),
             config: "{}".to_owned(),
             hash,
-        })
+        };
+        // Built for a later version of this major: it loads only if each function it
+        // imports is here too, which the engine can say without instantiating anything.
+        if admits == Admits::IfComplete {
+            plugin
+                .complete()
+                .map_err(|missing| WasmError::Invalid(world::incomplete(built, &missing)))?;
+        }
+        Ok(plugin)
     }
 
     /// Use `name` for this plugin in events and diagnostics instead of its file name.
@@ -154,6 +175,16 @@ impl WasmPlugin {
     #[must_use]
     pub fn requires(&self) -> &[String] {
         &self.requires
+    }
+
+    /// Whether this host has every function the component imports. The engine says without
+    /// instantiating anything.
+    fn complete(&self) -> Result<(), String> {
+        let linker = self.linker().map_err(|error| error.to_string())?;
+        linker
+            .instantiate_pre(&self.component)
+            .map(drop)
+            .map_err(|error| format!("{error:#}"))
     }
 
     /// A linker holding the interfaces this plugin imports, and nothing else.
@@ -409,18 +440,6 @@ fn stored_state(events: &EventStream, name: &str) -> Result<BTreeMap<String, Str
         };
     }
     Ok(store)
-}
-
-/// The capability an import names, if it is one of the host's interfaces.
-///
-/// `corduroy:plugin/fs-read@0.1.0` names `fs-read`.
-fn capability_of(import: &str) -> Option<&str> {
-    let interface = import.strip_prefix(PACKAGE)?;
-    Some(
-        interface
-            .split_once('@')
-            .map_or(interface, |(name, _)| name),
-    )
 }
 
 fn link_error(error: &wasmtime::Error) -> PluginError {

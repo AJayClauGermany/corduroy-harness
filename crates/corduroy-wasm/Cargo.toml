@@ -27,3 +27,6 @@ serde_json = { workspace = true, features = ["std"] }
 corduroy-shell = { workspace = true }
 corduroy-test-support = { workspace = true }
 serde_json = { workspace = true, features = ["std"] }
+# Add-ons built against other versions of the world, made in the tests from its WIT.
+wit-component = { workspace = true, features = ["dummy-module"] }
+wit-parser = { workspace = true }

@@ -60,8 +60,10 @@ gate asking you first. If you switch `approval` to `auto`, `bash` is unconfined.
 
 - **A kernel is not a sandbox.** Granting an add-on `kernel = "shell"` gives it your shell.
   Which kernel an add-on may use *is* the security decision.
-- **The shell sees the command's environment.** That is where a provider's API key is, so
-  the model can print it with `bash`, and what it prints is in the log.
+- **The shell reads what you can read.** It starts from an empty environment, so a
+  provider's API key in the environment `corduroy` runs in is not there for `bash` to print
+  (a kernel gets a few plain variables such as `PATH` and `HOME`, and what its `env` and
+  `pass` keys list). A key kept in a file you can read is still within its reach.
 - **A workspace's `corduroy.toml` is used as soon as you run `corduroy` there.** It grants
   capabilities, names kernels and starts MCP servers. Read the file of a repository someone
   else wrote before you do.

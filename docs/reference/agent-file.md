@@ -46,7 +46,25 @@ is what `provider` refers to.
 | `max_tokens` | integer | The most one answer may take. Default: the model's own limit from oi-kit's catalogue, or 4096 for a model it does not know. |
 | `temperature` | float | Sampling temperature. Default: the model's own. |
 | `thinking` | string | `off`, `low`, `medium`, `high` or `max`, for a model that can think before it answers. |
-| `serve` | list of strings | Models of this provider that add-ons may ask through the `llm` capability. |
+
+A key the entry does not know is an error. Nothing here lists the models add-ons may ask:
+an add-on names a model as `<name>/<model>` (this entry's name, then the provider's own name
+for the model), and its [`llm` grant](capabilities.md) says which it may ask.
+
+### `[providers.<name>.models.<model>]`
+
+What the file states or corrects about one model of the provider, by the provider's name for
+it. A model describes itself as far as its provider knows (oi-kit's catalogue, for the hosted
+ones); a model served on this machine usually reports nothing, so this is where to say what
+it holds. Every key is optional, and what is left out stays as the provider reports it.
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `context_tokens` | integer | How many tokens the model holds at once. [`compact`](shipped-add-ons.md#compact) starts from three quarters of it. |
+| `output_tokens` | integer | The most it may write in one answer. |
+| `takes` | list of strings | The kinds of content it takes: `text`, `image`, `audio`, `video`, `pdf`, or another kind by name. A list given here replaces the provider's whole. |
+| `returns` | list of strings | The kinds of content it returns, named the same way. |
+| `tools` | boolean | Whether it can be offered tools. |
 
 ## `[kernels.<name>]`
 
@@ -58,6 +76,16 @@ name is what a `kernel` grant and a plugin's configuration refer to.
 | `kind` | string | `shell` (a persistent POSIX shell) or `powershell`, or a kernel kind a command of your own adds. `<kind>` builds the extension kind `<kind>-kernel`. |
 | `dir` | string | Where it starts. Default `{workspace}`. |
 | `program` | string | The shell to run. `shell`: `sh` by default, any POSIX shell such as `bash`. `powershell`: `powershell` on Windows, `pwsh` elsewhere. |
+| `env` | table | Environment variables to set for the shell and for what the kernel starts, such as `env = { CARGO_TERM_COLOR = "never" }`. |
+| `pass` | list of strings | Variables of your own environment to hand through by name, such as `pass = ["CARGO_HOME", "HTTPS_PROXY"]`. One that is not set is left out. |
+
+**The environment.** A kernel's shell, and an MCP server it starts, begin from an empty
+environment and not from the one `corduroy` runs in, which is where a provider's API key
+is. They are given the plain variables a process needs to run (`PATH`, `HOME`, `USER`,
+`LANG`, `TZ`, `TMPDIR`, `TERM` and, on Windows, the system's own such as `SystemRoot`), each
+as you have it, and beyond those only what `env` sets and `pass` names. Whatever is given
+this way is in the open: a command can print it, and what it prints is in the log. So
+`pass` a credential only when a command needs the value itself.
 
 A kernel is not a sandbox: a shell kernel can do whatever the user running `corduroy` can.
 Which kernel an add-on may use is the security decision. See
@@ -115,12 +143,15 @@ after every native plugin above.
 | `grants` | table | none | Each capability it is granted, with its scope (below). |
 | `enabled` | boolean | `true` | `false` keeps the entry without loading it. |
 
-**The plugin path.** A relative `path` is looked for, in order, in the agent file's directory,
-each directory in `CORDUROY_PLUGIN_PATH`, the `plugins` directory beside the `corduroy`
-program (symbolic links followed; where a [ready-made build](../how-to/install-a-build.md)
-keeps its add-ons), and the `plugins/target` directories of the source tree the command was
-built from (where `cargo plugins` and `scripts/guests.sh` put the add-ons). That is why the
-default agent can say `path = "pi_tools.wasm"`.
+**The plugin path.** A relative `path` is looked for, in order, in each directory in
+`CORDUROY_PLUGIN_PATH`, the `plugins` directory beside the `corduroy` program (symbolic links
+followed; where a [ready-made build](../how-to/install-a-build.md) keeps its add-ons), the
+`plugins/target` directories of the source tree the command was built from (where
+`cargo plugins` and `scripts/guests.sh` put the add-ons), and last the agent file's
+directory. That is why the default agent can say `path = "pi_tools.wasm"`. The add-ons that
+ship with the command come before anything beside the agent file, so a repository's own
+`approval.wasm` never stands in for the shipped one; give an add-on of your own another file
+name, or a path from `{workspace}`.
 
 ### Grants
 
@@ -157,7 +188,6 @@ max_turns = 50
 
 [providers.main]
 kind = "anthropic"
-serve = ["claude-sonnet-5-5"]
 thinking = "medium"
 
 [kernels.shell]

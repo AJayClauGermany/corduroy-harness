@@ -36,7 +36,7 @@ fs-read = ["{workspace}/docs", "{workspace}/docs/*"]   # a directory and everyth
 fs-write = ["{workspace}/docs/*"]                      # files below it, not the directory itself
 kernel = "shell"                                       # one kernel, by name
 http = ["api.github.com", "uploads.github.com"]        # hosts
-llm = "claude-haiku-5-5"                               # a model the provider serves
+llm = "main/claude-haiku-5-5"                          # a model, as <provider>/<model>
 state = "*"                                            # all of its own keys
 log = ["warn", "error"]                                # only some levels
 ```

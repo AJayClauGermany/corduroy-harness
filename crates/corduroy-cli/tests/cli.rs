@@ -120,12 +120,23 @@ config = {{ mode = "smart" }}
 
 /// Run `corduroy` in `workspace` with `args`, typing `typed` at it.
 fn corduroy(workspace: &Path, args: &[&str], typed: &str) -> std::io::Result<Output> {
+    corduroy_with(workspace, args, typed, &[])
+}
+
+/// The same, with `env` added to the command's environment.
+fn corduroy_with(
+    workspace: &Path,
+    args: &[&str],
+    typed: &str,
+    env: &[(&str, &str)],
+) -> std::io::Result<Output> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_corduroy"))
         .arg("--workspace")
         .arg(workspace)
         .args(args)
         .env_remove("ANTHROPIC_API_KEY")
         .env_remove("OPENAI_API_KEY")
+        .envs(env.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -536,4 +547,50 @@ fn a_spare_provider_without_its_key_does_not_stop_the_agent() {
     );
     assert!(report.contains("CORDUROY_TEST_UNSET_KEY"), "{report}");
     assert!(report.contains("tool      read"), "{report}");
+}
+
+/// The second of the six guarantees, as far as it is built: the shell holds no variable of
+/// the command's own environment, where the provider's key is, unless the agent file says.
+#[test]
+fn the_shell_sees_the_variables_the_agent_file_lists_and_not_the_providers_key() {
+    let workspace = scratch("cli-shell-env");
+    let plugins = plugin("pi-tools").parent().unwrap().to_owned();
+    let shown = "echo \"key=[$FAKE_MODEL_KEY] set=[$GREETING] passed=[$PASSED] not=[$NOT_PASSED]\"";
+    let (address, _seen) = model(vec![
+        tool_call("bash", &json!({"command": shown})),
+        answer("Looked."),
+    ])
+    .unwrap();
+    let agent = agent_file(address, &plugins)
+        .replace(
+            "streaming = false\n",
+            "streaming = false\napi_key_env = \"FAKE_MODEL_KEY\"\n",
+        )
+        .replace(
+            "kind = \"shell\"\n",
+            "kind = \"shell\"\nenv = { GREETING = \"hello\" }\npass = [\"PASSED\"]\n",
+        );
+    fs::write(workspace.join("corduroy.toml"), agent).unwrap();
+    let env = [
+        ("FAKE_MODEL_KEY", "s3cret-key"),
+        ("PASSED", "through"),
+        ("NOT_PASSED", "kept"),
+    ];
+
+    // `y` answers the approval gate, which asks before a command runs.
+    let output = corduroy_with(&workspace, &["run", "look"], "y\n", &env).unwrap();
+    let stdout = text(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{stdout}\n{}",
+        text(&output.stderr)
+    );
+
+    let log = corduroy_with(&workspace, &["log"], "", &env).unwrap();
+    let log = text(&log.stdout);
+    assert!(
+        log.contains("key=[] set=[hello] passed=[through] not=[]"),
+        "{log}\n{stdout}"
+    );
+    assert!(!log.contains("s3cret-key"), "{log}");
 }

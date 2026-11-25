@@ -314,7 +314,7 @@ own beyond what these give it.
 | `state` | a durable key-value store of the plugin's own | key |
 | `service` | call a service another plugin provides | service name |
 | `plugins` | load and unload WebAssembly plugins as its children, granting no more than it holds | the loaded plugin's name |
-| `llm` | one completion from a model a provider serves, recorded as `llm/request` and `llm/response` | model name |
+| `llm` | one completion from a model a provider serves, recorded as `llm/request` and `llm/response` with what it cost | model, as `<provider>/<model>` |
 | `secret` | an opaque handle to a named credential, never its value | secret name |
 | `http` | an HTTP request through the client registered for its scheme, with credentials written in by the host | host name |
 | `log-read` | events of any session, by topic, in pages | `<session>:<topic>`, the session with `%` and `:` percent-encoded (empty for harness events) |
@@ -381,9 +381,9 @@ Everything else is a plugin, and a plugin may itself offer primitives to other p
 | Capabilities | sixteen | The mechanism is settled; the set grows (below). |
 | Kernels | built | The trait and registry, and `Kernel::spawn` for long-lived processes with pipes (MCP servers). `ShellKernel` is an implementation, not a primitive, and lives in `corduroy-shell`. |
 | Conversation projection | built | Messages, and the `compaction` event: the messages before `keep_from` stay in the log and the conversation but are hidden from the model, which sees the summary in their place. The harness cuts only before the current turn; when, and the summary, come from the plugin providing the `compaction` service, asked by a loop step (`CompactOperation`). |
-| Model access | built | The loop asks the provider registered under a name in `Providers`, on every request, so a plugin supplies the model and unloading it takes the model away. `Harness::new` registers its argument there for convenience. For plugins, the core's `Models` registry: one completion, synchronously, by model name; a `provider` plugin can serve its models there. *Planned:* one request and reply for the loop and plugins, in the core, and a model that describes itself ([What the core is made of](#what-the-core-is-made-of)). |
+| Model access | built | The loop asks the provider registered under a name in `Providers`, on every request, so a plugin supplies the model and unloading it takes the model away. `Harness::new` registers its argument there for convenience. For plugins, the core's `Models` registry: one completion, synchronously, of a model named `<provider>/<model>`; a `provider` plugin serves its provider's models there. The loop and plugins fill in one request and read one reply, the core's (`ModelRequest`, `ModelReply`, with `Usage` and `StopReason`), and a model describes itself (`ModelInfo`). *Planned:* the general typed part, a cost on the usage, and listing models through `llm` ([What the core is made of](#what-the-core-is-made-of)). |
 | Secrets and outbound requests | built | `Secrets` and `HttpClients` registries. The core checks and records; native plugins hold the values and send the requests, so an HTTP client is a plugin like a kernel is. |
-| Versioning | WIT package version, log schema version | Built: a schema version in each log's header (2, which added the time; 1 is still read), and the rule for the world in [What is stable](#what-is-stable). Still to do: a version on each plugin's stored state, and the check of the world's version when an add-on is loaded ([How the plugin world grows](#how-the-plugin-world-grows)). |
+| Versioning | WIT package version, log schema version | Built: a schema version in each log's header (2, which added the time; 1 is still read), and the rule for the world in [What is stable](#what-is-stable). and the check of the world's version when an add-on is loaded ([How the plugin world grows](#how-the-plugin-world-grows)). Still to do: a version on each plugin's stored state. |
 
 **Child sessions, a service rather than a capability (built).** The plan was a `session`
 capability to start a child session and await it. It became a service the harness
@@ -399,8 +399,9 @@ outcome, with the child's session on the ask.
 
 Four things about the core's own shapes are decided here: what a model call is, what a model
 says about itself, that whatever a plugin contributes is called and waited for, and that the
-kinds of contribution are closed. All of it is *planned*: the code still has the shapes the
-table above describes, and [Order of work](#order-of-work) lists what changes.
+kinds of contribution are closed. The model call is built where it says so below: the one
+request and reply, models named by their provider, and a model's description. The rest is
+*planned*, and [Order of work](#order-of-work) lists what changes.
 
 **A plugin asks a model as a function; anything that acts is a session.** Code uses a model
 in one of two ways. As a function: content goes in and an answer comes back (summarise this,
@@ -430,24 +431,36 @@ request and reads the same reply:
 | The request | The model, the system prompt, the conversation as `Message`s, and the tools offered. Only the loop offers tools. It can grow. |
 | The reply | A `Message`, what the request cost, and why the model stopped. It can grow. |
 
-These take the place of the core's `Turn`, `Completion` and bare `String`, and of the
-harness's `ModelRequest`, `ModelReply` and `Usage`, which move into the core. What is added
+Built: `corduroy_core::model` has `ModelRequest`, `ModelReply`, `Usage` and `StopReason`.
+They took the place of the core's `Turn`, `Completion` and bare `String`, and of the
+harness's `ModelRequest`, `ModelReply` and `Usage`, which moved into the core. What is added
 later (a limit on tokens, a new kind of part) is added once and reaches the loop and plugins
 alike. Two ways of asking stay, over the one description: the loop's `Provider`, which is
 asynchronous and lives in the harness, and the core's `Model`, which is called and waited
-for and is what `llm` reaches. Going from one to the other loses nothing, where today it
-keeps only the text.
+for and is what `llm` reaches. Going from one to the other loses nothing, where it used to
+keep only the text.
 
-- *A plugin's call is recorded with its cost.* `llm/response` gains the usage and the reason
-  the model stopped, so a review of the log shows what the agent's own tools spent, and
-  whether code it wrote did make the tokens go further.
-- *A plugin's request carries what a message can*, images included.
+- *A plugin's call is recorded with its cost* (built). `llm/response` has the usage and the
+  reason the model stopped, so a review of the log shows what the agent's own tools spent,
+  and whether code it wrote did make the tokens go further. The loop's `usage` event has the
+  reason too: `finished`, `limit` (cut off at the most it may write), `tool_calls` or
+  `refused`, when the provider says. The reason is the record's, and what to do about it is
+  policy, as a gate's answer is: a session says how the model's last answer stopped
+  (`Session::stopped`), so a step of the loop can act on it, such as asking the model to go
+  on after a cut-off answer; and the terminal tells the person when an answer was cut off or
+  declined, and what they can do. The loop itself does nothing different for either: a
+  reply that asks for tools goes on, and any other ends the run as before. Which reasons
+  there are in the end is still open (G10).
+- *A plugin's request carries what a message can*, images included. The core's request
+  does; an add-on's is still text until the next point is settled.
 - *How the request crosses the WebAssembly boundary* (a typed record, or the JSON a
-  `message` event holds) is still open (E8).
+  `message` event holds) is still open (E8). Until it is, the `llm` interface is as it was
+  (text in, text out) and the host fills in the core's request from it.
 
-**The grant is the one list of models.** `llm` is scoped by model, and that is the only
-thing that says which models an add-on may ask. The `serve` key of a provider entry, a
-second list that had to be kept in step with the grants, goes. A plugin names a model as
+**The grant is the one list of models** (built). `llm` is scoped by model, and that is the
+only thing that says which models an add-on may ask. The `serve` key of a provider entry, a
+second list that had to be kept in step with the grants, is gone: an entry of `Models` is a
+provider, registered once under its name and asked for any of its models. A plugin names a model as
 `<provider>/<model>`: the provider's name in the agent file, then the provider's own name
 for the model, divided at the first `/`. Grants are written the same way, with the allow and
 deny patterns every scope has, so "only these" and "all but this one" are both a grant. Two
@@ -463,19 +476,25 @@ kind of model; `Part` is already marked for growth. A vector database or a searc
 not a kind of thing in the core: it is a service an extension or an add-on provides, over an
 embedding model if it wants one.
 
-**A model describes itself.** The core has a small description that can grow, in which
-every field may be unknown: what the model takes (text, images, tools), what it returns,
-how much context it holds, how much it may write. `Model` and `Provider` each gain a method
-with a default that knows nothing. A provider fills in what it knows, the agent file states
-or corrects it for a model, and the loop and plugins read it in one place. "Unknown" is an
-answer every reader has to cope with, since a model served on this machine often reports
-nothing. `compact` then starts from a share of the model's own context, and its fixed
-number becomes an override; one number for every session cannot be right once sessions
+**A model describes itself** (built). The core has a small description that can grow
+(`ModelInfo`), in which every field may be unknown: what the model takes and returns,
+whether it can be offered tools, how much context it holds, how much it may write. What it
+takes and returns are lists of kinds of content by name (`text`, `image`, `audio`, `video`,
+`pdf`), not a field for each, so a new kind of input, or a model that returns a vector,
+needs no new field; the core names the common kinds and lists none as all there are. `Model` and `Provider` each have a method with a default that knows
+nothing (`describe`). A provider fills in what it knows (`corduroy-providers` from oi-kit's
+catalogue), the agent file states or corrects it for a model
+(`[providers.<name>.models.<model>]`), and the loop and plugins read it in one place.
+"Unknown" is an answer every reader has to cope with, since a model served on this machine
+often reports nothing. `compact` starts from a share of the model's own context, three
+quarters, which the harness passes on with each question to the `compaction` service, and
+its fixed number is an override; one number for every session cannot be right once sessions
 differ in their model.
 
-- *The agent can see its models, if it is given the means.* Through `llm`, a plugin lists
-  the models its grant reaches, with their descriptions, as `tools.list` leaves out what a
-  scope does not reach. The agent sees them only when an add-on that offers this is loaded.
+- *The agent can see its models, if it is given the means* (planned). Through `llm`, a
+  plugin lists the models its grant reaches, with their descriptions, as `tools.list` leaves
+  out what a scope does not reach. The agent sees them only when an add-on that offers this
+  is loaded. It waits on the form of E8, and on a provider saying which models it has.
 - *A session keeps its model.* Choosing is for the next session or a child, not for the run
   under way. What else `session/start` carries is in
   [What an extension can reach](#what-an-extension-can-reach).
@@ -484,7 +503,8 @@ differ in their model.
   (`session/start`, decided there and not yet built).
 - *Cost is reported for each call, not described.* It comes with the usage, as far as the
   provider says, and goes into the log: the tokens read, the tokens written, those spent on
-  reasoning, and what the call cost if the provider states it. A figure that is absent means
+  reasoning (built, for the loop's calls and a plugin's), and what the call cost if the
+  provider states it (planned: the unit it is written in is still open, G17). A figure that is absent means
   the provider did not say; zero means it said the call was free, as a model on this
   machine may. A change of price needs nothing: each call records what it cost when it was
   made.
@@ -701,9 +721,9 @@ runtime's notification, and `tests/executor.rs` drives a run, a tool call and a 
 hand-written `block_on`. The `tokio` feature (on by default) only moves each tool call to
 tokio's blocking pool when the loop runs on a tokio runtime, so a long tool does not hold up
 the runtime's other tasks; anywhere else a tool runs where the loop runs, as it must on a
-device with one thread. Offering a provider's models to plugins (`ProviderPlugin::serving`)
-bridges a synchronous call to an asynchronous provider with a thread and a runtime, so it
-needs `tokio`. CI lints the loop for `thumbv7em-none-eabihf` as it does the core.
+device with one thread. Offering a provider's models to plugins bridges a synchronous call
+to an asynchronous provider with a thread and a runtime, so the `provider` plugin does it
+only with `tokio`. CI lints the loop for `thumbv7em-none-eabihf` as it does the core.
 
 **The standard extensions** (`corduroy-std`) are what the shipped command carries over the
 core and the loop, for an ordinary computer running macOS, Windows or Linux: tokio, the JSON
@@ -1106,10 +1126,8 @@ Two rules came with the capabilities that reach outside:
 
 Four things about the plugin world after 1.0 are decided here: what is promised to an add-on
 that is already built, how the capabilities grow, that the exports do not, and which
-versions a host accepts. All of it is *planned*. Today the host drops the version when it
-reads a component's imports, so an add-on built for another world loads and then fails when
-it is instantiated, with the engine's own error; [Order of work](#order-of-work) lists what
-changes.
+versions a host accepts. The check of versions at load is built; the rest is *planned*, and
+[Order of work](#order-of-work) lists what changes.
 
 **A built add-on loads on every 1.x host.** The promise is about the built thing, the
 `.wasm` file, and not only its source. An add-on built against the world of 1.0 loads on
@@ -1219,14 +1237,16 @@ a semantic version does:
 | Anything else: an export, a shared type, a function that exists, something removed | major |
 
 The host checks when it loads an add-on, before anything is instantiated, and says what it
-found in its own words:
+found in its own words (built: `corduroy-wasm` reads the version from the component's
+imports; it used to drop it, so an add-on built for another world loaded and then failed
+when it was instantiated, with the engine's own error):
 
 | Add-on built for | On a 1.x host |
 | --- | --- |
 | An earlier 1.x | Loads, always. |
 | A later 1.x | Loads if every interface and function it imports is there. Otherwise it is refused, with a message naming the version it was built for, the host's, and what is missing. |
 | Another major version | Refused, naming both versions. |
-| Any version, before 1.0 | The host promises to load its own version only. |
+| Any version, before 1.0 | The host promises to load its own version only. It refuses another minor version, as it will another major one, naming both. |
 
 - *The check is on what the add-on imports, not on the number.* An add-on built against 1.3
   that uses only what 1.0 had loads on a 1.1 host. A Rust add-on imports only the functions
@@ -1237,7 +1257,12 @@ found in its own words:
 - *The engine already matches versions this way.* wasmtime's linker resolves an import of
   `@1.0` against a definition of `@1.2`, and the other way round (checked in the pinned
   51.0.0). The host's own check is there for the message, and so that the rule is ours and
-  not a property of one engine.
+  not a property of one engine. One part of the message is still the engine's: an
+  interface this host lacks is named by the host, and a function it lacks inside an
+  interface it has is named in the engine's words, after the two versions.
+- *An add-on that imports nothing says nothing.* The version is read from the imports, so
+  an add-on that imports no capability is loaded whatever it was built for. Whether each
+  guest language can be made to say it some other way is still to check.
 - *Nothing is promised across a major version, and nothing is ruled out.* A 1.x host
   accepts 1.x. Whether a 2.x host also loads add-ons built for 1.x, by carrying the old
   world beside its own (the engine can link both, and the host would then implement and
@@ -1662,9 +1687,11 @@ Which of these a person gets without setting anything up is decided in the next 
 ## What is safe by default
 
 Three things are decided here: what 1.0 promises about safety, what a kernel is given of the
-machine it runs on, and what a workspace may configure. All of it is *planned*. The code is
-as [Sandboxing](#sandboxing) above and the [security model](explanation/security-model.md)
-describe it, and [Order of work](#order-of-work) lists what changes.
+machine it runs on, and what a workspace may configure. Two parts are built and say so:
+every kernel starts from an empty environment, and a shipped add-on's name resolves to the
+shipped one. The rest is *planned*: the code is as [Sandboxing](#sandboxing) above and the
+[security model](explanation/security-model.md) describe it, and
+[Order of work](#order-of-work) lists what changes.
 
 **The promise.** What the agent can reach is what you allowed, whatever the model is told
 and whatever a workspace holds. Nothing it builds or loads gives it more.
@@ -1735,8 +1762,14 @@ and a refused file as far as the operating system says which one it was, which t
 to find out.
 
 **Every kernel starts from an empty environment**, the plain shell included, since that
-needs nothing from the operating system. Today the shell starts with the command's own
-environment, which is where the provider's key is.
+needs nothing from the operating system (built). The shell used to start with the command's
+own environment, which is where the provider's key is. `ShellKernel` now gives its shell,
+and each process it starts, the plain variables a process needs (`corduroy_shell::PLAIN`:
+`PATH`, `HOME` and their like, each as the command has it) and beyond those only what the
+kernel's entry sets (`env`) or hands through by name (`pass`), which is the *passed through*
+state below. A provider's key and an MCP server's token are still read from the command's
+environment by the extension that uses them, until every credential comes through
+`Secrets`.
 
 **The shell reaches only the hosts listed for it.** The list is written as an add-on's
 `http` grant is. The operating system offers a network that is on or off, so the kernel
@@ -1815,8 +1848,9 @@ agent on this machine.
 - *Declined,* the person's own agent runs in its place. *With nobody there to ask,* the run
   stops and says why.
 - *A file named with `--agent`* counts as accepted: naming it is the person's act.
-- *A shipped add-on's name resolves to the shipped one.* Today the agent file's directory is
-  searched first, so a workspace could stand in its own `approval.wasm`.
+- *A shipped add-on's name resolves to the shipped one* (built). The agent file's directory
+  is searched last, after the add-ons that ship with the command, so a workspace cannot
+  stand in its own `approval.wasm`.
 
 **One file is one whole agent.** There is no merging in 1.0, only a fallback: the file named
 with `--agent`, else the workspace's accepted file, else the person's own, else the built-in
@@ -1842,11 +1876,11 @@ model](explanation/security-model.md) becomes the list of them, with the test fo
 | | Guarantee | Today |
 | --- | --- | --- |
 | 1 | An add-on does only what its grants allow. | Built. |
-| 2 | The shell reaches only the files, hosts and variables listed for it. A shell that cannot be confined does not start unless the person chose the plain one. | Not built. |
+| 2 | The shell reaches only the files, hosts and variables listed for it. A shell that cannot be confined does not start unless the person chose the plain one. | Built for variables: every kernel starts from an empty environment. Not built: files and hosts, which wait on the confined kernel. |
 | 3 | What enforces is out of the agent's reach: the grants, the log, the command and its add-ons, the person's answers. | For add-ons, protected paths cover the agent file, the log, the command and the cache. Not built: the shipped add-ons, the answers, and anything for a shell. |
 | 4 | Whatever the agent builds or loads holds at most what its loader holds, and a person approved the load. | No amplification and the gate are built. A person cannot answer yet: an ask at `plugin/load` is a denial (C15). Not built: a session with grants of its own, which this guarantee is read as covering ([What an extension can reach](#what-an-extension-can-reach)). |
 | 5 | A workspace changes nothing about what the agent may do until the person accepts its file. | Not built. |
-| 6 | No credential's value reaches an add-on. A shell holds a value only where an agent file the person wrote or accepted says so, and a masked one goes only to the hosts its secret names. | Built for add-ons, not for a shell. |
+| 6 | No credential's value reaches an add-on. A shell holds a value only where an agent file the person wrote or accepted says so, and a masked one goes only to the hosts its secret names. | Built for add-ons. For a shell, a value in the command's environment reaches it only through `pass`; masking is not built, and a credential in a file the shell can read is still within reach. |
 
 **What is not promised.**
 
@@ -1988,29 +2022,31 @@ the step it waits on is done.
     the folder store, as the second store the freeze waits on; then the live channel, a
     streaming method on `Provider`, output from a running tool and checkpoints, tried
     against a real provider before their shapes are fixed.
-13. What [the core is made of](#what-the-core-is-made-of). *Decided, none of it built:* the
-    one request and reply in the core, with the general typed part, usage that counts
-    reasoning and carries a cost, and the reason a model stopped; `Model` and the `llm`
-    interface taking them, with a plugin's calls recording their usage; models named
-    `<provider>/<model>` and the `serve` key gone; a model's description, read by the loop
-    and by `compact`; the form of a question a tool puts to the person; a way for an
-    extension to raise a signal and to start a session. Then the connected harness, the
-    proof that calling and waiting is enough.
-14. What is [safe by default](#what-is-safe-by-default). *Decided, none of it built:* a
-    secret that names the hosts it may go to, in the core before the freeze; every kernel
-    starting from an empty environment, and every credential through `Secrets`; the
+13. What [the core is made of](#what-the-core-is-made-of). *Done:* the one request and
+    reply in the core, with usage that counts reasoning and the reason a model stopped;
+    `Model` taking them, and a plugin's calls recording their usage and that reason; models
+    named `<provider>/<model>` and the `serve` key gone; a model's description, from the
+    provider and the agent file, read by the loop and by `compact`. *Still to do:* the
+    general typed part; a cost on the usage, once its unit is decided; the `llm` interface
+    carrying the whole request and reply and listing the models a grant reaches, once the
+    form is (E8); the form of a question a tool puts to the person; a way for an extension
+    to raise a signal and to start a session. Then the connected harness, the proof that
+    calling and waiting is enough.
+14. What is [safe by default](#what-is-safe-by-default). *Done:* every kernel starting from
+    an empty environment. *Decided, not built:* a secret that names the hosts it may go to,
+    in the core before the freeze; every credential through `Secrets`; the
     confined kernel for Linux and macOS, given its files, hosts and variables as an add-on
     is granted them, with its filter for hosts and masked credentials in the shell; the
     default agent on that kernel, and a shell that cannot be confined not starting; the
     account-level place, holding the person's own agent file, their answers, the log and
     the compiled-code cache, and a name for it in the agent file's strings; a workspace's
-    agent file accepted by its hash, the fallback order of agent files, and a shipped
-    add-on's name resolved before anything a workspace holds; a test named for each of the
-    six guarantees.
-15. How [the plugin world grows](#how-the-plugin-world-grows). *Decided, none of it built:*
-    a check of the world's version when an add-on is loaded, with a message naming the
-    version it was built for, the host's and what is missing; each capability's sentence
-    read again before the freeze; the interfaces already known to be wanted (progress from
+    agent file accepted by its hash, and the fallback order of agent files; a test named for
+    each of the six guarantees. *Done:* a shipped add-on's name resolved before anything a
+    workspace holds.
+15. How [the plugin world grows](#how-the-plugin-world-grows). *Done:* a check of the
+    world's version when an add-on is loaded, with a message naming the version it was
+    built for, the host's and what is missing. *Decided, not built:* each capability's
+    sentence read again before the freeze; the interfaces already known to be wanted (progress from
     a running tool, a tool call that waits for a signal) in the 1.0 world; the cases and
     open tails the shared types need, since none can be added within 1.x; a prefix for the
     service names the harness defines; a reference page for the script host's `host`

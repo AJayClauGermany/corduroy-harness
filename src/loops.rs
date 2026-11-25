@@ -60,9 +60,9 @@ use corduroy_core::{Registry, Role, ToolCall};
 
 use crate::harness::{Harness, HarnessError};
 use crate::operation::Operation;
-use crate::provider::ModelRequest;
 use crate::session::{End, Journal, Session};
 use crate::stop::Stop;
+use corduroy_core::ModelRequest;
 
 /// Name of the service under which the harness provides the [`Loops`] registry.
 pub const LOOPS: &str = "loops";

@@ -6,9 +6,14 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use corduroy_harness::core::{Content, Message, Part, Role, ToolCall, ToolSpec};
-use corduroy_harness::{ModelReply, ModelRequest, Provider, ProviderError, Usage};
+use corduroy_harness::core::{
+    AUDIO, Content, IMAGE, Message, PDF, Part, Role, TEXT, ToolCall, ToolSpec, VIDEO,
+};
+use corduroy_harness::{
+    ModelInfo, ModelReply, ModelRequest, Provider, ProviderError, StopReason, Usage,
+};
 use oi_kit_provider_types::base::Provider as OiKitProvider;
+use oi_kit_provider_types::canonical::Modality;
 use oi_kit_provider_types::canonical::maybe_get_canonical_model;
 use oi_kit_provider_types::conversation::message::{
     Message as OiKitMessage, MessageContent, ToolRequest,
@@ -104,11 +109,66 @@ impl Provider for Adapted {
         if let Some(error) = message.error() {
             return Err(ProviderError::new(error.message.clone()));
         }
-        Ok(ModelReply::new(
-            from_oi_kit(&message),
-            usage_of(&usage.usage),
-        ))
+        let reply = ModelReply::new(from_oi_kit(&message), usage_of(&usage.usage));
+        Ok(match usage.finish_reasons.as_deref().and_then(stop_of) {
+            Some(stop) => reply.stopped(stop),
+            None => reply,
+        })
     }
+
+    fn describe(&self, model: &str) -> ModelInfo {
+        describe(&self.settings.provider, model)
+    }
+}
+
+/// What oi-kit's model catalog says about `model` of `provider`: nothing, for a model it
+/// does not list, as for one served on this machine.
+fn describe(provider: &str, model: &str) -> ModelInfo {
+    let Some(known) = maybe_get_canonical_model(provider, model) else {
+        return ModelInfo::unknown();
+    };
+    let tokens = |count: usize| u64::try_from(count).ok().filter(|&count| count > 0);
+    let mut info = ModelInfo::unknown().with_tools(known.tool_call);
+    info.context_tokens = tokens(known.limit.context);
+    info.output_tokens = known.limit.output.and_then(tokens);
+    // What the catalogue lists, in its own words for the kinds, which are ours too. A model
+    // it lists with no kinds at all says nothing about them.
+    let kinds = |listed: &[Modality]| {
+        (!listed.is_empty()).then(|| {
+            listed
+                .iter()
+                .map(|kind| kind_of(*kind).to_owned())
+                .collect()
+        })
+    };
+    info.takes = kinds(&known.modalities.input);
+    info.returns = kinds(&known.modalities.output);
+    info
+}
+
+/// The name of a kind of content oi-kit's catalogue lists.
+const fn kind_of(kind: Modality) -> &'static str {
+    match kind {
+        Modality::Text => TEXT,
+        Modality::Image => IMAGE,
+        Modality::Audio => AUDIO,
+        Modality::Video => VIDEO,
+        Modality::Pdf => PDF,
+    }
+}
+
+/// Why the model stopped, from the reasons a provider's API gave, each in that API's own
+/// words. The first one known decides; a word no API here uses says nothing.
+fn stop_of(reasons: &[String]) -> Option<StopReason> {
+    reasons
+        .iter()
+        .find_map(|reason| match reason.to_ascii_lowercase().as_str() {
+            "stop" | "end_turn" | "stop_sequence" | "completed" => Some(StopReason::Finished),
+            "length" | "max_tokens" | "max_output_tokens" | "incomplete" => Some(StopReason::Limit),
+            "tool_use" | "tool_calls" | "function_call" => Some(StopReason::ToolCalls),
+            "refusal" | "content_filter" | "safety" => Some(StopReason::Refused),
+            _ => None,
+        })
 }
 
 /// What oi-kit says a request cost, as the harness counts it.
@@ -336,6 +396,36 @@ mod tests {
         assert_eq!(counted.output_tokens, Some(20));
         assert_eq!(counted.cache_read_tokens, Some(80));
         assert_eq!(counted.cache_write_tokens, Some(10));
+    }
+
+    #[test]
+    fn a_known_model_describes_itself_and_an_unknown_one_says_nothing() {
+        let known = describe("anthropic", "claude-sonnet-4-5");
+        assert!(
+            known
+                .context_tokens
+                .is_some_and(|context| context >= 200_000)
+        );
+        assert!(known.output_tokens.is_some_and(|output| output > 4096));
+        assert_eq!(known.tools, Some(true));
+        assert_eq!(known.takes(IMAGE), Some(true));
+        assert_eq!(known.returns(TEXT), Some(true));
+        assert_eq!(known.returns(AUDIO), Some(false));
+
+        assert_eq!(describe("openai_compatible", "local"), ModelInfo::unknown());
+    }
+
+    #[test]
+    fn each_api_s_word_for_why_the_model_stopped_is_understood() {
+        let stop = |reason: &str| stop_of(&[reason.to_owned()]);
+        assert_eq!(stop("end_turn"), Some(StopReason::Finished));
+        assert_eq!(stop("STOP"), Some(StopReason::Finished));
+        assert_eq!(stop("length"), Some(StopReason::Limit));
+        assert_eq!(stop("MAX_TOKENS"), Some(StopReason::Limit));
+        assert_eq!(stop("tool_use"), Some(StopReason::ToolCalls));
+        assert_eq!(stop("content_filter"), Some(StopReason::Refused));
+        assert_eq!(stop("something new"), None);
+        assert_eq!(stop_of(&[]), None);
     }
 
     #[test]

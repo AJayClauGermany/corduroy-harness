@@ -57,7 +57,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use corduroy_harness::core::{FiberId, FiberState, Scope};
+use corduroy_harness::core::{FiberId, FiberState, ModelInfo, Scope};
 use corduroy_harness::wasm::{CAPABILITIES, WORLD, WasmRuntime};
 use corduroy_harness::{Harness, ProcessInfo, provider};
 use corduroy_providers::ProviderSpec;
@@ -121,13 +121,69 @@ pub struct ExtensionEntry {
 
 /// A model provider.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(try_from = "toml::Table")]
 pub struct ProviderEntry {
-    /// What to build and how to reach it.
-    #[serde(flatten)]
+    /// What to build and how to reach it: every key of the entry but `models`.
     pub spec: ProviderSpec,
-    /// Models of this provider plugins may ask through the `llm` capability.
+    /// What the file states or corrects about models of this provider, by the provider's
+    /// name for each. What a provider reports about a model stands where this says nothing.
+    pub models: BTreeMap<String, ModelEntry>,
+}
+
+impl TryFrom<toml::Table> for ProviderEntry {
+    type Error = toml::de::Error;
+
+    /// Taken apart by hand, not flattened, so that a key neither part knows is an error.
+    fn try_from(mut entry: toml::Table) -> Result<Self, Self::Error> {
+        if entry.contains_key("serve") {
+            return Err(serde::de::Error::custom(
+                "`serve` is not a key of a provider any more: an add-on's `llm` grant says \
+                 which models it may ask, each as `<provider>/<model>`",
+            ));
+        }
+        let models = entry
+            .remove("models")
+            .map(toml::Value::try_into)
+            .transpose()?
+            .unwrap_or_default();
+        let spec = toml::Value::Table(entry).try_into()?;
+        Ok(Self { spec, models })
+    }
+}
+
+/// What an agent file says about one model: any of what a model's description holds. A model
+/// served on this machine often reports nothing, so this is where its context is stated.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelEntry {
+    /// How many tokens the model holds at once.
     #[serde(default)]
-    pub serve: Vec<String>,
+    pub context_tokens: Option<u64>,
+    /// The most tokens it may write in one answer.
+    #[serde(default)]
+    pub output_tokens: Option<u64>,
+    /// The kinds of content it takes: `text`, `image`, `audio`, `video`, `pdf` or another.
+    #[serde(default)]
+    pub takes: Option<Vec<String>>,
+    /// The kinds of content it returns.
+    #[serde(default)]
+    pub returns: Option<Vec<String>>,
+    /// Whether it can be offered tools.
+    #[serde(default)]
+    pub tools: Option<bool>,
+}
+
+impl ModelEntry {
+    /// The entry as a model's description, unknown where the file says nothing.
+    fn info(&self) -> ModelInfo {
+        let mut info = ModelInfo::unknown();
+        info.context_tokens = self.context_tokens;
+        info.output_tokens = self.output_tokens;
+        info.takes.clone_from(&self.takes);
+        info.returns.clone_from(&self.returns);
+        info.tools = self.tools;
+        info
+    }
 }
 
 /// A kernel: an extension of the kind `<kind>-kernel`, such as `shell-kernel`.
@@ -186,7 +242,8 @@ pub struct McpEntry {
 pub struct PluginEntry {
     /// The name it is loaded under.
     pub name: String,
-    /// The component: absolute, relative to the agent file, or found on the plugin path.
+    /// The component: absolute, or found on the plugin path, which ends with the agent
+    /// file's directory.
     pub path: String,
     /// Its configuration, passed to `activate` as JSON.
     #[serde(default)]
@@ -345,15 +402,15 @@ fn default_for(anthropic: bool, openai: bool) -> String {
         (
             format!(
                 "\n# A second provider, so another vendor's model reviews what the main one \
-                 writes.\n[providers.reviewer]\nkind = \"{kind}\"\nserve = [\"{model}\"]\n"
+                 writes.\n[providers.reviewer]\nkind = \"{kind}\"\n"
             ),
-            model,
+            format!("reviewer/{model}"),
             "Another vendor's model reviews",
         )
     } else {
         (
             String::new(),
-            model,
+            format!("main/{model}"),
             "The same model, with fresh eyes, reviews",
         )
     };
@@ -365,7 +422,7 @@ fn default_for(anthropic: bool, openai: bool) -> String {
     DEFAULT
         .replace("{{reviewer}}", &reviewer)
         .replace("{{review_said}}", review_said)
-        .replace("{{review_model}}", review_model)
+        .replace("{{review_model}}", &review_model)
         .replace("{{kind}}", kind)
         .replace("{{model}}", model)
         .replace("{{shell}}", shell)
@@ -385,7 +442,6 @@ max_turns = 50
 
 [providers.main]
 kind = "{{kind}}"   # anthropic, openai, ollama, *-compatible, or a provider oi-kit knows
-serve = ["{{model}}"]   # models plugins may ask through the `llm` capability
 # max_tokens = 16000   # the most one answer may take; by default, the model's own limit
 # thinking = "medium"  # off, low, medium, high or max, for a model that can think
 {{reviewer}}
@@ -452,16 +508,17 @@ name = "recall"
 path = "recall.wasm"
 grants = { log-read = ["*:message", "*:session/start"] }
 
-# Files read and summarized by a model of its own.
+# Files read and summarized by a model of its own. An add-on names a model as
+# <provider>/<model>, and its llm grant says which models it may ask.
 [[plugins]]
 name = "summarize"
 path = "summarize.wasm"
-config = { model = "{{model}}" }
-grants = { fs-read = ["{workspace}", "{workspace}/*"], llm = "{{model}}" }
+config = { model = "main/{{model}}" }
+grants = { fs-read = ["{workspace}", "{workspace}/*"], llm = "main/{{model}}" }
 
 # {{review_said}} the changes in the workspace (git diff and new files) and says
 # what is wrong, for the agent to fix before it reports the work done. To have another model
-# review, serve it from a provider and name it here and in the llm grant.
+# review, name it here and in the llm grant, as <provider>/<model>.
 [[plugins]]
 name = "review"
 path = "review.wasm"
@@ -475,13 +532,14 @@ name = "subagents"
 path = "subagents.wasm"
 grants = { service = "sessions" }
 
-# Condenses the start of a long conversation into a summary once a request passes
-# max_tokens; the messages stay in the log.
+# Condenses the start of a long conversation into a summary once a request passes three
+# quarters of what the model holds (100000 tokens if the model does not say; set max_tokens
+# to choose). The messages stay in the log.
 [[plugins]]
 name = "compact"
 path = "compact.wasm"
-config = { model = "{{model}}", max_tokens = 100000 }
-grants = { llm = "{{model}}" }
+config = { model = "main/{{model}}" }
+grants = { llm = "main/{{model}}" }
 
 # Lets the model load more plugins from the plugin directory, never granting more than this
 # entry holds. Off by default.
@@ -703,10 +761,17 @@ fn providers(harness: &Harness, file: &AgentFile) -> Result<Vec<Unstarted>, Agen
     for (name, entry) in &file.providers {
         match corduroy_providers::build(name, &entry.spec) {
             Ok(built) => {
-                harness.plugin(provider(name.clone(), built).serving(entry.serve.clone()));
+                let described = entry
+                    .models
+                    .iter()
+                    .fold(provider(name.clone(), built), |plugin, (model, stated)| {
+                        plugin.describing(model.clone(), stated.info())
+                    });
+                harness.plugin(described);
             }
-            // The provider the loop asks, or one serving models to plugins, is needed.
-            Err(error) if *name == file.provider || !entry.serve.is_empty() => {
+            // The provider the loop asks is needed. Without another, the add-ons granted its
+            // models are told it is unknown when they ask.
+            Err(error) if *name == file.provider => {
                 return Err(AgentError::new(error.to_string()));
             }
             Err(error) => failed.push(Unstarted {
@@ -844,17 +909,45 @@ mod tests {
     #[test]
     fn with_both_keys_the_other_vendor_reviews() {
         let (main, review, providers) = reviewing(true, true);
-        assert_eq!((main.as_str(), review.as_str()), (ANTHROPIC.1, OPENAI.1));
+        assert_eq!(main, ANTHROPIC.1);
+        assert_eq!(review, format!("reviewer/{}", OPENAI.1));
         assert_eq!(providers, ["main", "reviewer"]);
-        let file = AgentFile::parse(&default_for(true, true)).unwrap();
-        assert_eq!(file.providers["reviewer"].serve, [OPENAI.1]);
+    }
+
+    #[test]
+    fn a_provider_entry_states_what_its_models_hold() {
+        let text = "provider = \"p\"\nmodel = \"m\"\n[providers.p]\nkind = \"ollama\"\n\
+                    [providers.p.models.m]\ncontext_tokens = 16384\ntools = true\n\
+                    takes = [\"text\", \"image\", \"audio\"]\n";
+        let file = AgentFile::parse(text).unwrap();
+        let stated = file.providers["p"].models["m"].info();
+        assert_eq!(stated.context_tokens, Some(16384));
+        assert_eq!(stated.tools, Some(true));
+        assert_eq!(stated.output_tokens, None);
+        assert_eq!(stated.takes("audio"), Some(true));
+        assert_eq!(stated.takes("video"), Some(false));
+        assert_eq!(stated.returns("text"), None);
+
+        // The `llm` grant is the one list of models an add-on may ask, so there is no other.
+        let served = "provider = \"p\"\nmodel = \"m\"\n[providers.p]\nkind = \"ollama\"\n\
+                      serve = [\"m\"]\n";
+        let error = AgentFile::parse(served).unwrap_err().to_string();
+        assert!(error.contains("`llm` grant"), "{error}");
+        // A key nobody knows is an error, in the provider's entry and in a model's.
+        for typo in [
+            text.replace("context_tokens", "context"),
+            text.replace("kind = \"ollama\"\n", "kind = \"ollama\"\nmax_token = 5\n"),
+        ] {
+            let error = AgentFile::parse(&typo).unwrap_err().to_string();
+            assert!(error.contains("unknown field"), "{error}");
+        }
     }
 
     #[test]
     fn with_one_key_the_same_model_reviews() {
         for (anthropic, openai) in [(true, false), (false, true), (false, false)] {
             let (main, review, providers) = reviewing(anthropic, openai);
-            assert_eq!(main, review);
+            assert_eq!(format!("main/{main}"), review);
             assert_eq!(providers, ["main"]);
         }
     }
@@ -950,7 +1043,7 @@ mod tests {
             .to_string();
         assert_eq!(
             error,
-            "kernel `work`: `dri` is not a setting of this kind (it has: dir, program)"
+            "kernel `work`: `dri` is not a setting of this kind (it has: dir, program, env, pass)"
         );
 
         let docker = format!("{BARE}[kernels.box]\nkind = \"docker\"\n");

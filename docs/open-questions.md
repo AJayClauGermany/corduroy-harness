@@ -265,15 +265,14 @@ is internal.
 
 ### B1. Which public types are closed on purpose?
 
-Seventeen public types cannot gain a field or a case. Each needs a deliberate answer: closed
+Fourteen public types cannot gain a field or a case. Each needs a deliberate answer: closed
 for good, or `#[non_exhaustive]` with a constructor.
 
 | Type | Where | Direction |
 | --- | --- | --- |
 | `Event` | `core/event.rs:146` | Open. Design says events gain fields; a store builds one when reading a log back, so it also needs a constructor. |
 | `Source` | `core/event.rs:101` | Decide with [B21](#b21-are-the-reserved-names-and-event-sources-a-closed-set). |
-| `Role` | `core/model.rs:26` | Decide: are `user` and `assistant` the only roles, with tool results said by the user, for good? |
-| `Turn`, `Completion`, `ModelError` | `core/model.rs:35,44,53` | The first two go: the one request and reply of [What the core is made of](design.md#what-the-core-is-made-of) take their place, and can grow. Open `ModelError` with them. |
+| `Role` | `core/message.rs:44` | Decide: are `user` and `assistant` the only roles, with tool results said by the user, for good? |
 | `ToolError` | `core/tool.rs:241` | Open (a stopped or timed-out call has no case). |
 | `CallError` | `core/service.rs:31` | Open. |
 | `ContextError` | `core/context.rs:187` | Open. |
@@ -322,9 +321,9 @@ A `Cell` is text, a status and a truncation flag (`core/kernel.rs:43`): no image
 rich output, which a notebook-style kernel produces; no separate error stream; nothing
 until the cell ends. A `Spawn` has a program, arguments and environment
 (`core/kernel.rs:134`): no working directory. A `Process` has no error stream and no exit
-status. Every kernel is to start from an empty environment
+status. Every kernel starts from an empty environment
 ([What is safe by default](design.md#what-is-safe-by-default)), so the environment a `Spawn`
-names is all a process gets.
+names, with the few plain variables the kernel gives every process, is all a process gets.
 
 *Direction.* Make `Cell` and `Spawn` growable now. Decide separately whether rich output
 belongs in 1.0; the trait can gain defaulted methods later.
@@ -822,6 +821,9 @@ Text in, a string out today (`wit/corduroy.wit:300-318`). What it carries is dec
 ([What the core is made of](design.md#what-the-core-is-made-of)): the core's one request
 without tools, a reply with a message, usage and the reason the model stopped, models named
 `<provider>/<model>`, and a way to list the models a grant reaches with their descriptions.
+The host already fills in the core's request from the text it is given, names models that
+way and records the usage and the reason; what an add-on is handed back is still only the
+text.
 
 *Direction.* What is left is the form. The request, the reply and the description all grow,
 and a record in the world does not, so they are JSON text in the shape a `message` event
@@ -1041,15 +1043,15 @@ and for which session, and what a checkpoint's payload holds.
 
 ### G10. Why did the model stop, and why did it fail?
 
-`ModelReply` has no stop reason, so a reply cut off at its token limit ends the run as
-finished. `ProviderError` is text, so a loop cannot tell a full context from a rate limit
-or a bad key.
+`ModelReply` says why the model stopped, when its provider does (`StopReason`: finished,
+cut off at its limit, asked for a tool, refused; the set can grow), and the reason is
+recorded. A session says how the model's last answer stopped (`Session::stopped`), and
+the terminal tells the person when it was cut off or declined. The loop acts on none of it:
+what to do (go on after a cut-off answer, ask the person after a refusal) is policy, for a
+step of the loop an extension adds. `ProviderError` is text, so a loop cannot tell a full
+context from a rate limit or a bad key.
 
-That the reply says why the model stopped is decided, and the reply is the core's
-([What the core is made of](design.md#what-the-core-is-made-of)).
-
-*Direction.* What is left is which reasons there are (finished, cut off at its limit, asked
-for a tool, refused), and a kind on the error.
+*Direction.* What is left is whether those four are the reasons, and a kind on the error.
 
 ### G11. What can be set per request?
 
@@ -1096,9 +1098,10 @@ nothing.
 
 ### G17. Where is usage added up?
 
-Per request, as `usage` events. `Outcome` has no total. That a plugin's `llm` calls record
-their usage too, and that usage carries a cost where the provider states one, is decided
-([What the core is made of](design.md#what-the-core-is-made-of)).
+Per request, as `usage` events, and for a plugin's `llm` call on its `llm/response`.
+`Outcome` has no total. That usage carries a cost where the provider states one is decided
+([What the core is made of](design.md#what-the-core-is-made-of)) and not built, for want of
+the unit.
 
 *Direction.* Decide whether totals are the harness's to keep or a reader's to compute, and
 in what unit a cost is written, since it is in the log.
@@ -1152,10 +1155,11 @@ from what events hold today.
 providers oi-kit knows can be named directly as the `kind`": the agent file, a stable
 contract, inherits whatever an alpha dependency accepts.
 
-[What the core is made of](design.md#what-the-core-is-made-of) changes two things here. The
-`serve` key goes, since the `llm` grant is the one list of models an add-on may ask, by
-`<provider>/<model>`. And a model's description (what it takes and returns, its context)
-can be stated or corrected in the file, which needs keys for a model under its provider.
+[What the core is made of](design.md#what-the-core-is-made-of) changed two things here. The
+`serve` key is gone, since the `llm` grant is the one list of models an add-on may ask, by
+`<provider>/<model>`. And a model's description (what it takes, its context) is stated or
+corrected in the file, under `[providers.<name>.models.<model>]`; those keys' names are
+among the ones to confirm.
 
 [What is safe by default](design.md#what-is-safe-by-default) changes a third: every
 credential comes through `Secrets`. A provider's `api_key_env`, and an MCP server's
@@ -1197,11 +1201,11 @@ say for a new session.
 
 ### H6. Where does an installed command find the shipped add-ons?
 
-`Places::new` ends the plugin path with the source tree the command was built from
-(`crates/corduroy-std/src/places.rs:39`), and begins it with the agent file's directory. A
-shipped add-on's name is to resolve to the shipped one before anything a workspace holds
-([What is safe by default](design.md#what-is-safe-by-default)), so the order changes with
-the layout.
+`Places::new` looks beside the program and then in the source tree the command was built
+from (`crates/corduroy-std/src/places.rs:41`), and only then in the agent file's directory:
+a shipped add-on's name resolves to the shipped one before anything a workspace holds
+([What is safe by default](design.md#what-is-safe-by-default)). `CORDUROY_PLUGIN_PATH`,
+which is the person's, still comes first.
 
 *Direction.* Decide the installed layout (beside the binary, a data directory, embedded),
 and with it where the account-level place is on each platform and what the agent file's
