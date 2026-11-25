@@ -6,11 +6,14 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use corduroy_harness::core::{Content, Message, Part, Role, ToolCall, ToolSpec};
+use corduroy_harness::core::{
+    AUDIO, Content, IMAGE, Message, PDF, Part, Role, TEXT, ToolCall, ToolSpec, VIDEO,
+};
 use corduroy_harness::{
     ModelInfo, ModelReply, ModelRequest, Provider, ProviderError, StopReason, Usage,
 };
 use oi_kit_provider_types::base::Provider as OiKitProvider;
+use oi_kit_provider_types::canonical::Modality;
 use oi_kit_provider_types::canonical::maybe_get_canonical_model;
 use oi_kit_provider_types::conversation::message::{
     Message as OiKitMessage, MessageContent, ToolRequest,
@@ -128,8 +131,30 @@ fn describe(provider: &str, model: &str) -> ModelInfo {
     let mut info = ModelInfo::unknown().with_tools(known.tool_call);
     info.context_tokens = tokens(known.limit.context);
     info.output_tokens = known.limit.output.and_then(tokens);
-    info.images = known.attachment;
+    // What the catalogue lists, in its own words for the kinds, which are ours too. A model
+    // it lists with no kinds at all says nothing about them.
+    let kinds = |listed: &[Modality]| {
+        (!listed.is_empty()).then(|| {
+            listed
+                .iter()
+                .map(|kind| kind_of(*kind).to_owned())
+                .collect()
+        })
+    };
+    info.takes = kinds(&known.modalities.input);
+    info.returns = kinds(&known.modalities.output);
     info
+}
+
+/// The name of a kind of content oi-kit's catalogue lists.
+const fn kind_of(kind: Modality) -> &'static str {
+    match kind {
+        Modality::Text => TEXT,
+        Modality::Image => IMAGE,
+        Modality::Audio => AUDIO,
+        Modality::Video => VIDEO,
+        Modality::Pdf => PDF,
+    }
 }
 
 /// Why the model stopped, from the reasons a provider's API gave, each in that API's own
@@ -383,6 +408,9 @@ mod tests {
         );
         assert!(known.output_tokens.is_some_and(|output| output > 4096));
         assert_eq!(known.tools, Some(true));
+        assert_eq!(known.takes(IMAGE), Some(true));
+        assert_eq!(known.returns(TEXT), Some(true));
+        assert_eq!(known.returns(AUDIO), Some(false));
 
         assert_eq!(describe("openai_compatible", "local"), ModelInfo::unknown());
     }

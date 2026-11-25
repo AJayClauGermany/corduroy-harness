@@ -193,9 +193,10 @@ impl Provider for Described {
 
     fn describe(&self, model: &str) -> ModelInfo {
         let reported = self.provider.describe(model);
-        self.described
-            .get(model)
-            .map_or(reported, |stated| stated.or(reported))
+        match self.described.get(model) {
+            Some(stated) => stated.clone().or(reported),
+            None => reported,
+        }
     }
 }
 

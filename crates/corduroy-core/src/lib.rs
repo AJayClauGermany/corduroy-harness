@@ -99,6 +99,7 @@ pub use http::{HTTP, HttpClient, HttpClients, HttpRequest, HttpResponse};
 #[cfg(feature = "std")]
 pub use kernel::{Cell, KERNELS, Kernel, KernelError, Kernels, MAX_OUTPUT, Process, Spawn};
 pub use message::{Message, Part, Role, ToolCall, ToolResult};
+pub use model::{AUDIO, IMAGE, PDF, TEXT, VIDEO};
 pub use model::{
     MODELS, Model, ModelError, ModelInfo, ModelReply, ModelRequest, Models, StopReason, Usage,
 };

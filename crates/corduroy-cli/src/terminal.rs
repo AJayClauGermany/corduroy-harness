@@ -50,6 +50,21 @@ fn field<'a>(payload: &'a Value, name: &str) -> &'a str {
         .unwrap_or_default()
 }
 
+/// What the person is told when the model stopped for `reason`, where there is something
+/// for them to do about it.
+fn stopped(reason: &str) -> Option<&'static str> {
+    match reason {
+        "limit" => Some(
+            "  ! the answer was cut off at the most the model may write: say \"go on\" for the \
+             rest, or raise `max_tokens` for its provider",
+        ),
+        "refused" => {
+            Some("  ! the model declined to answer: say it another way, or ask another model")
+        }
+        _ => None,
+    }
+}
+
 /// How `event` is shown, if it is shown at all.
 #[must_use]
 pub fn describe(event: &Event) -> Option<String> {
@@ -102,6 +117,7 @@ pub fn describe(event: &Event) -> Option<String> {
             field(&payload, "reason")
         )),
         "run/restart" => Some("  ↻ picking up a run that was cut short".to_owned()),
+        "usage" => stopped(field(&payload, "stop")).map(str::to_owned),
         _ => None,
     }
 }
@@ -317,9 +333,22 @@ mod tests {
     }
 
     #[test]
+    fn an_answer_cut_off_or_declined_says_what_the_person_can_do() {
+        let cut = shown(Source::Agent, "usage", r#"{"model":"m","stop":"limit"}"#).unwrap();
+        assert!(
+            cut.contains("cut off") && cut.contains("max_tokens"),
+            "{cut}"
+        );
+        let declined = shown(Source::Agent, "usage", r#"{"stop":"refused"}"#).unwrap();
+        assert!(declined.contains("declined"), "{declined}");
+    }
+
+    #[test]
     fn quiet_events_are_not_shown() {
         assert_eq!(shown(Source::Host, "turn/end", ""), None);
         assert_eq!(shown(Source::Agent, "usage", "{}"), None);
+        let finished = r#"{"model":"m","stop":"finished"}"#;
+        assert_eq!(shown(Source::Agent, "usage", finished), None);
         let allowed = r#"{"verdict":"allow","gate":"approval","reason":""}"#;
         assert_eq!(shown(Source::Host, "gate/decision", allowed), None);
     }

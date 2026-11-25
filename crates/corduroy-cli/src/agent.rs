@@ -153,7 +153,7 @@ impl TryFrom<toml::Table> for ProviderEntry {
 
 /// What an agent file says about one model: any of what a model's description holds. A model
 /// served on this machine often reports nothing, so this is where its context is stated.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelEntry {
     /// How many tokens the model holds at once.
@@ -162,9 +162,12 @@ pub struct ModelEntry {
     /// The most tokens it may write in one answer.
     #[serde(default)]
     pub output_tokens: Option<u64>,
-    /// Whether it takes images.
+    /// The kinds of content it takes: `text`, `image`, `audio`, `video`, `pdf` or another.
     #[serde(default)]
-    pub images: Option<bool>,
+    pub takes: Option<Vec<String>>,
+    /// The kinds of content it returns.
+    #[serde(default)]
+    pub returns: Option<Vec<String>>,
     /// Whether it can be offered tools.
     #[serde(default)]
     pub tools: Option<bool>,
@@ -172,11 +175,12 @@ pub struct ModelEntry {
 
 impl ModelEntry {
     /// The entry as a model's description, unknown where the file says nothing.
-    const fn info(self) -> ModelInfo {
+    fn info(&self) -> ModelInfo {
         let mut info = ModelInfo::unknown();
         info.context_tokens = self.context_tokens;
         info.output_tokens = self.output_tokens;
-        info.images = self.images;
+        info.takes.clone_from(&self.takes);
+        info.returns.clone_from(&self.returns);
         info.tools = self.tools;
         info
     }
@@ -913,12 +917,16 @@ mod tests {
     #[test]
     fn a_provider_entry_states_what_its_models_hold() {
         let text = "provider = \"p\"\nmodel = \"m\"\n[providers.p]\nkind = \"ollama\"\n\
-                    [providers.p.models.m]\ncontext_tokens = 16384\ntools = true\n";
+                    [providers.p.models.m]\ncontext_tokens = 16384\ntools = true\n\
+                    takes = [\"text\", \"image\", \"audio\"]\n";
         let file = AgentFile::parse(text).unwrap();
         let stated = file.providers["p"].models["m"].info();
         assert_eq!(stated.context_tokens, Some(16384));
         assert_eq!(stated.tools, Some(true));
         assert_eq!(stated.output_tokens, None);
+        assert_eq!(stated.takes("audio"), Some(true));
+        assert_eq!(stated.takes("video"), Some(false));
+        assert_eq!(stated.returns("text"), None);
 
         // The `llm` grant is the one list of models an add-on may ask, so there is no other.
         let served = "provider = \"p\"\nmodel = \"m\"\n[providers.p]\nkind = \"ollama\"\n\

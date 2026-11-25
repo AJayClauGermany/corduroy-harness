@@ -57,7 +57,7 @@ impl CompactOperation {
     /// Tell the service what is known about the model the sessions run on: how much it
     /// holds, if `model` says.
     #[must_use]
-    pub const fn for_model(mut self, model: ModelInfo) -> Self {
+    pub fn for_model(mut self, model: ModelInfo) -> Self {
         self.model = model;
         self
     }

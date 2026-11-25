@@ -485,6 +485,8 @@ pub struct Session {
     messages: Vec<Message>,
     /// The summary that stands in for the messages before index `.1`, for the model.
     summary: Option<(String, usize)>,
+    /// Why the model stopped the last time it answered, if its provider said.
+    stopped: Option<StopReason>,
 }
 
 impl Session {
@@ -566,6 +568,14 @@ impl Session {
             .iter()
             .filter(|message| message.role == Role::Assistant)
             .count()
+    }
+
+    /// Why the model stopped the last time it answered, if its provider said: whether it
+    /// finished, asked for tools, was cut off at the most it may write, or declined. A step
+    /// of the loop can act on it, say by asking the model to go on after a cut-off answer.
+    #[must_use]
+    pub const fn stopped(&self) -> Option<StopReason> {
+        self.stopped
     }
 
     /// The model's last answer, if the conversation ends with one that asks for nothing.
@@ -776,6 +786,8 @@ struct State {
     compaction: Option<(String, EventId)>,
     /// The input tokens of the last model request, unless a compaction came after it.
     input_tokens: u64,
+    /// Why the model stopped the last time it answered, if its provider said.
+    stopped: Option<StopReason>,
     /// Tool calls that waited for a signal, by tool-call id, with the payload once it came.
     waits: BTreeMap<String, Waited>,
     /// The tool calls waiting for a response, by tool-call id.
@@ -810,8 +822,8 @@ struct Batch {
     closed: Vec<String>,
     /// What the gates decided about tool calls, by tool-call id.
     gated: Vec<(String, Gated)>,
-    /// The input tokens of a model request recorded in this batch.
-    input_tokens: Option<u64>,
+    /// A model request recorded in this batch: its input tokens, and why the model stopped.
+    asked: Option<(u64, Option<StopReason>)>,
 }
 
 impl Batch {
@@ -855,6 +867,7 @@ impl State {
             message_ids: Vec::new(),
             compaction: None,
             input_tokens: 0,
+            stopped: None,
             waits: BTreeMap::new(),
             calls: BTreeMap::new(),
             unfinished: false,
@@ -936,6 +949,22 @@ impl State {
     }
 
     /// The session as a step sees it.
+    /// Note what the `usage` event `payload` says about a model request: the tokens it read,
+    /// and why the model stopped.
+    fn used(&mut self, payload: &str) {
+        let usage: Value = serde_json::from_str(payload).unwrap_or(Value::Null);
+        // Written by this version at the top, by those before it under `usage`.
+        self.input_tokens = usage
+            .get("input_tokens")
+            .or_else(|| usage.pointer("/usage/input_tokens"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        self.stopped = usage
+            .get("stop")
+            .and_then(Value::as_str)
+            .and_then(StopReason::parse);
+    }
+
     fn session(&self, id: &SessionId) -> Session {
         let summary = self
             .compaction
@@ -945,6 +974,7 @@ impl State {
             id: id.clone(),
             messages: self.messages.clone(),
             summary,
+            stopped: self.stopped,
         }
     }
 
@@ -980,15 +1010,7 @@ impl State {
                     .with_context(|| format!("event {} is not a message", event.id))?;
                 self.push(event.id, message);
             }
-            USAGE => {
-                let usage: Value = serde_json::from_str(&event.payload).unwrap_or(Value::Null);
-                // Written by this version at the top, by those before it under `usage`.
-                self.input_tokens = usage
-                    .get("input_tokens")
-                    .or_else(|| usage.pointer("/usage/input_tokens"))
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0);
-            }
+            USAGE => self.used(&event.payload),
             COMPACTION => {
                 let payload: Value = serde_json::from_str(&event.payload)
                     .with_context(|| format!("event {} is not a compaction", event.id))?;
@@ -1190,7 +1212,7 @@ impl Journal {
                     batch
                         .drafts
                         .push(Draft::new(Source::Agent, USAGE).payload(payload.to_string()));
-                    batch.input_tokens = Some(usage.input_tokens.unwrap_or(0));
+                    batch.asked = Some((usage.input_tokens.unwrap_or(0), stop));
                 }
                 Effect::Compacted {
                     summary,
@@ -1557,8 +1579,8 @@ impl State {
         for call in batch.closed {
             self.calls.remove(&call);
         }
-        if let Some(tokens) = batch.input_tokens {
-            self.input_tokens = tokens;
+        if let Some((tokens, stopped)) = batch.asked {
+            (self.input_tokens, self.stopped) = (tokens, stopped);
         }
     }
 }
@@ -1774,6 +1796,7 @@ mod tests {
                 Message::user().result(ToolResult::new("1", true, "text")),
             ],
             summary: Some(("they talked".into(), 2)),
+            stopped: None,
         };
 
         let view = session.for_model();

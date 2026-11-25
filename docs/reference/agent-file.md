@@ -62,7 +62,8 @@ it holds. Every key is optional, and what is left out stays as the provider repo
 | --- | --- | --- |
 | `context_tokens` | integer | How many tokens the model holds at once. [`compact`](shipped-add-ons.md#compact) starts from three quarters of it. |
 | `output_tokens` | integer | The most it may write in one answer. |
-| `images` | boolean | Whether it takes images. |
+| `takes` | list of strings | The kinds of content it takes: `text`, `image`, `audio`, `video`, `pdf`, or another kind by name. A list given here replaces the provider's whole. |
+| `returns` | list of strings | The kinds of content it returns, named the same way. |
 | `tools` | boolean | Whether it can be offered tools. |
 
 ## `[kernels.<name>]`

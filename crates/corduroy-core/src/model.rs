@@ -126,6 +126,18 @@ pub enum StopReason {
 }
 
 impl StopReason {
+    /// The reason the log writes as `text`, or `None` for one this version does not know.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "finished" => Some(Self::Finished),
+            "limit" => Some(Self::Limit),
+            "tool_calls" => Some(Self::ToolCalls),
+            "refused" => Some(Self::Refused),
+            _ => None,
+        }
+    }
+
     /// The reason as the log writes it: `finished`, `limit`, `tool_calls` or `refused`.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -213,20 +225,37 @@ impl Usage {
 /// What a model says about itself. Every field may be unknown: a model served on this
 /// machine often reports nothing, and whatever reads a description has to cope with that.
 ///
+/// What a model takes and returns are lists of kinds of content, by name: `text`, `image`,
+/// `audio`, `video`, `pdf`, or a kind the core has never heard of. The core does not list
+/// them, so a model of a new kind (an embedding, a yes or a no) needs no change here.
+///
 /// More may be described later, so it is built from [`unknown`](Self::unknown) with its
 /// builder methods.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ModelInfo {
     /// How many tokens the model holds at once: everything it reads and writes in a request.
     pub context_tokens: Option<u64>,
     /// The most tokens it may write in one answer.
     pub output_tokens: Option<u64>,
-    /// Whether it takes images.
-    pub images: Option<bool>,
+    /// The kinds of content it takes, such as `text` and `image`.
+    pub takes: Option<Vec<String>>,
+    /// The kinds of content it returns, such as `text`.
+    pub returns: Option<Vec<String>>,
     /// Whether it can be offered tools.
     pub tools: Option<bool>,
 }
+
+/// Content of text.
+pub const TEXT: &str = "text";
+/// An image.
+pub const IMAGE: &str = "image";
+/// Sound.
+pub const AUDIO: &str = "audio";
+/// Moving pictures.
+pub const VIDEO: &str = "video";
+/// A PDF document.
+pub const PDF: &str = "pdf";
 
 impl ModelInfo {
     /// A description that knows nothing.
@@ -235,7 +264,8 @@ impl ModelInfo {
         Self {
             context_tokens: None,
             output_tokens: None,
-            images: None,
+            takes: None,
+            returns: None,
             tools: None,
         }
     }
@@ -254,10 +284,17 @@ impl ModelInfo {
         self
     }
 
-    /// The same, of a model that takes images, or does not.
+    /// The same, of a model that takes `kinds` of content and no others.
     #[must_use]
-    pub const fn with_images(mut self, takes: bool) -> Self {
-        self.images = Some(takes);
+    pub fn taking<S: Into<String>>(mut self, kinds: impl IntoIterator<Item = S>) -> Self {
+        self.takes = Some(kinds.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// The same, of a model that returns `kinds` of content and no others.
+    #[must_use]
+    pub fn returning<S: Into<String>>(mut self, kinds: impl IntoIterator<Item = S>) -> Self {
+        self.returns = Some(kinds.into_iter().map(Into::into).collect());
         self
     }
 
@@ -268,14 +305,32 @@ impl ModelInfo {
         self
     }
 
+    /// Whether the model takes content of `kind`, or `None` if that is not known.
+    #[must_use]
+    pub fn takes(&self, kind: &str) -> Option<bool> {
+        self.takes
+            .as_ref()
+            .map(|kinds| kinds.iter().any(|taken| taken == kind))
+    }
+
+    /// Whether the model returns content of `kind`, or `None` if that is not known.
+    #[must_use]
+    pub fn returns(&self, kind: &str) -> Option<bool> {
+        self.returns
+            .as_ref()
+            .map(|kinds| kinds.iter().any(|returned| returned == kind))
+    }
+
     /// This description, with what it does not know taken from `other`. It is how a
-    /// correction is laid over what a provider reports.
+    /// correction is laid over what a provider reports: a list it states replaces the
+    /// provider's whole.
     #[must_use]
     pub fn or(self, other: Self) -> Self {
         Self {
             context_tokens: self.context_tokens.or(other.context_tokens),
             output_tokens: self.output_tokens.or(other.output_tokens),
-            images: self.images.or(other.images),
+            takes: self.takes.or(other.takes),
+            returns: self.returns.or(other.returns),
             tools: self.tools.or(other.tools),
         }
     }
@@ -480,11 +535,19 @@ mod tests {
         let corrected = ModelInfo::unknown()
             .with_context(8000)
             .with_tools(true)
-            .or(reported.with_output(500).with_images(false));
+            .taking([TEXT, AUDIO])
+            .or(reported.with_output(500).taking([TEXT]).returning([TEXT]));
         assert_eq!(corrected.context_tokens, Some(8000));
         assert_eq!(corrected.output_tokens, Some(500));
-        assert_eq!(corrected.images, Some(false));
         assert_eq!(corrected.tools, Some(true));
+        // A list the host states replaces the provider's whole.
+        assert_eq!(corrected.takes(AUDIO), Some(true));
+        assert_eq!(corrected.takes(IMAGE), Some(false));
+        assert_eq!(corrected.returns(TEXT), Some(true));
+        // A kind the core has never heard of is a kind like any other.
+        let embeds = ModelInfo::unknown().returning(["embedding"]);
+        assert_eq!(embeds.returns("embedding"), Some(true));
+        assert_eq!(ModelInfo::unknown().takes(VIDEO), None);
     }
 
     #[test]
@@ -493,5 +556,14 @@ mod tests {
         let given: Vec<_> = usage.counts().collect();
         assert_eq!(given, [("input_tokens", 10), ("cache_read_tokens", 8)]);
         assert_eq!(StopReason::Limit.to_string(), "limit");
+        for stop in [
+            StopReason::Finished,
+            StopReason::Limit,
+            StopReason::ToolCalls,
+            StopReason::Refused,
+        ] {
+            assert_eq!(StopReason::parse(stop.as_str()), Some(stop));
+        }
+        assert_eq!(StopReason::parse("paused"), None);
     }
 }

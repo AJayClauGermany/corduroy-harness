@@ -218,4 +218,11 @@ async fn the_compact_plugin_is_due_at_a_share_of_what_the_model_says_it_holds() 
     let usage: Value = serde_json::from_str(&usage[0].payload).unwrap();
     assert_eq!(usage["input_tokens"], 800);
     assert_eq!(usage["stop"], "finished");
+    // And the session says so, for a step of the loop to act on, also once read back.
+    let main = SessionId::new(MAIN);
+    let stopped = harness.journal(&main).unwrap().session().stopped();
+    assert_eq!(stopped, Some(StopReason::Finished));
+    let reloaded = Harness::open(Arc::new(EventStream::load(harness.events().events()))).unwrap();
+    let stopped = reloaded.journal(&main).unwrap().session().stopped();
+    assert_eq!(stopped, Some(StopReason::Finished));
 }

@@ -444,8 +444,13 @@ keep only the text.
   reason the model stopped, so a review of the log shows what the agent's own tools spent,
   and whether code it wrote did make the tokens go further. The loop's `usage` event has the
   reason too: `finished`, `limit` (cut off at the most it may write), `tool_calls` or
-  `refused`, when the provider says. Which reasons there are in the end, and whether a
-  reply cut off at its limit should end a run differently, is still open (G10).
+  `refused`, when the provider says. The reason is the record's, and what to do about it is
+  policy, as a gate's answer is: a session says how the model's last answer stopped
+  (`Session::stopped`), so a step of the loop can act on it, such as asking the model to go
+  on after a cut-off answer; and the terminal tells the person when an answer was cut off or
+  declined, and what they can do. The loop itself does nothing different for either: a
+  reply that asks for tools goes on, and any other ends the run as before. Which reasons
+  there are in the end is still open (G10).
 - *A plugin's request carries what a message can*, images included. The core's request
   does; an add-on's is still text until the next point is settled.
 - *How the request crosses the WebAssembly boundary* (a typed record, or the JSON a
@@ -472,9 +477,11 @@ not a kind of thing in the core: it is a service an extension or an add-on provi
 embedding model if it wants one.
 
 **A model describes itself** (built). The core has a small description that can grow
-(`ModelInfo`), in which every field may be unknown: what the model takes (images, tools),
-how much context it holds, how much it may write. What it returns joins them with the
-typed part above. `Model` and `Provider` each have a method with a default that knows
+(`ModelInfo`), in which every field may be unknown: what the model takes and returns,
+whether it can be offered tools, how much context it holds, how much it may write. What it
+takes and returns are lists of kinds of content by name (`text`, `image`, `audio`, `video`,
+`pdf`), not a field for each, so a new kind of input, or a model that returns a vector,
+needs no new field; the core names the common kinds and lists none as all there are. `Model` and `Provider` each have a method with a default that knows
 nothing (`describe`). A provider fills in what it knows (`corduroy-providers` from oi-kit's
 catalogue), the agent file states or corrects it for a model
 (`[providers.<name>.models.<model>]`), and the loop and plugins read it in one place.

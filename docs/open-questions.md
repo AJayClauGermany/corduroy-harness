@@ -1045,12 +1045,13 @@ and for which session, and what a checkpoint's payload holds.
 
 `ModelReply` says why the model stopped, when its provider does (`StopReason`: finished,
 cut off at its limit, asked for a tool, refused; the set can grow), and the reason is
-recorded. Nothing acts on it: a reply cut off at its token limit still ends the run as
-finished. `ProviderError` is text, so a loop cannot tell a full context from a rate limit
-or a bad key.
+recorded. A session says how the model's last answer stopped (`Session::stopped`), and
+the terminal tells the person when it was cut off or declined. The loop acts on none of it:
+what to do (go on after a cut-off answer, ask the person after a refusal) is policy, for a
+step of the loop an extension adds. `ProviderError` is text, so a loop cannot tell a full
+context from a rate limit or a bad key.
 
-*Direction.* What is left is whether those four are the reasons, what a run does with a
-reply that was cut off or refused, and a kind on the error.
+*Direction.* What is left is whether those four are the reasons, and a kind on the error.
 
 ### G11. What can be set per request?
 

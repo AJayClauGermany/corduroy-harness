@@ -129,12 +129,16 @@ async fn what_the_host_states_about_a_model_is_laid_over_what_its_provider_repor
         .with_model("small");
     assert_eq!(harness.model_info(), ModelInfo::unknown());
 
-    let stated = ModelInfo::unknown().with_context(16_384).with_tools(true);
-    harness.plugin(provider("local", model).describing("small", stated));
+    let stated = ModelInfo::unknown()
+        .with_context(16_384)
+        .with_tools(true)
+        .taking(["text", "audio"]);
+    harness.plugin(provider("local", model).describing("small", stated.clone()));
 
     // The loop and plugins read the same description, each by its own way of asking.
     assert_eq!(harness.model_info(), stated);
     assert_eq!(harness.models().describe("local/small"), Some(stated));
+    assert_eq!(harness.model_info().takes("audio"), Some(true));
     assert_eq!(
         harness.models().describe("local/other"),
         Some(ModelInfo::unknown())
