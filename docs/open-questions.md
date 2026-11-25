@@ -321,9 +321,9 @@ A `Cell` is text, a status and a truncation flag (`core/kernel.rs:43`): no image
 rich output, which a notebook-style kernel produces; no separate error stream; nothing
 until the cell ends. A `Spawn` has a program, arguments and environment
 (`core/kernel.rs:134`): no working directory. A `Process` has no error stream and no exit
-status. Every kernel is to start from an empty environment
+status. Every kernel starts from an empty environment
 ([What is safe by default](design.md#what-is-safe-by-default)), so the environment a `Spawn`
-names is all a process gets.
+names, with the few plain variables the kernel gives every process, is all a process gets.
 
 *Direction.* Make `Cell` and `Spawn` growable now. Decide separately whether rich output
 belongs in 1.0; the trait can gain defaulted methods later.

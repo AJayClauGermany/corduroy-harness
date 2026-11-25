@@ -1035,7 +1035,7 @@ mod tests {
             .to_string();
         assert_eq!(
             error,
-            "kernel `work`: `dri` is not a setting of this kind (it has: dir, program)"
+            "kernel `work`: `dri` is not a setting of this kind (it has: dir, program, env, pass)"
         );
 
         let docker = format!("{BARE}[kernels.box]\nkind = \"docker\"\n");

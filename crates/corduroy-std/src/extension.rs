@@ -127,16 +127,25 @@ impl Asked<'_> {
     }
 }
 
-/// The kernel `shell` asks for, in the directory it names (`{workspace}` by default).
+/// The kernel `shell` asks for, in the directory it names (`{workspace}` by default), with
+/// the variables it sets (`env`) and those of the command's own environment it hands through
+/// (`pass`). It starts from an empty environment otherwise.
 fn shell_kernel_in(asked: &Asked<'_>, shell: ShellKernel) -> Built {
-    asked.only(&["dir", "program"])?;
+    asked.only(&["dir", "program", "env", "pass"])?;
     let dir = asked
         .text("dir")
         .map_or_else(|| asked.places.workspace.clone(), PathBuf::from);
-    Ok(Box::new(shell_kernel_of(
-        asked.name.to_owned(),
-        shell.in_dir(dir),
-    )))
+    let shell = asked
+        .table("env")?
+        .into_iter()
+        .fold(shell.in_dir(dir), |shell, (name, value)| {
+            shell.with_env(name, value)
+        });
+    let shell = asked
+        .texts("pass")?
+        .into_iter()
+        .fold(shell, ShellKernel::passing);
+    Ok(Box::new(shell_kernel_of(asked.name.to_owned(), shell)))
 }
 
 /// The MCP server `[mcp.<name>]` describes: a `command` started through a kernel (`shell` by
@@ -235,8 +244,8 @@ impl Extensions {
     ///
     /// | Kind | Configuration | What it adds |
     /// | --- | --- | --- |
-    /// | `shell-kernel` | `dir` (default `{workspace}`), `program` (default `sh`; any POSIX shell, such as `bash`, Git for Windows' included) | a persistent shell as the kernel named like the entry; what `[kernels.<name>]` with `kind = "shell"` builds |
-    /// | `powershell-kernel` | `dir` (default `{workspace}`), `program` (default `powershell` on Windows, `pwsh` elsewhere) | a persistent PowerShell as the kernel named like the entry; what `[kernels.<name>]` with `kind = "powershell"` builds |
+    /// | `shell-kernel` | `dir` (default `{workspace}`), `program` (default `sh`; any POSIX shell, such as `bash`, Git for Windows' included), `env` (variables to set), `pass` (variables of the command's own environment to hand through) | a persistent shell as the kernel named like the entry, starting from an empty environment; what `[kernels.<name>]` with `kind = "shell"` builds |
+    /// | `powershell-kernel` | `dir` (default `{workspace}`), `program` (default `powershell` on Windows, `pwsh` elsewhere), `env`, `pass` | a persistent PowerShell as the kernel named like the entry; what `[kernels.<name>]` with `kind = "powershell"` builds |
     /// | `http-client` | none | the client the `http` capability sends through, for `http` and `https` |
     /// | `mcp` | `command` (with `args`, `env` and `kernel`, `shell` by default) or `url` (with `bearer_token_env`), and `timeout_seconds` | the tools of one MCP server, as `<name>__<tool>`; what `[mcp.<name>]` builds |
     /// | `env-secret` | `env` | the secret named like the entry, read from that environment variable when it is used; what `[secrets.<name>]` builds |

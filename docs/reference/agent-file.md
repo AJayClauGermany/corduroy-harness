@@ -75,6 +75,16 @@ name is what a `kernel` grant and a plugin's configuration refer to.
 | `kind` | string | `shell` (a persistent POSIX shell) or `powershell`, or a kernel kind a command of your own adds. `<kind>` builds the extension kind `<kind>-kernel`. |
 | `dir` | string | Where it starts. Default `{workspace}`. |
 | `program` | string | The shell to run. `shell`: `sh` by default, any POSIX shell such as `bash`. `powershell`: `powershell` on Windows, `pwsh` elsewhere. |
+| `env` | table | Environment variables to set for the shell and for what the kernel starts, such as `env = { CARGO_TERM_COLOR = "never" }`. |
+| `pass` | list of strings | Variables of your own environment to hand through by name, such as `pass = ["CARGO_HOME", "HTTPS_PROXY"]`. One that is not set is left out. |
+
+**The environment.** A kernel's shell, and an MCP server it starts, begin from an empty
+environment and not from the one `corduroy` runs in, which is where a provider's API key
+is. They are given the plain variables a process needs to run (`PATH`, `HOME`, `USER`,
+`LANG`, `TZ`, `TMPDIR`, `TERM` and, on Windows, the system's own such as `SystemRoot`), each
+as you have it, and beyond those only what `env` sets and `pass` names. Whatever is given
+this way is in the open: a command can print it, and what it prints is in the log. So
+`pass` a credential only when a command needs the value itself.
 
 A kernel is not a sandbox: a shell kernel can do whatever the user running `corduroy` can.
 Which kernel an add-on may use is the security decision. See

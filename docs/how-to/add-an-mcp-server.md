@@ -17,6 +17,10 @@ The server is started through a kernel, `shell` by default, so the agent file ne
 `[kernels.shell]` entry (the default agent has one). To start it in another kernel, for
 example a sandboxed one, add `kernel = "<name>"`.
 
+The server's environment is the kernel's (a few plain variables such as `PATH` and `HOME`,
+and what the kernel's `env` and `pass` list) and what `env` names here. It gets nothing else
+of the environment `corduroy` runs in, so a token it needs is listed, not inherited.
+
 ## A server you reach over HTTP
 
 ```toml

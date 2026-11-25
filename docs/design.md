@@ -1680,9 +1680,11 @@ Which of these a person gets without setting anything up is decided in the next 
 ## What is safe by default
 
 Three things are decided here: what 1.0 promises about safety, what a kernel is given of the
-machine it runs on, and what a workspace may configure. All of it is *planned*. The code is
-as [Sandboxing](#sandboxing) above and the [security model](explanation/security-model.md)
-describe it, and [Order of work](#order-of-work) lists what changes.
+machine it runs on, and what a workspace may configure. Two parts are built and say so:
+every kernel starts from an empty environment, and a shipped add-on's name resolves to the
+shipped one. The rest is *planned*: the code is as [Sandboxing](#sandboxing) above and the
+[security model](explanation/security-model.md) describe it, and
+[Order of work](#order-of-work) lists what changes.
 
 **The promise.** What the agent can reach is what you allowed, whatever the model is told
 and whatever a workspace holds. Nothing it builds or loads gives it more.
@@ -1753,8 +1755,14 @@ and a refused file as far as the operating system says which one it was, which t
 to find out.
 
 **Every kernel starts from an empty environment**, the plain shell included, since that
-needs nothing from the operating system. Today the shell starts with the command's own
-environment, which is where the provider's key is.
+needs nothing from the operating system (built). The shell used to start with the command's
+own environment, which is where the provider's key is. `ShellKernel` now gives its shell,
+and each process it starts, the plain variables a process needs (`corduroy_shell::PLAIN`:
+`PATH`, `HOME` and their like, each as the command has it) and beyond those only what the
+kernel's entry sets (`env`) or hands through by name (`pass`), which is the *passed through*
+state below. A provider's key and an MCP server's token are still read from the command's
+environment by the extension that uses them, until every credential comes through
+`Secrets`.
 
 **The shell reaches only the hosts listed for it.** The list is written as an add-on's
 `http` grant is. The operating system offers a network that is on or off, so the kernel
@@ -1861,11 +1869,11 @@ model](explanation/security-model.md) becomes the list of them, with the test fo
 | | Guarantee | Today |
 | --- | --- | --- |
 | 1 | An add-on does only what its grants allow. | Built. |
-| 2 | The shell reaches only the files, hosts and variables listed for it. A shell that cannot be confined does not start unless the person chose the plain one. | Not built. |
+| 2 | The shell reaches only the files, hosts and variables listed for it. A shell that cannot be confined does not start unless the person chose the plain one. | Built for variables: every kernel starts from an empty environment. Not built: files and hosts, which wait on the confined kernel. |
 | 3 | What enforces is out of the agent's reach: the grants, the log, the command and its add-ons, the person's answers. | For add-ons, protected paths cover the agent file, the log, the command and the cache. Not built: the shipped add-ons, the answers, and anything for a shell. |
 | 4 | Whatever the agent builds or loads holds at most what its loader holds, and a person approved the load. | No amplification and the gate are built. A person cannot answer yet: an ask at `plugin/load` is a denial (C15). Not built: a session with grants of its own, which this guarantee is read as covering ([What an extension can reach](#what-an-extension-can-reach)). |
 | 5 | A workspace changes nothing about what the agent may do until the person accepts its file. | Not built. |
-| 6 | No credential's value reaches an add-on. A shell holds a value only where an agent file the person wrote or accepted says so, and a masked one goes only to the hosts its secret names. | Built for add-ons, not for a shell. |
+| 6 | No credential's value reaches an add-on. A shell holds a value only where an agent file the person wrote or accepted says so, and a masked one goes only to the hosts its secret names. | Built for add-ons. For a shell, a value in the command's environment reaches it only through `pass`; masking is not built, and a credential in a file the shell can read is still within reach. |
 
 **What is not promised.**
 
@@ -2017,9 +2025,9 @@ the step it waits on is done.
     form is (E8); the form of a question a tool puts to the person; a way for an extension
     to raise a signal and to start a session. Then the connected harness, the proof that
     calling and waiting is enough.
-14. What is [safe by default](#what-is-safe-by-default). *Decided, none of it built:* a
-    secret that names the hosts it may go to, in the core before the freeze; every kernel
-    starting from an empty environment, and every credential through `Secrets`; the
+14. What is [safe by default](#what-is-safe-by-default). *Done:* every kernel starting from
+    an empty environment. *Decided, not built:* a secret that names the hosts it may go to,
+    in the core before the freeze; every credential through `Secrets`; the
     confined kernel for Linux and macOS, given its files, hosts and variables as an add-on
     is granted them, with its filter for hosts and masked credentials in the shell; the
     default agent on that kernel, and a shell that cannot be confined not starting; the
