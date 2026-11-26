@@ -98,16 +98,59 @@ fn text<'a>(payload: &'a Value, name: &str) -> &'a str {
         .unwrap_or_default()
 }
 
+/// The counts a `usage` event may give, each with what it is called in a report.
+const COUNTS: [(&str, &str); 5] = [
+    ("input_tokens", "in"),
+    ("output_tokens", "out"),
+    ("cache_read_tokens", "cache read"),
+    ("cache_write_tokens", "cache write"),
+    ("reasoning_tokens", "reasoning"),
+];
+
+/// What the model requests of `run`, a run of `session`, used in all: how many answered,
+/// and each count added up over those that gave it. The sessions the run started are in
+/// it. Nothing if no request answered.
+fn used(run: &[Event], session: &SessionId) -> Option<String> {
+    let answers: Vec<Value> = run
+        .iter()
+        .filter(|event| event.topic == "usage" && below(event, session))
+        .map(payload)
+        .collect();
+    if answers.is_empty() {
+        return None;
+    }
+    let sums: Vec<String> = COUNTS
+        .iter()
+        .filter_map(|(key, name)| {
+            let given: Vec<u64> = answers
+                .iter()
+                .filter_map(|answer| answer.get(*key)?.as_u64())
+                .collect();
+            let sum = given
+                .iter()
+                .fold(0_u64, |sum, count| sum.saturating_add(*count));
+            (!given.is_empty()).then(|| format!("{sum} {name}"))
+        })
+        .collect();
+    let requests = if answers.len() == 1 {
+        "request"
+    } else {
+        "requests"
+    };
+    Some(format!(
+        "used {} model {requests}: {} tokens",
+        answers.len(),
+        if sums.is_empty() {
+            "no count of".to_owned()
+        } else {
+            sums.join(", ")
+        }
+    ))
+}
+
 /// The counts a `usage` event gave, as `10 in, 5 out, stop tool_calls`.
 fn usage(payload: &Value) -> String {
-    let counts = [
-        ("input_tokens", "in"),
-        ("output_tokens", "out"),
-        ("cache_read_tokens", "cache read"),
-        ("cache_write_tokens", "cache write"),
-        ("reasoning_tokens", "reasoning"),
-    ];
-    let mut parts: Vec<String> = counts
+    let mut parts: Vec<String> = COUNTS
         .iter()
         .filter_map(|(key, name)| {
             let count = payload.get(*key)?.as_u64()?;
@@ -303,6 +346,7 @@ pub fn report(events: &[Event], session: &SessionId, count: usize) -> String {
         if let Some(writer) = writer {
             out.push(format!("written by {}", writer.payload));
         }
+        out.extend(used(run, session));
         out.push("\nwaited on".to_owned());
         out.extend(waits(run));
         out.push("\nevents (stored at, since the run began, since the event before)".to_owned());
@@ -374,6 +418,11 @@ mod tests {
         let said = report(&stream.events(), &SessionId::new("main"), 1);
         assert!(
             said.contains("run 1 of 1 in `main`: #1 to #8, 1.750s, failed 401 Unauthorized"),
+            "{said}"
+        );
+        // What the run used in all: the one request that answered.
+        assert!(
+            said.contains("\nused 1 model request: 10 in, 5 out tokens\n"),
             "{said}"
         );
         let answered = "0.250s  model   p/m asked with 1 messages and 2 tools in `main`: \
