@@ -391,10 +391,16 @@
       }
     }
 
+    // The questions nobody has answered yet: what a person has to do before a run goes on.
+    const asks = [];
     for (const s of sessions.values()) {
       if (s.run) s.status = s.asking ? 'asking' : s.waiting ? 'waiting' : Date.now() - s.last.time < 120000 ? 'running' : 'unfinished';
+      if (s.status !== 'asking') continue;
+      for (const item of s.items) {
+        if (item.kind === 'call' && item.gate && item.gate.verdict === 'ask' && !item.answer && !item.result) asks.push({ session: s.id, call: item });
+      }
     }
-    return { sessions, problems, agent };
+    return { sessions, problems, agent, asks };
   }
 
   const STATUS = {
@@ -456,6 +462,18 @@
     } else {
       say(`${index.events} events · last at ${when(last.time)}`, true);
     }
+  }
+
+  /** The bar over every view while a gate's question waits: where to answer it. */
+  function drawAsks() {
+    const bar = document.getElementById('asks');
+    const { asks } = state.model;
+    bar.hidden = !asks.length;
+    fill(bar, asks.map(({ session, call }) => h('div', { class: 'ask' },
+      h('b', null, `${session} waits for your answer`),
+      h('span', { class: 'what' }, `${call.gate.gate || 'a gate'} asks about `, h('code', null, call.tool), ` ${brief(call.input)}`),
+      h('span', null, 'Answer in the terminal where corduroy runs, or with ', h('code', null, 'corduroy continue'), '.'),
+      h('a', { href: link(session, call.event.id) }, 'show it'))));
   }
 
   function keep(key, details) {
@@ -551,6 +569,7 @@
         h('span', { class: 'input' }, brief(item.input)),
         h('span', { class: 'took' }, item.took != null ? span(item.took) : when(item.event.time))),
       h('div', { class: 'body' }, body));
+    if (asking) details.open = true;
     return keep(`call:${s.id}:${item.event.id}`, details);
   }
 
@@ -619,7 +638,8 @@
       s.task ? h('div', { class: 'item' }, h('div', { class: 'who' }, h('b', null, 'Its task')), h('div', { class: 'said-user' }, shown(s.task))) : null,
       button,
       ...s.items.slice(from).map((item) => drawItem(s, item)),
-      s.status === 'asking' ? h('div', { class: 'end warn' }, 'A gate asks you about a tool call. Answer in the terminal: this page only shows.') : null,
+      s.status === 'asking' ? h('div', { class: 'end warn' }, 'A gate asks you about the call above, and the run waits. This page only shows: answer in the terminal where corduroy runs, or run ', h('code', null, 'corduroy continue'), ' in this workspace to be asked again.') : null,
+      s.status === 'unfinished' ? h('div', { class: 'end warn' }, 'This run was cut short. ', h('code', null, 'corduroy continue'), ' picks it up; ', h('code', null, 'corduroy stop'), ' ends it.') : null,
     );
     return { id: s.id };
   }
@@ -733,9 +753,12 @@
     else if (current.view === 'events') drawEvents(main);
     else shownSession = drawSession(main, current).id;
     drawNav({ view: current.view, id: shownSession });
+    drawAsks();
     const process = state.model.agent.processes[state.model.agent.processes.length - 1];
     document.getElementById('build').textContent = process ? `${process.version} · ${process.platform}` : '';
-    document.title = shownSession ? `${shownSession} · corduroy` : 'corduroy';
+    // In the tab's name too, for when the page is behind another.
+    const waits = state.model.asks.length ? '(asks you) ' : '';
+    document.title = `${waits}${shownSession ? `${shownSession} · ` : ''}corduroy`;
     state.drawn = view;
 
     const target = current.at && state.jumped !== location.hash ? document.getElementById(`e${current.at}`) : null;

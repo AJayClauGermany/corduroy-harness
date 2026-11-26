@@ -36,8 +36,10 @@ is for looking, the report for sending.
 
 ## What the page cannot do
 
-It shows; it does not answer. When a gate asks, the session is marked **asks you** and you
-answer in the terminal (`corduroy continue` if the run is no longer in one). You also type
+It shows; it does not answer. When a gate asks, a bar across the top of every view says
+which session waits, about which call, and where to answer; the tab's name begins
+`(asks you)`. You answer in the terminal (`corduroy continue` if the run is no longer in
+one). You also type
 prompts there. A page that takes an answer has to be served, and what serves is an
 extension compiled into the command, which is planned and not built
 ([How people meet it](../design.md#how-people-meet-it)).

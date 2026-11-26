@@ -197,7 +197,8 @@ loading them again every two seconds.
 | What it has and used | what wrote the log, the plugins started (and those that did not, with why), the models asked with their tokens, the tools called with how often they failed |
 | Every event | the log as `corduroy log` prints it, filtered as you type |
 
-It only shows. A gate's question is answered, and a prompt typed, in the terminal: a page
+It only shows. While a gate's question waits, a bar over every view says which session
+waits, about what, and where to answer. A gate's question is answered, and a prompt typed, in the terminal: a page
 that can be talked through is a front end, which listens on a socket and so is an extension
 ([How people meet it](../design.md#how-people-meet-it)).
 
