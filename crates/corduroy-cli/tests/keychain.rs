@@ -220,6 +220,35 @@ fn a_key_is_not_signed_in_to_and_nothing_typed_or_unknown_changes_nothing() {
 }
 
 #[test]
+fn a_secret_that_says_nothing_about_itself_is_one_kept_in_the_keychain() {
+    let workspace = scratch("cli-keychain-default");
+    let (address, seen) = endpoint("Hello.").unwrap();
+    // `[secrets.token]` and no more.
+    fs::write(workspace.join("corduroy.toml"), agent(address, "")).unwrap();
+    let (standard, keychain) = with_keychain();
+
+    let listed = corduroy(&standard, &workspace, &["secrets"], "");
+    assert!(
+        listed.said.starts_with(
+            "✗ token (keychain, for provider plan): a keychain in memory holds nothing"
+        ),
+        "{}",
+        listed.all()
+    );
+    let set = corduroy(&standard, &workspace, &["secrets", "set"], "sk-default\n");
+    assert_eq!(
+        set.said,
+        "kept `token` in a keychain in memory\n",
+        "{}",
+        set.all()
+    );
+    assert_eq!(keychain.items(), ["token"]);
+    let ran = corduroy(&standard, &workspace, &["run", "say hello"], "");
+    assert!(ran.succeeded(), "{}", ran.all());
+    assert_eq!(seen.lock().unwrap()[0].authorization, "Bearer sk-default");
+}
+
+#[test]
 fn a_secret_of_another_kind_is_not_put_in_and_the_message_says_where_its_value_goes() {
     let workspace = scratch("cli-keychain-env");
     let (address, _seen) = endpoint("Hello.").unwrap();
@@ -364,7 +393,7 @@ fn init_on_a_machine_without_a_keychain_writes_the_environment_and_says_why() {
         "{}",
         init.said
     );
-    assert!(written(&signed).contains("[secrets.chatgpt]\nkind = \"chatgpt\"\n\n"));
+    assert!(written(&signed).contains("[secrets.chatgpt]\nkind = \"chatgpt\"\nkeep = \"file\"\n"));
 
     // Asked for and not there: refused, and nothing written in its place.
     let refused = scratch("cli-init-refused");
@@ -403,7 +432,7 @@ fn init_takes_the_vendor_and_where_keys_come_from_as_said() {
     assert!(init.succeeded(), "{}", init.all());
     let file = written(&paid);
     assert!(
-        file.contains("[secrets.chatgpt]\nkind = \"chatgpt\"\nkeep = \"keychain\"\n"),
+        file.contains("[secrets.chatgpt]\nkind = \"chatgpt\"\n\n") && !file.contains("keep ="),
         "{file}"
     );
     assert!(

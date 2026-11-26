@@ -146,7 +146,7 @@ fn plan_file(address: SocketAddr) -> String {
     format!(
         "provider = \"plan\"\nmodel = \"gpt-6-fake\"\n\n[providers.plan]\nkind = \"openai\"\n\
          base_url = \"http://{address}/v1/chat/completions\"\nsecret = \"chatgpt\"\n\n\
-         [secrets.chatgpt]\nkind = \"chatgpt\"\n"
+         [secrets.chatgpt]\nkind = \"chatgpt\"\nkeep = \"file\"\n"
     )
 }
 

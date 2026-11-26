@@ -47,8 +47,8 @@ pub trait SignIn: Send + Sync {
 
 /// Sign in with `ChatGPT`, through the person's browser.
 ///
-/// The sign-in is kept where its entry says (`keep`): a file of the person's own, or the
-/// keychain this was made with.
+/// The sign-in is kept in the keychain this was made with, or, where its entry says
+/// `keep = "file"`, in a file of the person's own.
 #[derive(Clone)]
 pub struct ChatGptSignIn {
     keychain: Arc<dyn Keychain>,

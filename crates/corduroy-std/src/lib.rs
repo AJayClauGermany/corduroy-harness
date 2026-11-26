@@ -134,8 +134,8 @@ impl Standard {
     }
 
     /// Keep secrets in `keychain`, not in the system's own: the values of
-    /// [`KEYCHAIN_SECRET`] entries, and the sign-ins of [`CHATGPT_SECRET`] entries that say
-    /// `keep = "keychain"`. The kinds, how a value is put in, how a person signs in and how
+    /// [`KEYCHAIN_SECRET`] entries, and the sign-ins of [`CHATGPT_SECRET`] entries that do not
+    /// say `keep = "file"`. The kinds, how a value is put in, how a person signs in and how
     /// each stands all read it from then on, so name it after any kinds of one's own that
     /// go by those names.
     #[must_use]

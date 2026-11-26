@@ -27,7 +27,7 @@ contracts must not break ("What is stable").
 | `crates/corduroy-mcp` | `mcp_server`: one MCP server as a native plugin, its tools as `<server>__<tool>`. A stdio server is started through `Kernel::spawn`, never directly. Tests use a Python fixture server (`tests/fixtures/server.py`). |
 | `crates/corduroy-providers` | Real model providers built from `oi-kit-providers` (`ProviderSpec` → `Arc<dyn corduroy_harness::Provider>`), converting messages, tools and usage at the boundary (`adapter`). The only crate that sees oi-kit's types. |
 | `crates/corduroy-http` | `UreqClient`, the `HttpClient` behind the `http` capability (no redirects), and the `http_client` plugin. |
-| `crates/corduroy-chatgpt` | Sign in with ChatGPT (OpenAI's open-source token-sharing flow): `ChatGpt::sign_in` (dynamic registration, PKCE, loopback callback, ID token verified against the issuer's keys), `Store` (the sign-in, in the person's own directory, mode 0600), `ChatGpt::token` (renewal under a file lock), `chatgpt_secret`, the token as a `Secret`, and `advice` (what to tell the person when the plan refuses). Tests run against a fake issuer on loopback. Tokens never go in an error, a log or `Debug`. |
+| `crates/corduroy-chatgpt` | Sign in with ChatGPT (OpenAI's open-source token-sharing flow): `ChatGpt::sign_in` (dynamic registration, PKCE, loopback callback, ID token verified against the issuer's keys), `Store` (the sign-in, in a `Vault` such as the keychain, or in the person's own directory, mode 0600), `ChatGpt::token` (renewal under a file lock), `chatgpt_secret`, the token as a `Secret`, and `advice` (what to tell the person when the plan refuses). Tests run against a fake issuer on loopback. Tokens never go in an error, a log or `Debug`. |
 | `crates/corduroy-keychain` | The operating system's keychain: `Keychain` (reachable, get, set, remove one item under the service `corduroy`), `Os` (the macOS Keychain, the Windows Credential Manager, the Secret Service over D-Bus; a value longer than one Windows credential is kept as numbered pieces), `Memory` and `Missing` (for tests: one that forgets, one that is not there), and `keychain_secret`, an item as a `Secret`, read once for a run. No fallback where a machine has none. Its one test of the real keychain runs only where `CORDUROY_REQUIRE_KEYCHAIN` is set (CI, on all three systems), so a test run never touches a person's own. A value never goes in an error, a log or `Debug`. |
 | `crates/corduroy-shell` | `ShellKernel`, a persistent shell (POSIX, or PowerShell: `ShellKernel::powershell`) as a `Kernel` that can also `spawn` processes, and the `shell_kernel` plugin. Its PowerShell tests skip without PowerShell unless `CORDUROY_REQUIRE_POWERSHELL` is set (CI, on Linux and Windows). |
 | `crates/corduroy-wasm` | wasmtime host. Loads components built against `wit/corduroy.wit` as `Plugin`s; links only granted interfaces. |
@@ -194,6 +194,10 @@ as design guidance, not noise.
   `bearer_token_env` are to give way to naming a secret. Never fall back from one source
   to another without the file saying so: a keychain that is not there is an error, never a
   file or a variable in its place.
+- **The safer source is the one that needs nothing written.** A `[secrets.*]` entry that
+  says nothing is kept in the keychain, and a sign-in is kept there; the environment
+  (`env`) and a file (`keep = "file"`) are what an entry has to say. Give a new kind of
+  secret, or a new setting of one, the same shape: the default is the safe one.
 - **The keychain is a part of the `Standard`.** Code reaches it through
   `Standard::keychain` (or the `Keychain` it was handed), never by making an `Os` of its
   own, so that a command can swap it and no test touches a person's real keychain: tests
@@ -284,6 +288,10 @@ as design guidance, not noise.
 
 ## Style
 
+- A command's name is as far in meaning from every other command's as it can be, so that no
+  two are taken for each other: `check` says what an agent has, `doctor` whether it works,
+  `secrets set` puts a key in, `login` signs in to a subscription. Do not add an alias for
+  one because another word might be reached for; that is decided when someone does.
 - `rustfmt.toml` sets width 100. Run `cargo fmt --all` before committing.
 - Prefer `.to_owned()`/`String::from` over `.to_string()` on `&str` (`str_to_string` is on).
 - Use `foo.rs` + `foo/` for modules, never `foo/mod.rs` (`mod_module_files` is on).

@@ -15,8 +15,9 @@
 //!
 //! The agent file's other native entries are built the same way. `[kernels.<name>]` with
 //! `kind = "shell"` asks for the kind `shell-kernel` ([`kernel_kind`]), `[mcp.<name>]` for the
-//! kind [`MCP`] and `[secrets.<name>]` for the kind [`ENV_SECRET`], or `<kind>-secret` where
-//! the entry gives a `kind` ([`secret_kind`]: [`KEYCHAIN_SECRET`], [`CHATGPT_SECRET`]), each
+//! kind [`MCP`] and `[secrets.<name>]` for the kind [`KEYCHAIN_SECRET`], or [`ENV_SECRET`]
+//! where the entry names a variable, or `<kind>-secret` where it gives a `kind`
+//! ([`secret_kind`]: [`CHATGPT_SECRET`]), each
 //! with the entry's keys as its configuration. So a command built for another system can
 //! bring a kernel, an MCP client or a source of secrets of its own, under a kind of its own
 //! or under the standard kind's name.
@@ -39,7 +40,8 @@ use crate::places::Places;
 /// The extension kind a `[mcp.<name>]` entry is built from.
 pub const MCP: &str = "mcp";
 
-/// The extension kind a `[secrets.<name>]` entry is built from, unless it gives a `kind`.
+/// The extension kind of a secret read from the environment: what a `[secrets.<name>]` entry
+/// that names a variable (`env`) is built from.
 pub const ENV_SECRET: &str = "env-secret";
 
 /// The extension kind of a secret that is a `ChatGPT` sign-in: what a `[secrets.<name>]`
@@ -47,7 +49,7 @@ pub const ENV_SECRET: &str = "env-secret";
 pub const CHATGPT_SECRET: &str = "chatgpt-secret";
 
 /// The extension kind of a secret kept in the system's keychain: what a `[secrets.<name>]`
-/// entry with `kind = "keychain"` is built from.
+/// entry is built from when it says `kind = "keychain"`, or says nothing at all.
 pub const KEYCHAIN_SECRET: &str = "keychain-secret";
 
 /// The extension kind a `[secrets.<name>]` entry of `kind` is built from: `<kind>-secret`.
@@ -308,8 +310,10 @@ impl Vault for SignInItem {
 /// The `ChatGPT` sign-in `[secrets.<name>]` names.
 ///
 /// It is the one kept under the entry's name, so that every agent of the person's that
-/// names it shares it. `keep` says where: `file` (the default: a file in the person's own
-/// directory) or `keychain` (an item of `keychain`, named `chatgpt-sign-in.<name>`).
+/// names it shares it. It is kept in `keychain`, as the item `chatgpt-sign-in.<name>`,
+/// unless the entry says `keep = "file"`: then in a file in the person's own directory.
+/// The file is the choice to write down, and never what a machine without a keychain gets
+/// by itself.
 ///
 /// # Errors
 ///
@@ -320,12 +324,12 @@ pub fn chatgpt_in(asked: &Asked<'_>, keychain: &Arc<dyn Keychain>) -> Result<Cha
     let name = plain_name(asked, "a ChatGPT sign-in")?;
     let store = Store::named(&Places::person()?, name);
     let store = match asked.config.get("keep").map(Value::as_str) {
-        None | Some(Some("file")) => store,
-        Some(Some("keychain")) => store.kept_in(Arc::new(SignInItem {
+        None | Some(Some("keychain")) => store.kept_in(Arc::new(SignInItem {
             keychain: Arc::clone(keychain),
             item: format!("chatgpt-sign-in.{name}"),
         })),
-        Some(_) => return Err("`keep` is \"file\" or \"keychain\"".to_owned()),
+        Some(Some("file")) => store,
+        Some(_) => return Err("`keep` is \"keychain\" or \"file\"".to_owned()),
     };
     Ok(ChatGpt::new(store))
 }
@@ -365,7 +369,7 @@ impl Extensions {
     /// | `mcp` | `command` (with `args`, `env` and `kernel`, `shell` by default) or `url` (with `secret` or `bearer_token_env`), and `timeout_seconds` | the tools of one MCP server, as `<name>__<tool>`; what `[mcp.<name>]` builds |
     /// | `env-secret` | `env` | the secret named like the entry, read from that environment variable when it is used; what `[secrets.<name>]` builds |
     /// | `keychain-secret` | none | the secret named like the entry, read from the system's keychain (the macOS Keychain, the Windows Credential Manager, the Secret Service) when it is first used; what `[secrets.<name>]` with `kind = "keychain"` builds |
-    /// | `chatgpt-secret` | `keep` (`file`, the default, or `keychain`) | the secret named like the entry: the access token of a `ChatGPT` sign-in (`corduroy login`), renewed as it runs out; what `[secrets.<name>]` with `kind = "chatgpt"` builds |
+    /// | `chatgpt-secret` | `keep` (`keychain`, the default, or `file`) | the secret named like the entry: the access token of a `ChatGPT` sign-in (`corduroy login`), renewed as it runs out; what `[secrets.<name>]` with `kind = "chatgpt"` builds |
     #[must_use]
     pub fn builtin() -> Self {
         let kinds = Self::none()
@@ -391,7 +395,7 @@ impl Extensions {
     }
 
     /// With the kinds that keep something in a keychain reading `keychain`:
-    /// [`KEYCHAIN_SECRET`], and [`CHATGPT_SECRET`] for an entry that says `keep = "keychain"`.
+    /// [`KEYCHAIN_SECRET`], and [`CHATGPT_SECRET`] for an entry that does not say `keep = "file"`.
     #[must_use]
     pub fn keeping_in(self, keychain: &Arc<dyn Keychain>) -> Self {
         let (items, sign_ins) = (Arc::clone(keychain), Arc::clone(keychain));

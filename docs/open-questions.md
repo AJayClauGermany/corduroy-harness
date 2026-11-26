@@ -1226,20 +1226,20 @@ any default with it, or starts from nothing each time.
 `[[plugins]]` reaches add-ons only, and the names stay by an earlier decision. 1.0 is the
 last moment to change that.
 
-New names arrive with [How people meet it](design.md#how-people-meet-it). One is chosen:
-a value is put into the keychain with `corduroy secrets set`, and `login` is kept for what
-is signed in to. The others are not: the keychain's kind (a `[secrets.*]` entry picks its
-kind with `kind`), `secret` on an MCP entry, the manifest's file name and keys, the key by
-which an agent file lists a package, and the command that promotes one.
+New names arrive with [How people meet it](design.md#how-people-meet-it). Two are chosen:
+a value is put into the keychain with `corduroy secrets set`, with `login` kept for what is
+signed in to; and the command that tries an agent for real is `corduroy doctor`. The others
+are not: the keychain's kind (a `[secrets.*]` entry picks its kind with `kind`), `secret` on
+an MCP entry, the manifest's file name and keys, the key by which an agent file lists a
+package, and the command that promotes one.
 
-Two of those are built under names that are not yet confirmed: `kind = "keychain"`, and
-`secret` on an MCP entry. Two more came with them: `keep` on a `chatgpt` secret (`file` or
-`keychain`), and `corduroy doctor`. [Trials](trials.md) says how to try each.
+Three of those are built under names that are not yet confirmed: `kind = "keychain"`,
+`secret` on an MCP entry, and `keep` on a `chatgpt` secret (`keychain`, or `file` where
+that is said).
 
 *Direction.* Confirm the old ones, and choose the new ones in one sitting, saying *add-on*
-where an add-on is meant. For the secrets' names: decide whether `keep` should be left out
-of the file once the keychain is where a sign-in goes by default; and whether `doctor` is
-`check` with a flag.
+where an add-on is meant, and by the rule the two chosen ones follow: a name is as far in
+meaning from every other command's as it can be, so that no two are taken for each other.
 
 ### H8. How much of MCP is in 1.0?
 

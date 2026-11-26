@@ -100,8 +100,9 @@ value. It does hold what you typed and what the tools returned, so read it befor
 it. `corduroy report > report.txt` keeps it as a file. Model requests are timed in runs
 made by a build that records `model/request`; older runs show the rest.
 
-**`doctor`** Try the agent for real, part by part, and say what works. Where `check` loads
-the agent and asks nothing of the outside, `doctor` also
+**`doctor`** Try the agent for real, part by part, and say what works. The two are kept
+apart on purpose: `check` says what the agent *has*, and asks nothing of the outside;
+`doctor` says whether it *works*. Beyond loading the agent, `doctor`
 
 - sees whether each credential can be had, as `secrets` does;
 - runs one command (`echo`) in each kernel;
@@ -136,7 +137,7 @@ a ChatGPT plan's is followed by what to do about it, as after a run.
   none: a server nobody is logged in to, a container. `--secrets keychain` or `--secrets env`
   says which; the keychain asked for on a machine without one is refused, and nothing is
   written in its place. A ChatGPT sign-in is kept in the keychain, or without one in a file
-  of your own.
+  of your own, which the entry then says (`keep = "file"`).
 
 `init` writes where a key comes from, never the key. It prints the command that puts it
 there (`corduroy secrets set anthropic`, or `corduroy login chatgpt`) and, when the vendor's
@@ -158,8 +159,9 @@ It exits non-zero if one cannot be had, and each such line says what to do. The 
 not put together for this. On macOS, a copy of `corduroy` other than the one that put an
 item there may be asked before it is let to look, as it is before it uses it.
 
-**`secrets set [name]`** Put the value of a [`kind = "keychain"`](agent-file.md#secretsname)
-secret into the system's keychain. It asks for the value and does not show it as you type
+**`secrets set [name]`** Put the value of a [keychain](agent-file.md#secretsname) secret (one
+of `kind = "keychain"`, or that says nothing of where it comes from) into the system's
+keychain. It asks for the value and does not show it as you type
 or paste; the spaces and line end around it are dropped. With the value piped in, it reads
 one line and asks nothing, which is how a key is moved out of the environment:
 
@@ -212,11 +214,11 @@ opens
 the browser at OpenAI's sign-in ("Continue with ChatGPT"), prints the address in case it
 does not open, and waits up to five minutes for you to come back to it; the answer arrives
 on `127.0.0.1` (port 1455, or another if that one is taken). The first sign-in registers
-this tool for your account; later ones reuse that registration. What is kept is in your own
-configuration directory (see [Files](#files)), or in the keychain where the entry says
-`keep = "keychain"`, so every workspace whose agent names a secret of the same name shares
-the sign-in. An entry that newly says `keep = "keychain"` while a sign-in is still in the
-file has it moved, without the browser. `name` says which secret, where the file has
+this tool for your account; later ones reuse that registration. What is kept is in your
+keychain, or, where the entry says `keep = "file"`, in your own configuration directory
+(see [Files](#files)), so every workspace whose agent names a secret of the same name shares
+the sign-in. A sign-in still in the file an earlier build kept it in is moved into the
+keychain, without the browser. `name` says which secret, where the file has
 several. The agent is not put together for this.
 
 **`logout [name]`** Revoke that sign-in with OpenAI and remove what was kept.
@@ -229,7 +231,7 @@ several. The agent is not put together for this.
 | `<workspace>/.corduroy/log.jsonl` | the event log (the agent file's `log` moves it) |
 | `<workspace>/.corduroy/cache/` | compiled add-ons, so a second start is fast |
 | `<workspace>/.corduroy/skills/`, `memory/` | what the default agent's `skills` and `memory` add-ons keep |
-| `~/.config/corduroy/` (`$XDG_CONFIG_HOME/corduroy`; on Windows `%APPDATA%\corduroy`) | what is yours whatever you work on: `chatgpt/<secret>.json`, a ChatGPT sign-in (readable by you alone) unless its entry keeps it in the keychain, and `host-id`, a random name for this computer that the sign-in sends |
+| `~/.config/corduroy/` (`$XDG_CONFIG_HOME/corduroy`; on Windows `%APPDATA%\corduroy`) | what is yours whatever you work on: `chatgpt/<secret>.json`, a ChatGPT sign-in (readable by you alone) where its entry says `keep = "file"`, and `host-id`, a random name for this computer that the sign-in sends |
 | your keychain, service `corduroy` | the values of `kind = "keychain"` secrets, each under its secret's name, and the ChatGPT sign-ins kept there, as `chatgpt-sign-in.<secret>`: in the macOS Keychain (Keychain Access shows them), the Windows Credential Manager (as `<name>.corduroy`) or the Secret Service on Linux (`secret-tool search service corduroy`) |
 
 The agent file, the log, the cache and your own configuration directory are out of reach of

@@ -13,8 +13,10 @@ question it hangs off is updated or removed.
 
 Nothing here is a promise. The names and defaults on trial are the ones marked as not final
 in [How people meet it](design.md#how-people-meet-it). A trial keeps its number, so a gap is
-one that was answered: T1 (`init` puts keys in the keychain, and what it prints is enough)
-and T2 (`secrets set` puts a value in; `login` is for what is signed in to).
+one that was answered: T1 (`init` puts keys in the keychain, and what it prints is enough),
+T2 (`secrets set` puts a value in; `login` is for what is signed in to), T3 (a sign-in is
+kept in the keychain unless its entry says `keep = "file"`) and T6 (`doctor` is a command
+of its own, under that name).
 
 ## Before you start
 
@@ -67,47 +69,6 @@ all after an update.
 > Found (26 November 2026, macOS, one build made on the machine and not rebuilt): no
 > prompt at any point, for a key or for a sign-in. Not yet tried across a rebuild.
 
-## T3. Where is a ChatGPT sign-in kept?
-
-*Answers:* whether `keep` should exist as a key at all, or the keychain should simply be
-where a sign-in goes when there is one
-([H7](open-questions.md#h7-are-the-agent-files-older-names-final)). Today a `chatgpt`
-secret without `keep` is kept in a file, as before, so that an agent file written earlier
-behaves as it did.
-
-**A. A file of your own** (`~/.config/corduroy/chatgpt/<name>.json`, readable by you alone):
-
-```bash
-corduroy init chatgpt --secrets env
-```
-
-```bash
-corduroy login
-```
-
-**B. The keychain.** In the same `corduroy.toml`, add `keep = "keychain"` under
-`[secrets.chatgpt]`, then:
-
-```bash
-corduroy login            # moves the sign-in out of the file; no browser this time
-```
-
-```bash
-corduroy secrets          # says who is signed in, where it is kept, how long the token is good
-```
-
-(`corduroy init chatgpt` writes B from the start where there is a keychain.)
-
-*Look at:* that the file is gone after the move and runs still work; that a run an hour
-later still works (the token is renewed and written back to the keychain); on macOS,
-whether the Keychain asks again at each renewal; on Windows, that it works at all (the
-sign-in is longer than one credential holds and is kept as numbered pieces).
-
-> Found (26 November 2026, macOS): B works. A sign-in made earlier, kept in the file, was
-> moved into the keychain by `corduroy login` without the browser, and the same sign-in went
-> on working. Not said: whether `keep` should be needed at all, or the keychain should be
-> where a sign-in goes whenever there is one.
-
 ## T4. Is a secret's name the right name for its item?
 
 *Answers:* how an agent file says which item it means, and part of
@@ -145,31 +106,6 @@ changed key be picked up, at the cost of the keychain being read (and perhaps as
 every request?
 
 > Found:
-
-## T6. Is `doctor` a command of its own?
-
-*Answers:* its name and what it covers
-([H7](open-questions.md#h7-are-the-agent-files-older-names-final)). `check` loads the agent
-and asks nothing of the outside; `doctor` also tries each key, kernel and model.
-
-```bash
-corduroy check
-```
-
-```bash
-corduroy doctor
-```
-
-Break something on purpose and run both again: `corduroy secrets remove anthropic`, a
-wrong `model = "..."`, `corduroy logout`.
-
-*Look at:* whether each failure's line told you what to do; whether `doctor` should be
-`check --live`, or `check` should do all of it; whether asking each model a question (a
-few tokens, a second or two) is right for something you run often; what else it should
-try (an MCP server's tools, a file written in the workspace).
-
-> Found (26 November 2026, macOS): liked as it is, for showing which parts work and which
-> do not. Not said: whether it should be `check --live`, or what else it should try.
 
 ## T7. A token for an MCP server
 

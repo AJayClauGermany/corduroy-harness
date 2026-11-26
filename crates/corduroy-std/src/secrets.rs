@@ -108,7 +108,10 @@ pub fn keychain_state(asked: &Asked<'_>, keychain: &dyn Keychain) -> State {
 }
 
 /// How a `ChatGPT` sign-in stands: who is signed in, where it is kept and how long its
-/// token is good for. Nothing is asked of `OpenAI`.
+/// token is good for.
+///
+/// Nothing is asked of `OpenAI`. A sign-in still in the file it was kept in before the
+/// keychain was where one goes is said to be there, with what moves it.
 ///
 /// # Errors
 ///
@@ -118,11 +121,23 @@ pub fn chatgpt_state(asked: &Asked<'_>, keychain: &Arc<dyn Keychain>) -> State {
     let chatgpt = chatgpt_in(asked, keychain)?;
     let store = chatgpt.store();
     let Some(record) = store.load()? else {
-        return Err(format!(
-            "nobody is signed in to ChatGPT (looked in {}): run `corduroy login {}`",
-            store.place(),
-            asked.name
-        ));
+        // Looked for only where a file is not what this entry reads.
+        let left = store.file().is_file() && store.place() != store.file().display().to_string();
+        return Err(if left {
+            format!(
+                "the sign-in is still in {}, and this entry keeps it in {}: `corduroy login {}` \
+                 moves it, without the browser",
+                store.file().display(),
+                store.place(),
+                asked.name
+            )
+        } else {
+            format!(
+                "nobody is signed in to ChatGPT (looked in {}): run `corduroy login {}`",
+                store.place(),
+                asked.name
+            )
+        });
     };
     let who = record
         .email

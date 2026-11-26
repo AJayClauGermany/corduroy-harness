@@ -37,8 +37,9 @@
 //! every other key is the extension's own configuration. Kernels, MCP servers and secrets are
 //! extensions too, built from kinds the same way: `[kernels.<name>]` with `kind = "shell"`
 //! builds the kind `shell-kernel` with the entry's other keys (`dir`, `program`) as its
-//! configuration, `[mcp.<name>]` the kind `mcp` and `[secrets.<name>]` the kind `env-secret`,
-//! or `<kind>-secret` where it gives a `kind` (`keychain`, `chatgpt`):
+//! configuration, `[mcp.<name>]` the kind `mcp` and `[secrets.<name>]` the kind
+//! `keychain-secret`, or `env-secret` where it names a variable (`env`), or `<kind>-secret`
+//! where it gives a `kind` (`chatgpt`):
 //!
 //! ```toml
 //! [extensions.scratch]
@@ -63,7 +64,7 @@ use corduroy_harness::wasm::{CAPABILITIES, WORLD, WasmRuntime};
 use corduroy_harness::{Harness, ProcessInfo, provider};
 use corduroy_providers::ProviderSpec;
 pub use corduroy_std::{DATA_DIR, Places};
-use corduroy_std::{ENV_SECRET, MCP, Standard, kernel_kind, secret_kind};
+use corduroy_std::{MCP, Standard, kernel_kind, secret_kind};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -201,13 +202,18 @@ pub struct KernelEntry {
 }
 
 /// A secret: an extension of the kind `<kind>-secret`, with the entry's other keys as its
-/// configuration. Without a `kind` it is read from the environment (`env-secret`, with `env`
-/// naming the variable).
+/// configuration.
+///
+/// Without a `kind` it is kept in the system's keychain (`keychain-secret`), unless it names
+/// an environment variable (`env`): then it is read from there (`env-secret`). The safer
+/// source is the one that needs nothing written.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SecretEntry {
-    /// Where the value comes from: `env` if left out, `keychain` (the system's keychain,
-    /// where `corduroy secrets set` puts it) or `chatgpt` (a sign-in with `ChatGPT`, made
-    /// with `corduroy login`), unless the command brings other kinds.
+    /// Where the value comes from: `keychain` (the system's keychain, where
+    /// `corduroy secrets set` puts it), `env` (an environment variable, named by `env`) or
+    /// `chatgpt` (a sign-in with `ChatGPT`, made with `corduroy login`), unless the command
+    /// brings other kinds. Left out, it is `env` for an entry with an `env` key and
+    /// `keychain` for any other.
     #[serde(default, skip_serializing)]
     pub kind: Option<String>,
     /// The secret's own configuration: every other key of the entry. The kind refuses a key
@@ -220,15 +226,18 @@ impl SecretEntry {
     /// The extension kind this entry is built from.
     #[must_use]
     pub fn extension(&self) -> String {
-        self.kind
-            .as_deref()
-            .map_or_else(|| ENV_SECRET.to_owned(), secret_kind)
+        secret_kind(self.kind_said())
     }
 
-    /// The kind as the file says it: `env` where it says none.
+    /// The kind as the file says it, or as it follows from what the file says: `env` for
+    /// an entry that names a variable, `keychain` for one that names nothing.
     #[must_use]
     pub fn kind_said(&self) -> &str {
-        self.kind.as_deref().unwrap_or("env")
+        match &self.kind {
+            Some(kind) => kind,
+            None if self.config.contains_key("env") => "env",
+            None => "keychain",
+        }
     }
 }
 
@@ -578,13 +587,14 @@ impl Starter {
                 (Vendor::ChatGpt, Keys::Keychain, _) => {
                     "# Your ChatGPT plan pays for the model: sign in once with `corduroy login`. \
                      The sign-in is\n# kept in your keychain.\n[secrets.chatgpt]\nkind = \
-                     \"chatgpt\"\nkeep = \"keychain\"\n"
+                     \"chatgpt\"\n"
                         .to_owned()
                 }
                 (Vendor::ChatGpt, ..) => {
                     "# Your ChatGPT plan pays for the model: sign in once with `corduroy login`. \
-                     The sign-in is\n# kept in a file of your own, outside every workspace \
-                     (`keep = \"keychain\"` moves it).\n[secrets.chatgpt]\nkind = \"chatgpt\"\n"
+                     The sign-in is\n# kept in a file of your own, outside every workspace: \
+                     without this line it is kept in\n# your keychain.\n[secrets.chatgpt]\n\
+                     kind = \"chatgpt\"\nkeep = \"file\"\n"
                         .to_owned()
                 }
                 (_, Keys::Keychain, _) => format!(
@@ -1127,6 +1137,7 @@ fn plugins(
 #[cfg(test)]
 mod tests {
     use corduroy_harness::core::{SECRETS, Secret, Secrets, plugin_fn};
+    use corduroy_std::ENV_SECRET;
 
     use super::*;
 
@@ -1243,11 +1254,12 @@ mod tests {
         );
         assert_eq!(file.model, Vendor::OpenAi.provider().1);
 
-        // A ChatGPT plan is a sign-in whatever else is said, kept in the keychain if keys are.
+        // A ChatGPT plan is a sign-in whatever else is said: kept in the keychain, which
+        // needs nothing written, or in a file where keys are not kept in the keychain.
         for (keys, config) in [
-            (Keys::Unsaid, "{}"),
-            (Keys::Environment, "{}"),
-            (Keys::Keychain, r#"{"keep":"keychain"}"#),
+            (Keys::Unsaid, r#"{"keep":"file"}"#),
+            (Keys::Environment, r#"{"keep":"file"}"#),
+            (Keys::Keychain, "{}"),
         ] {
             let plan = Starter::choose(Some(Vendor::ChatGpt), true, true, keys);
             let file = AgentFile::parse(&plan.text()).unwrap();
@@ -1264,6 +1276,43 @@ mod tests {
         let file = AgentFile::parse(&local.text()).unwrap();
         assert!(file.secrets.is_empty());
         assert_eq!(file.providers["main"].spec.kind, "ollama");
+    }
+
+    #[test]
+    fn a_secret_that_says_nothing_is_kept_in_the_keychain_and_one_that_names_a_variable_is_read() {
+        let kinds = |secrets: &str| {
+            let file = AgentFile::parse(&format!("{BARE}{secrets}")).unwrap();
+            file.secrets
+                .values()
+                .map(|entry| (entry.kind_said().to_owned(), entry.extension()))
+                .collect::<Vec<_>>()
+        };
+        let kind = |said: &str, extension: &str| (said.to_owned(), extension.to_owned());
+        // Nothing said: the keychain. Naming a variable is what makes it the environment.
+        assert_eq!(
+            kinds("[secrets.a]\n"),
+            [kind("keychain", "keychain-secret")]
+        );
+        assert_eq!(
+            kinds("[secrets.a]\nenv = \"A_TOKEN\"\n"),
+            [kind("env", "env-secret")]
+        );
+        // A kind that is said is the kind, whatever else the entry holds.
+        assert_eq!(
+            kinds("[secrets.a]\nkind = \"env\"\nenv = \"A_TOKEN\"\n"),
+            [kind("env", "env-secret")]
+        );
+        assert_eq!(
+            kinds("[secrets.a]\nkind = \"chatgpt\"\n"),
+            [kind("chatgpt", "chatgpt-secret")]
+        );
+
+        // A misspelt `env` does not quietly become a variable or anything else: the
+        // keychain kind takes no setting, and says so.
+        let places = Places::new(corduroy_test_support::scratch("cli-secret-default"), None);
+        let typo = AgentFile::parse(&format!("{BARE}[secrets.a]\nenvv = \"A_TOKEN\"\n")).unwrap();
+        let error = assemble(&typo, &places).unwrap_err().to_string();
+        assert_eq!(error, "secret `a`: `envv` is not a setting of this kind");
     }
 
     #[test]

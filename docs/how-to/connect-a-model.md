@@ -28,7 +28,7 @@ kind = "anthropic"
 secret = "anthropic"
 
 [secrets.anthropic]
-kind = "keychain"
+kind = "keychain"         # may be left out: the keychain is where a secret is kept
 ```
 
 Put the key in once. It is not shown as you type or paste it:
@@ -93,8 +93,7 @@ kind = "openai"
 secret = "chatgpt"
 
 [secrets.chatgpt]
-kind = "chatgpt"
-keep = "keychain"         # leave out to keep the sign-in in a file of your own
+kind = "chatgpt"          # the sign-in is kept in your keychain
 ```
 
 `corduroy init chatgpt` writes the whole agent this way. Sign in once, in the browser:
@@ -109,14 +108,16 @@ use it from; see and limit it at <https://chatgpt.com/settings/usage>. A request
 does not cover fails the run with OpenAI's reason, followed by what you can do about it
 (the usage page, or `corduroy login` again): nothing falls back to another way of paying. Do not set `max_tokens` on this provider: a plan-paid request is refused a limit.
 
-With `keep = "keychain"` the tokens are in your keychain and no file holds them; without
-it they are in `~/.config/corduroy/chatgpt/chatgpt.json`, readable by you alone. Adding the
-key later moves a sign-in you already have: run `corduroy login` once more, and it is moved
-without the browser. `corduroy secrets` says who is signed in, where the sign-in is kept and
-how long its token is good for.
+The tokens are in your keychain and no file holds them. `corduroy secrets` says who is
+signed in, where the sign-in is kept and how long its token is good for. If you signed in
+with an earlier build, the sign-in is still in `~/.config/corduroy/chatgpt/chatgpt.json`:
+run `corduroy login` once more, and it is moved into the keychain without the browser.
 
-On a machine with no browser, leave `keep` out, sign in on a machine that has one, then copy
-`~/.config/corduroy/chatgpt/chatgpt.json` over a secure channel to the same place there.
+On a machine without a keychain (a server, a container) the sign-in has to be kept in a
+file, and the entry has to say so: add `keep = "file"`. It is then in
+`~/.config/corduroy/chatgpt/chatgpt.json`, readable by you alone. For a machine with no
+browser either, sign in on one that has, with `keep = "file"`, then copy that file over a
+secure channel to the same place there.
 
 `examples/chatgpt-plan/corduroy.toml` is the default agent set up this way.
 

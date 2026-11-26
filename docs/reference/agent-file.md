@@ -99,9 +99,15 @@ add-on may use through the `secret` capability without ever seeing its value.
 
 | Key | Type | Meaning |
 | --- | --- | --- |
-| `kind` | string | Where the value comes from: `env` (the default), `keychain` or `chatgpt`, unless the command brings other kinds. The entry's other keys are that kind's. |
+| `kind` | string | Where the value comes from: `keychain`, `env` or `chatgpt`, unless the command brings other kinds. Left out, it is `keychain`, unless the entry has an `env` key: then it is `env`. The entry's other keys are that kind's. |
 | `env` | string | For `env`: the environment variable holding the value, read when a request needs it. |
-| `keep` | string | For `chatgpt`: where the sign-in is kept, `file` (the default) or `keychain`. |
+| `keep` | string | For `chatgpt`: where the sign-in is kept, `keychain` (the default) or `file`. |
+
+The keychain is where a secret is kept unless the entry says otherwise, so the safer source
+is the one that needs nothing written: `[secrets.github]` and no more is a secret kept in
+the keychain. Reading the environment is said by naming the variable (`env = "GITHUB_AUTH"`),
+and keeping a sign-in in a file by `keep = "file"`. A machine without a keychain is not
+given either by itself: the entry fails, saying so, until it says one of them.
 
 A `keychain` secret takes no other key. Its value is kept in the operating system's
 keychain (the macOS Keychain, the Windows Credential Manager, the Secret Service on Linux),
@@ -125,9 +131,10 @@ kind = "keychain"         # corduroy secrets set anthropic
 
 A `chatgpt` secret takes `keep` and no other key. Its value is the access token of a sign-in
 with ChatGPT, made with [`corduroy login`](cli.md) and kept under the entry's name (letters,
-digits, `-` and `_`): in your own configuration directory, readable by you alone, or with
-`keep = "keychain"` in the keychain, as the item `chatgpt-sign-in.<name>`. An entry changed
-to `keep = "keychain"` has its sign-in moved out of the file by the next `corduroy login`.
+digits, `-` and `_`): in the keychain, as the item `chatgpt-sign-in.<name>`, or with
+`keep = "file"` in your own configuration directory, readable by you alone. A sign-in made
+while a file was where one went is still in its file: `corduroy secrets` says so, and the
+next `corduroy login` moves it into the keychain without the browser.
 The token is renewed as it runs
 out, so the secret always reveals one that is good; if nobody is signed in, or the sign-in
 was revoked, revealing it fails and says to run `corduroy login`. Name it as the `secret`
