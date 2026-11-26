@@ -19,8 +19,8 @@
 //!                                    put a secret's value in the keychain, typed without showing
 //! corduroy [options] secrets remove [name]
 //!                                    take it out again
-//! corduroy [options] login [name]    sign in for a secret (a ChatGPT plan), or put one in
-//! corduroy [options] logout [name]   sign out again, or take the value out
+//! corduroy [options] login [name]    sign in for a secret of the agent that needs it (a ChatGPT plan)
+//! corduroy [options] logout [name]   sign out again: revoke and forget what was kept
 //!
 //! options: --agent <file>  --workspace <dir>  --session <name>  --model <name>  --provider <name>
 //! ```

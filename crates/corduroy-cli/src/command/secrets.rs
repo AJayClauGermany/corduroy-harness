@@ -104,26 +104,14 @@ pub(super) fn list(described: &Described, standard: &Standard, out: &Out) -> Don
     })
 }
 
-/// What a person can do about a secret, by its kind.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Does {
-    /// Its value is put in and taken out.
-    Keeps,
-    /// It is signed in to and out of.
-    SignsIn,
-}
-
-/// The secrets of the file that a person does `does` about.
-fn those(described: &Described, standard: &Standard, does: &[Does]) -> Vec<String> {
+/// The secrets of the file whose kind `does` holds for: those whose value is put in, or
+/// those that are signed in to.
+fn those(described: &Described, does: impl Fn(&str) -> bool) -> Vec<String> {
     described
         .file
         .secrets
         .iter()
-        .filter(|(_, secret)| {
-            let kind = secret.extension();
-            (does.contains(&Does::Keeps) && standard.keep(&kind).is_some())
-                || (does.contains(&Does::SignsIn) && standard.sign_in(&kind).is_some())
-        })
+        .filter(|(_, secret)| does(&secret.extension()))
         .map(|(name, _)| name.clone())
         .collect()
 }
@@ -159,7 +147,8 @@ pub(super) fn change(
     standard: &Standard,
     console: &mut Console<'_>,
 ) -> Done {
-    let name = chosen(named, &those(described, standard, &[Does::Keeps]), ADD_KEPT)?;
+    let kept = those(described, |kind| standard.keep(kind).is_some());
+    let name = chosen(named, &kept, ADD_KEPT)?;
     let SecretAsked { kind, config } = described.secret(&name)?;
     let Some(keep) = standard.keep(&kind) else {
         let how = if standard.sign_in(&kind).is_some() {
@@ -189,40 +178,43 @@ pub(super) fn change(
     Ok(ExitCode::SUCCESS)
 }
 
-/// The secret `login` and `logout` mean: the one `named`, or else the only one that is signed
-/// in to, or else, in a file with no sign-in at all, the only one whose value is put in.
+/// The secret `login` and `logout` mean: the one `named`, or the only one that is signed in
+/// to. A key is not signed in to: where the file has only secrets whose value is put in, the
+/// error says the command that does that.
 fn signed(
     named: Option<&str>,
     described: &Described,
     standard: &Standard,
 ) -> Result<String, Box<dyn Error>> {
-    let signed = those(described, standard, &[Does::SignsIn]);
-    let candidates = if signed.is_empty() {
-        those(described, standard, &[Does::Keeps])
-    } else {
-        signed
+    let signed = those(described, |kind| standard.sign_in(kind).is_some());
+    let none = match those(described, |kind| standard.keep(kind).is_some()).first() {
+        Some(kept) if signed.is_empty() => format!(
+            "{ADD_SIGNED}.\n\nA key is not signed in to: the value of `{kept}` is put in with \
+             `corduroy secrets set {kept}`"
+        ),
+        _ => ADD_SIGNED.to_owned(),
     };
-    chosen(named, &candidates, ADD_SIGNED)
+    chosen(named, &signed, &none)
 }
 
 /// Sign in for (or, if not `inward`, out of) what a secret of the agent file stands for: the
-/// one `named`, or the only one a person does something about. For a secret whose value is
-/// put in, that is what signing in is.
+/// one `named`, or the only one that is signed in to.
 pub(super) fn sign(
     inward: bool,
     named: Option<&str>,
     described: &Described,
     standard: &Standard,
-    console: &mut Console<'_>,
+    console: &Console<'_>,
 ) -> Done {
     let name = signed(named, described, standard)?;
     let SecretAsked { kind, config } = described.secret(&name)?;
     let Some(sign_in) = standard.sign_in(&kind) else {
-        return if standard.keep(&kind).is_some() {
-            change(inward, Some(&name), described, standard, console)
+        let how = if standard.keep(&kind).is_some() {
+            format!(": its value is put in with `corduroy secrets set {name}`")
         } else {
-            Err(format!("`{name}` is no secret that is signed in to").into())
+            String::new()
         };
+        return Err(format!("`{name}` is no secret that is signed in to{how}").into());
     };
     let asked = Asked {
         name: &name,
@@ -256,7 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn login_means_the_sign_in_and_only_without_one_the_value_that_is_put_in() {
+    fn login_means_a_sign_in_and_never_a_key() {
         let standard = Standard::new();
         let meant = |named: Option<&str>, secrets: &str| {
             signed(named, &described(secrets), &standard).map_err(|error| error.to_string())
@@ -265,21 +257,26 @@ mod tests {
         let plan = "[secrets.plan]\nkind = \"chatgpt\"\n";
         let env = "[secrets.token]\nenv = \"TOKEN\"\n";
 
-        // The only secret that needs a person, whichever kind it is.
-        assert_eq!(meant(None, &format!("{kept}{env}")), Ok("key".to_owned()));
+        // The only sign-in is meant, whatever keys are beside it.
         assert_eq!(meant(None, &format!("{plan}{env}")), Ok("plan".to_owned()));
-        // Beside a sign-in, a value is put in by name.
         assert_eq!(meant(None, &format!("{kept}{plan}")), Ok("plan".to_owned()));
-        assert_eq!(
-            meant(Some("key"), &format!("{kept}{plan}")),
-            Ok("key".to_owned())
-        );
-        // Two of a kind have to be told apart, and none at all says what to add.
+        // Two have to be told apart.
         let two = format!("{plan}[secrets.other]\nkind = \"chatgpt\"\n");
         assert_eq!(
             meant(None, &two),
             Err("say which secret, one of: other, plan".to_owned())
         );
-        assert!(meant(None, env).unwrap_err().contains("kind = \"chatgpt\""));
+        // With no sign-in, what to add is said; and where there is a key in the keychain,
+        // the command that puts its value in.
+        let none = meant(None, env).unwrap_err();
+        assert!(
+            none.contains("kind = \"chatgpt\"") && !none.contains("secrets set"),
+            "{none}"
+        );
+        let key = meant(None, &format!("{kept}{env}")).unwrap_err();
+        assert!(
+            key.ends_with("is put in with `corduroy secrets set key`"),
+            "{key}"
+        );
     }
 }

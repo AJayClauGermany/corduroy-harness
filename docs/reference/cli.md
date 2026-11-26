@@ -19,8 +19,8 @@ corduroy [options] secrets set [name]
                                    put a secret's value in the keychain, typed without showing
 corduroy [options] secrets remove [name]
                                    take it out again
-corduroy [options] login [name]    sign in for a secret (a ChatGPT plan), or put its value in
-corduroy [options] logout [name]   sign out again, or take the value out
+corduroy [options] login [name]    sign in for a secret that needs it (a ChatGPT plan)
+corduroy [options] logout [name]   sign out again
 corduroy --version                 print the version (and commit) of this build
 ```
 
@@ -155,8 +155,8 @@ names no secret and reads a variable of the environment.
 ```
 
 It exits non-zero if one cannot be had, and each such line says what to do. The agent is
-not put together for this. On macOS, looking at an item may ask you to let `corduroy` use
-it, as using it does.
+not put together for this. On macOS, a copy of `corduroy` other than the one that put an
+item there may be asked before it is let to look, as it is before it uses it.
 
 **`secrets set [name]`** Put the value of a [`kind = "keychain"`](agent-file.md#secretsname)
 secret into the system's keychain. It asks for the value and does not show it as you type
@@ -205,10 +205,10 @@ unfinished until `continue` or `stop`.
 | 1 | the run failed, reached the turn limit, or is waiting; `check` found a plugin that did not start; any error |
 | 130 | the run was stopped (as after Ctrl-C) |
 
-**`login [name]`** Do what a secret of the agent file needs from you. For a
-`kind = "keychain"` secret that is its value: `login` is then `secrets set`, and `logout` is
-`secrets remove`. For a secret that is signed in to, a
-[`kind = "chatgpt"`](agent-file.md#secretsname) secret, which is a ChatGPT plan, it opens
+**`login [name]`** Sign in for a secret of the agent file whose kind is signed in to: a
+[`kind = "chatgpt"`](agent-file.md#secretsname) secret, which is a ChatGPT plan. A key is
+not signed in to: for a `kind = "keychain"` secret, `login` says to use `secrets set`. It
+opens
 the browser at OpenAI's sign-in ("Continue with ChatGPT"), prints the address in case it
 does not open, and waits up to five minutes for you to come back to it; the answer arrives
 on `127.0.0.1` (port 1455, or another if that one is taken). The first sign-in registers

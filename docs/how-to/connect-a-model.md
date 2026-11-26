@@ -60,9 +60,9 @@ The item is yours, not the workspace's: every agent file of yours with a
 out. On a machine without a keychain (a server, a container) there is nothing to fall back
 to: use `env` there, below.
 
-On macOS the Keychain may ask whether `corduroy` may use the item. "Always Allow" holds for
-that copy of the program, so a build you make yourself is asked again after each rebuild; an
-installed build is asked once.
+On macOS the copy of `corduroy` that put an item in the Keychain reads it without being
+asked. Another copy (a build you made again after changing the code) may be asked whether
+it may use the item; "Always Allow" then holds for that copy.
 
 ## Name a secret read from the environment
 

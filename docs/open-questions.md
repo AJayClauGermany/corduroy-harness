@@ -1226,22 +1226,20 @@ any default with it, or starts from nothing each time.
 `[[plugins]]` reaches add-ons only, and the names stay by an earlier decision. 1.0 is the
 last moment to change that.
 
-New names arrive with [How people meet it](design.md#how-people-meet-it), and none is
-chosen: the keychain's kind (a `[secrets.*]` entry picks its kind with `kind`), the command
-that stores a value, `secret` on an MCP entry, the manifest's file name and
-keys, the key by which an agent file lists a package, and the command that promotes one.
+New names arrive with [How people meet it](design.md#how-people-meet-it). One is chosen:
+a value is put into the keychain with `corduroy secrets set`, and `login` is kept for what
+is signed in to. The others are not: the keychain's kind (a `[secrets.*]` entry picks its
+kind with `kind`), `secret` on an MCP entry, the manifest's file name and keys, the key by
+which an agent file lists a package, and the command that promotes one.
 
-The first three are built under names that are not yet confirmed: `kind = "keychain"`;
-`corduroy secrets set <name>` and `secrets remove`, beside `corduroy secrets`, which lists;
-`secret` on an MCP entry. `corduroy login <name>` and `logout` do the same for a keychain
-secret, so both spellings of "put a value in" can be tried side by side. Two more came with
-them: `keep` on a `chatgpt` secret (`file` or `keychain`), and `corduroy doctor`.
-[Trials](trials.md) says how to try each.
+Two of those are built under names that are not yet confirmed: `kind = "keychain"`, and
+`secret` on an MCP entry. Two more came with them: `keep` on a `chatgpt` secret (`file` or
+`keychain`), and `corduroy doctor`. [Trials](trials.md) says how to try each.
 
 *Direction.* Confirm the old ones, and choose the new ones in one sitting, saying *add-on*
-where an add-on is meant. For the secrets' names: keep one of `secrets set` and `login` for
-a value and drop the other; decide whether `keep` should be left out of the file once the
-keychain is where a sign-in goes by default; and whether `doctor` is `check` with a flag.
+where an add-on is meant. For the secrets' names: decide whether `keep` should be left out
+of the file once the keychain is where a sign-in goes by default; and whether `doctor` is
+`check` with a flag.
 
 ### H8. How much of MCP is in 1.0?
 

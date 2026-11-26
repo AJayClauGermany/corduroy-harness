@@ -175,7 +175,7 @@ fn a_key_that_is_not_in_the_keychain_fails_the_run_and_says_the_command_that_put
 }
 
 #[test]
-fn login_puts_a_value_in_and_logout_takes_it_out_as_secrets_set_and_remove_do() {
+fn a_key_is_not_signed_in_to_and_nothing_typed_or_unknown_changes_nothing() {
     let workspace = scratch("cli-keychain-login");
     let (address, _seen) = endpoint("Hello.").unwrap();
     fs::write(
@@ -185,16 +185,22 @@ fn login_puts_a_value_in_and_logout_takes_it_out_as_secrets_set_and_remove_do() 
     .unwrap();
     let (standard, keychain) = with_keychain();
 
-    let login = corduroy(&standard, &workspace, &["login"], "sk-by-login\n");
-    assert!(login.succeeded(), "{}", login.all());
-    assert_eq!(login.said, "kept `token` in a keychain in memory\n");
+    // `login` is for what is signed in to. For a key it says the command that is.
+    let said = "its value is put in with `corduroy secrets set token`";
+    let login = corduroy(&standard, &workspace, &["login", "token"], "sk-by-login\n");
     assert_eq!(
-        keychain.get("token").unwrap().as_deref(),
-        Some("sk-by-login")
+        login.ended,
+        Err(format!("`token` is no secret that is signed in to: {said}"))
     );
-
+    let unnamed = corduroy(&standard, &workspace, &["login"], "sk-by-login\n");
+    assert!(
+        unnamed
+            .ended
+            .unwrap_err()
+            .ends_with("the value of `token` is put in with `corduroy secrets set token`")
+    );
     let logout = corduroy(&standard, &workspace, &["logout", "token"], "");
-    assert_eq!(logout.said, "removed the value of `token`\n");
+    assert!(logout.ended.unwrap_err().ends_with(said));
     assert_eq!(keychain.items(), Vec::<String>::new());
 
     // Nothing typed changes nothing, and says so.

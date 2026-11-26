@@ -1999,10 +1999,16 @@ sign-in is. It is read when first needed and kept for the rest of that run of th
 since a keychain may ask the person each time it is read. A ChatGPT sign-in is kept there
 too where its entry says so (`keep = "keychain"`); the Windows Credential Manager takes
 2560 bytes in an item, less than a sign-in's tokens, so a long value is kept as numbered
-pieces there. The names in use (the kind `keychain`, `corduroy secrets set`, `keep`,
-`secret` on an MCP entry) are not final: they are the ones
-[H7](open-questions.md#h7-are-the-agent-files-older-names-final) is to confirm, and
-[Trials](trials.md) lists the ways to try each against its alternative.
+pieces there.
+
+Two things were settled by use. The command that puts a value in is `corduroy secrets set`:
+`login` was offered for it as well and felt wrong for a key, since signing in is what one
+does to a subscription, so `login` and `logout` are for what is signed in to and say so
+when asked about a key. And `init`'s default held up on a machine with a keychain: what it
+prints was enough to get from a key in a variable to a model that answers. The other names
+in use (the kind `keychain`, `keep`, `secret` on an MCP entry, `doctor`) are not final: they
+are the ones [H7](open-questions.md#h7-are-the-agent-files-older-names-final) is to
+confirm, and [Trials](trials.md) lists what is still to try.
 
 **A provider's entry is ours.** The agent file is a stable contract, and `[providers.*]`
 followed whatever the provider library accepts. What is promised is a named list.
@@ -2318,7 +2324,8 @@ the step it waits on is done.
     `[secrets.*]` entry picking its kind with `kind`; the keychain kind for macOS, Windows
     and Linux (`corduroy-keychain`), a part of the `Standard` that can be swapped, with no
     fallback where a machine has none; the command that puts a value into it without
-    showing it (`corduroy secrets set`), and the one that lists how every secret stands;
+    showing it (`corduroy secrets set`; `login` stays for what is signed in to), and the one
+    that lists how every secret stands;
     `init` writing keychain entries where the machine has a keychain and environment entries
     where it has none; the `chatgpt` kind: a ChatGPT plan signed in to through the browser
     (`corduroy login`, `corduroy-chatgpt`), kept in the person's own directory or, where

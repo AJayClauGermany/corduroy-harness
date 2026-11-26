@@ -6,13 +6,15 @@ to try each. A trial is a question, the ways to try it with the exact commands, 
 look at, and a line for what you found.
 
 **To give feedback, write on the *Found* line** and commit the page, or just say it by its
-number ("T2: B, `login` reads wrong for an API key"). A trial that has its answer is deleted
+number ("T5: every request, I rotate keys while a chat is open"). A trial that has its answer is deleted
 from this page: the answer is written where it belongs ([Design](design.md), the
 [reference](README.md#reference)), the way that lost is taken out of the code, and the open
 question it hangs off is updated or removed.
 
 Nothing here is a promise. The names and defaults on trial are the ones marked as not final
-in [How people meet it](design.md#how-people-meet-it).
+in [How people meet it](design.md#how-people-meet-it). A trial keeps its number, so a gap is
+one that was answered: T1 (`init` puts keys in the keychain, and what it prints is enough)
+and T2 (`secrets set` puts a value in; `login` is for what is signed in to).
 
 ## Before you start
 
@@ -37,92 +39,33 @@ corduroy doctor           # each key, each kernel, one short question to each mo
 
 Both are safe to paste into feedback: neither prints a secret.
 
-**What has only been tried on Linux.** The keychain was run for real against the Secret
-Service (GNOME Keyring) on Linux. For macOS and Windows it was compiled and linted, and the
-logic above the system's own store is tested everywhere against a keychain in memory, but
-nothing here has run against a real macOS Keychain or Windows Credential Manager until CI
-or you do. T0 is that run.
+**Where it has been run.** For real against the Secret Service (GNOME Keyring) on Linux
+and, by hand, against the macOS Keychain: `init`, `secrets set`, `doctor`, a run, and a
+ChatGPT sign-in moved into the keychain. CI keeps, reads and removes an item in the real
+keychain on Linux, macOS and Windows. The command itself has not been used on Windows.
 
 ---
 
-## T0. Does the keychain work on your machine at all?
+## T0. Does macOS ask after a rebuild?
 
-*Answers:* whether one real round trip is enough of a test for the keychain kinds
-([H10](open-questions.md#h10-which-platforms-does-10-promise)).
+*Answers:* how a build from a checkout lives with the Keychain, which decides what the
+how-to says and whether reading a secret once for a run is enough
+([T5](#t5-read-once-for-a-run-or-for-every-request)). The Keychain lets the program that
+put an item in read it back unasked. A build made again after a change should be, to the
+Keychain, another program, and be asked: that is the part nobody has seen yet.
 
-```bash
-CORDUROY_REQUIRE_KEYCHAIN=1 cargo nextest run -p corduroy-keychain
-```
-
-Without the variable the test does nothing: a test run never touches your keychain unasked.
-With it, it keeps a throwaway item (`corduroy-test-<pid>`, service `corduroy`), reads it
-back, replaces it with a value longer than one Windows credential holds, and removes it.
-
-*Look at:* does it pass; does macOS ask anything, and how often; is anything left behind
-in Keychain Access (search `corduroy`).
-
-> Found:
-
-## T1. Should `init` put keys in the keychain?
-
-*Answers:* whether the decided default (the keychain wherever there is one) is livable as
-the first thing a new person meets. It costs one more command than an exported variable.
-
-**A. The keychain** (what `init` does where there is one):
+Put a key in with one build, change anything in the code, build again, and read it:
 
 ```bash
-corduroy init anthropic
+cargo build -p corduroy-cli && corduroy secrets
 ```
 
-```bash
-printenv ANTHROPIC_API_KEY | corduroy secrets set anthropic
-```
+*Look at:* whether macOS asks to let `corduroy` use the item; whether "Always Allow" lasts
+until the next rebuild; whether an [installed build](how-to/install-a-build.md) is asked at
+all after an update.
 
-```bash
-corduroy doctor
-```
-
-**B. The environment, written down:**
-
-```bash
-corduroy init anthropic --secrets env
-```
-
-```bash
-corduroy doctor
-```
-
-*Look at:* how many steps to a model that answers; whether what `init` printed was enough
-to get there without this page; on macOS, how often the Keychain asks to let `corduroy` in
-(a build from a checkout is a new program after every rebuild, so "Always Allow" does not
-last; an [installed build](how-to/install-a-build.md) should be asked once); what a run
-says when the key is not there yet (try `corduroy run hi` before `secrets set`).
-
-> Found:
-
-## T2. What is the command that puts a value in called?
-
-*Answers:* the command's name
-([H7](open-questions.md#h7-are-the-agent-files-older-names-final)). Both exist, and do the
-same thing for a `kind = "keychain"` secret.
-
-**A.** `corduroy secrets set anthropic`, with `corduroy secrets remove anthropic`, beside
-`corduroy secrets`, which lists.
-
-**B.** `corduroy login anthropic`, with `corduroy logout anthropic`: the same words as for
-a ChatGPT plan, so there is one thing to remember for "this secret needs me".
-
-Try each typed at the prompt (nothing shows as you type or paste), and piped:
-
-```bash
-printenv ANTHROPIC_API_KEY | corduroy login anthropic
-```
-
-*Look at:* which you reached for; whether `login` reads right for an API key; whether
-leaving the name out (allowed when the file has one such secret) helps or hides what is
-being set.
-
-> Found:
+> Found (26 November 2026, macOS, one build made on the machine and not rebuilt): no
+> prompt at any point, for a key or for a sign-in. Not yet tried across a rebuild.
 
 ## T3. Where is a ChatGPT sign-in kept?
 
@@ -160,7 +103,10 @@ later still works (the token is renewed and written back to the keychain); on ma
 whether the Keychain asks again at each renewal; on Windows, that it works at all (the
 sign-in is longer than one credential holds and is kept as numbered pieces).
 
-> Found:
+> Found (26 November 2026, macOS): B works. A sign-in made earlier, kept in the file, was
+> moved into the keychain by `corduroy login` without the browser, and the same sign-in went
+> on working. Not said: whether `keep` should be needed at all, or the keychain should be
+> where a sign-in goes whenever there is one.
 
 ## T4. Is a secret's name the right name for its item?
 
@@ -222,7 +168,8 @@ wrong `model = "..."`, `corduroy logout`.
 few tokens, a second or two) is right for something you run often; what else it should
 try (an MCP server's tools, a file written in the workspace).
 
-> Found:
+> Found (26 November 2026, macOS): liked as it is, for showing which parts work and which
+> do not. Not said: whether it should be `check --live`, or what else it should try.
 
 ## T7. A token for an MCP server
 
