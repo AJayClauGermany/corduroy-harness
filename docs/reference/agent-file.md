@@ -99,12 +99,36 @@ add-on may use through the `secret` capability without ever seeing its value.
 
 | Key | Type | Meaning |
 | --- | --- | --- |
-| `kind` | string | Where the value comes from: `env` (the default) or `chatgpt`, unless the command brings other kinds. The entry's other keys are that kind's. |
+| `kind` | string | Where the value comes from: `env` (the default), `keychain` or `chatgpt`, unless the command brings other kinds. The entry's other keys are that kind's. |
 | `env` | string | For `env`: the environment variable holding the value, read when a request needs it. |
+| `keep` | string | For `chatgpt`: where the sign-in is kept, `file` (the default) or `keychain`. |
 
-A `chatgpt` secret takes no other key. Its value is the access token of a sign-in with
-ChatGPT, made with [`corduroy login`](cli.md) and kept under the entry's name (letters,
-digits, `-` and `_`) in your own configuration directory. The token is renewed as it runs
+A `keychain` secret takes no other key. Its value is kept in the operating system's
+keychain (the macOS Keychain, the Windows Credential Manager, the Secret Service on Linux),
+encrypted behind your own login, under the service `corduroy` and the entry's name (letters,
+digits, `-` and `_`). You put it there with [`corduroy secrets set <name>`](cli.md), which
+does not show it; it is never in the agent file, the environment or the log. It is read when
+first needed and then kept for the rest of that run of the command, so the keychain asks you
+at most once. The keychain is yours and not the workspace's: every agent of yours that names
+a secret alike reads the same item. There is no fallback: on a machine without a keychain
+(a server nobody is logged in to, a container) revealing it fails and says so, and the
+entry has to name another source. [`corduroy secrets`](cli.md) says how each secret stands.
+
+```toml
+[providers.main]
+kind = "anthropic"
+secret = "anthropic"
+
+[secrets.anthropic]
+kind = "keychain"         # corduroy secrets set anthropic
+```
+
+A `chatgpt` secret takes `keep` and no other key. Its value is the access token of a sign-in
+with ChatGPT, made with [`corduroy login`](cli.md) and kept under the entry's name (letters,
+digits, `-` and `_`): in your own configuration directory, readable by you alone, or with
+`keep = "keychain"` in the keychain, as the item `chatgpt-sign-in.<name>`. An entry changed
+to `keep = "keychain"` has its sign-in moved out of the file by the next `corduroy login`.
+The token is renewed as it runs
 out, so the secret always reveals one that is good; if nobody is signed in, or the sign-in
 was revoked, revealing it fails and says to run `corduroy login`. Name it as the `secret`
 of an `openai` provider to have that provider's requests paid by your ChatGPT plan.
@@ -121,7 +145,8 @@ or `url`, not both.
 | `env` | table | Environment variables to set for it. |
 | `kernel` | string | The kernel that starts it. Default `shell`; it must have a `[kernels.<name>]` entry. |
 | `url` | string | A server reached over streamable HTTP. |
-| `bearer_token_env` | string | The environment variable holding a bearer token for `url`. |
+| `secret` | string | The name of a [`[secrets.<name>]`](#secretsname) entry sent as the bearer token for `url`: a token kept in the keychain, or wherever that entry says. It is read once, when the server is connected to. |
+| `bearer_token_env` | string | The environment variable holding a bearer token for `url`, where no `secret` is named. Give one or the other. |
 | `timeout_seconds` | integer | How long to wait for it to start, and for each tool call. |
 
 ## `[extensions.<name>]`

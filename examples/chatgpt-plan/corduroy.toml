@@ -7,6 +7,9 @@
 # configuration directory, outside every workspace, and renewed as it runs out. `logout`
 # revokes it. Usage counts against your plan: https://chatgpt.com/settings/usage
 #
+# To keep the sign-in in your keychain and not in a file, add `keep = "keychain"` under
+# [secrets.chatgpt] and run `login` once more: a sign-in you already have is moved.
+#
 # Everything but the provider is `examples/local-model/corduroy.toml`.
 
 system = """

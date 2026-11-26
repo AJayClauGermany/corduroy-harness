@@ -127,6 +127,20 @@ impl ProviderSpec {
             thinking: None,
         }
     }
+
+    /// The environment variable this provider's key is read from: the one it names
+    /// (`api_key_env`), or its kind's own. `None` where it names a `secret`, needs no key,
+    /// or is of a kind beyond the engines, whose variables are oi-kit's to know.
+    #[must_use]
+    pub fn key_variable(&self) -> Option<String> {
+        if self.secret.is_some() {
+            return None;
+        }
+        self.api_key_env
+            .clone()
+            .or_else(|| Some(engine(&self.kind)?.api_key_env.to_owned()))
+            .filter(|variable| !variable.is_empty())
+    }
 }
 
 /// Why a provider could not be built.

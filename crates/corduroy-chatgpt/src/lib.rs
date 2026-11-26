@@ -8,7 +8,8 @@
 //!
 //! - [`ChatGpt::sign_in`] registers this tool as a client on first use, sends the person to
 //!   the browser, takes the answer on the loopback interface, checks the ID token and keeps
-//!   the tokens in a [`Store`]: a file of the person's own, outside every workspace.
+//!   the tokens in a [`Store`]: a file of the person's own, outside every workspace, or a
+//!   [`Vault`] such as the system's keychain.
 //! - [`ChatGpt::token`] gives the access token, renewing it first when it is about to run
 //!   out. Renewal replaces the refresh token, so processes take turns through a lock.
 //! - [`chatgpt_secret`] is that token as a [`Secret`](corduroy_core::Secret): the plugin an
@@ -35,7 +36,7 @@ use std::sync::Arc;
 use corduroy_core::HttpClient;
 
 pub use secret::chatgpt_secret;
-pub use store::{Record, Store};
+pub use store::{Record, Store, Vault};
 
 use crate::web::Web;
 

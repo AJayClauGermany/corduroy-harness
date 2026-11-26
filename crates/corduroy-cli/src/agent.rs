@@ -37,7 +37,8 @@
 //! every other key is the extension's own configuration. Kernels, MCP servers and secrets are
 //! extensions too, built from kinds the same way: `[kernels.<name>]` with `kind = "shell"`
 //! builds the kind `shell-kernel` with the entry's other keys (`dir`, `program`) as its
-//! configuration, `[mcp.<name>]` the kind `mcp` and `[secrets.<name>]` the kind `env-secret`:
+//! configuration, `[mcp.<name>]` the kind `mcp` and `[secrets.<name>]` the kind `env-secret`,
+//! or `<kind>-secret` where it gives a `kind` (`keychain`, `chatgpt`):
 //!
 //! ```toml
 //! [extensions.scratch]
@@ -204,8 +205,9 @@ pub struct KernelEntry {
 /// naming the variable).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SecretEntry {
-    /// Where the value comes from: `env` if left out, or `chatgpt` (a sign-in with
-    /// `ChatGPT`, made with `corduroy login`), unless the command brings other kinds.
+    /// Where the value comes from: `env` if left out, `keychain` (the system's keychain,
+    /// where `corduroy secrets set` puts it) or `chatgpt` (a sign-in with `ChatGPT`, made
+    /// with `corduroy login`), unless the command brings other kinds.
     #[serde(default, skip_serializing)]
     pub kind: Option<String>,
     /// The secret's own configuration: every other key of the entry. The kind refuses a key
@@ -221,6 +223,12 @@ impl SecretEntry {
         self.kind
             .as_deref()
             .map_or_else(|| ENV_SECRET.to_owned(), secret_kind)
+    }
+
+    /// The kind as the file says it: `env` where it says none.
+    #[must_use]
+    pub fn kind_said(&self) -> &str {
+        self.kind.as_deref().unwrap_or("env")
     }
 }
 
@@ -244,7 +252,11 @@ pub struct McpEntry {
     /// Where a server reached over streamable HTTP is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    /// The environment variable holding a bearer token for `url`.
+    /// The secret sent as the bearer token for `url`: one of `secrets`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret: Option<String>,
+    /// The environment variable holding a bearer token for `url`, where no `secret` is
+    /// named.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bearer_token_env: Option<String>,
     /// Seconds to wait for it to start and for each tool call.
@@ -367,6 +379,14 @@ impl AgentFile {
             )));
         }
         for (name, server) in &self.mcp {
+            if let Some(secret) = &server.secret
+                && !self.secrets.contains_key(secret)
+            {
+                return Err(AgentError::new(format!(
+                    "MCP server `{name}` names the secret `{secret}`, and there is no \
+                     [secrets.{secret}]"
+                )));
+            }
             let kernel = server.kernel.as_deref().unwrap_or("shell");
             match (&server.command, &server.url) {
                 (Some(_), None) if !self.kernels.contains_key(kernel) => {
@@ -392,57 +412,238 @@ impl AgentFile {
     /// approval and inspect gates, the Goose-baseline plugins (skills, hints, todo, memory,
     /// recall, summarize, compact, subagents) and `review`. With both keys set, `review` asks
     /// the other vendor's model, from a second provider named `reviewer`.
+    ///
+    /// It says nothing of where a key comes from, so each provider reads its own variable.
+    /// The agent `corduroy init` writes says ([`Starter::text`]).
     #[must_use]
     pub fn default_text() -> String {
-        let set = |key: &str| std::env::var_os(key).is_some();
-        default_for(set("ANTHROPIC_API_KEY"), set("OPENAI_API_KEY"))
+        Starter::from_environment(None, Keys::Unsaid).text()
     }
 }
 
-/// The provider kind and model the default agent uses for each vendor.
-const ANTHROPIC: (&str, &str) = ("anthropic", "claude-sonnet-5-5");
-const OPENAI: (&str, &str) = ("openai", "gpt-5");
+/// Whose model the default agent asks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Vendor {
+    /// Anthropic's API, with a key.
+    Anthropic,
+    /// `OpenAI`'s API, with a key.
+    OpenAi,
+    /// `OpenAI`'s API, paid by a `ChatGPT` plan the person signs in to.
+    ChatGpt,
+    /// A model served on this machine by Ollama, which needs no key.
+    Ollama,
+}
 
-/// The default agent when the keys for Anthropic and for `OpenAI` are, or are not, set.
-fn default_for(anthropic: bool, openai: bool) -> String {
-    let (kind, model) = if anthropic {
-        ANTHROPIC
-    } else if openai {
-        OPENAI
-    } else {
-        ("ollama", "qwen3")
-    };
-    // With both keys, the vendor the loop does not use reviews its work.
-    let (reviewer, review_model, review_said) = if anthropic && openai {
-        let (kind, model) = OPENAI;
-        (
-            format!(
-                "\n# A second provider, so another vendor's model reviews what the main one \
-                 writes.\n[providers.reviewer]\nkind = \"{kind}\"\n"
-            ),
-            format!("reviewer/{model}"),
-            "Another vendor's model reviews",
+impl Vendor {
+    /// The words `corduroy init` takes for each.
+    pub const WORDS: [&'static str; 4] = ["anthropic", "openai", "chatgpt", "ollama"];
+
+    /// The vendor `word` names, if it names one.
+    #[must_use]
+    pub fn named(word: &str) -> Option<Self> {
+        match word {
+            "anthropic" => Some(Self::Anthropic),
+            "openai" => Some(Self::OpenAi),
+            "chatgpt" => Some(Self::ChatGpt),
+            "ollama" => Some(Self::Ollama),
+            _ => None,
+        }
+    }
+
+    /// The provider kind and the model the default agent uses.
+    const fn provider(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Anthropic => ("anthropic", "claude-sonnet-5-5"),
+            Self::OpenAi => ("openai", "gpt-5"),
+            Self::ChatGpt => ("openai", "gpt-6-luna"),
+            Self::Ollama => ("ollama", "qwen3"),
+        }
+    }
+
+    /// The name of the secret its provider sends, if it sends one.
+    #[must_use]
+    pub const fn secret(self) -> Option<&'static str> {
+        match self {
+            Self::Anthropic => Some("anthropic"),
+            Self::OpenAi => Some("openai"),
+            Self::ChatGpt => Some("chatgpt"),
+            Self::Ollama => None,
+        }
+    }
+
+    /// The environment variable its key is in by convention, if it has a key.
+    #[must_use]
+    pub const fn variable(self) -> Option<&'static str> {
+        match self {
+            Self::Anthropic => Some("ANTHROPIC_API_KEY"),
+            Self::OpenAi => Some("OPENAI_API_KEY"),
+            Self::ChatGpt | Self::Ollama => None,
+        }
+    }
+}
+
+/// Where the default agent's keys come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Keys {
+    /// The file does not say: each provider reads its own variable. What an agent with no
+    /// file does.
+    Unsaid,
+    /// The system's keychain: a `[secrets.<name>]` entry of `kind = "keychain"` for each.
+    Keychain,
+    /// The environment, written down: a `[secrets.<name>]` entry with `env` for each.
+    Environment,
+}
+
+/// What the default agent is written for: whose model it asks, whose model reviews, and
+/// where the keys come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Starter {
+    /// Whose model the loop asks.
+    pub vendor: Vendor,
+    /// The other vendor, whose model reviews, where the person has a key for both.
+    pub reviewer: Option<Vendor>,
+    /// Where the keys come from.
+    pub keys: Keys,
+}
+
+impl Starter {
+    /// The default agent for `vendor`, or for the vendor whose key the environment holds
+    /// (Anthropic's, then `OpenAI`'s, else a local Ollama), with its keys from `keys`. With
+    /// both keys in the environment, the vendor not asked reviews.
+    #[must_use]
+    pub fn from_environment(vendor: Option<Vendor>, keys: Keys) -> Self {
+        let set = |key: &str| std::env::var_os(key).is_some();
+        Self::choose(
+            vendor,
+            set("ANTHROPIC_API_KEY"),
+            set("OPENAI_API_KEY"),
+            keys,
         )
-    } else {
-        (
-            String::new(),
-            format!("main/{model}"),
-            "The same model, with fresh eyes, reviews",
-        )
-    };
-    let (shell, said) = if cfg!(windows) {
-        ("powershell", " Commands run in PowerShell.")
-    } else {
-        ("shell", "")
-    };
-    DEFAULT
-        .replace("{{reviewer}}", &reviewer)
-        .replace("{{review_said}}", review_said)
-        .replace("{{review_model}}", &review_model)
-        .replace("{{kind}}", kind)
-        .replace("{{model}}", model)
-        .replace("{{shell}}", shell)
-        .replace("{{shell_said}}", said)
+    }
+
+    /// As [`from_environment`](Self::from_environment), told which keys are set.
+    #[must_use]
+    pub fn choose(vendor: Option<Vendor>, anthropic: bool, openai: bool, keys: Keys) -> Self {
+        let vendor = vendor.unwrap_or(if anthropic {
+            Vendor::Anthropic
+        } else if openai {
+            Vendor::OpenAi
+        } else {
+            Vendor::Ollama
+        });
+        let reviewer = match vendor {
+            Vendor::Anthropic if anthropic && openai => Some(Vendor::OpenAi),
+            Vendor::OpenAi if anthropic && openai => Some(Vendor::Anthropic),
+            _ => None,
+        };
+        Self {
+            vendor,
+            reviewer,
+            keys,
+        }
+    }
+
+    /// The vendors whose secrets the agent names, the loop's first.
+    #[must_use]
+    pub fn secrets(self) -> Vec<Vendor> {
+        let said = |vendor: &Vendor| {
+            vendor.secret().is_some() && (self.keys != Keys::Unsaid || *vendor == Vendor::ChatGpt)
+        };
+        [Some(self.vendor), self.reviewer]
+            .into_iter()
+            .flatten()
+            .filter(said)
+            .collect()
+    }
+
+    /// The line of a provider's entry that names `vendor`'s secret, if the file says where
+    /// keys come from.
+    fn credential(self, vendor: Vendor) -> String {
+        match vendor.secret() {
+            Some(secret) if self.secrets().contains(&vendor) => {
+                format!("secret = \"{secret}\"   # its key: [secrets.{secret}], below\n")
+            }
+            _ => String::new(),
+        }
+    }
+
+    /// The `[secrets.*]` entries, with a line above them on how a value gets there.
+    fn secrets_text(self) -> String {
+        let mut text = String::new();
+        for vendor in self.secrets() {
+            let (Some(name), variable) = (vendor.secret(), vendor.variable()) else {
+                continue;
+            };
+            let entry = match (vendor, self.keys, variable) {
+                (Vendor::ChatGpt, Keys::Keychain, _) => {
+                    "# Your ChatGPT plan pays for the model: sign in once with `corduroy login`. \
+                     The sign-in is\n# kept in your keychain.\n[secrets.chatgpt]\nkind = \
+                     \"chatgpt\"\nkeep = \"keychain\"\n"
+                        .to_owned()
+                }
+                (Vendor::ChatGpt, ..) => {
+                    "# Your ChatGPT plan pays for the model: sign in once with `corduroy login`. \
+                     The sign-in is\n# kept in a file of your own, outside every workspace \
+                     (`keep = \"keychain\"` moves it).\n[secrets.chatgpt]\nkind = \"chatgpt\"\n"
+                        .to_owned()
+                }
+                (_, Keys::Keychain, _) => format!(
+                    "# Read from your keychain, never from this file. Put it there with \
+                     `corduroy secrets set {name}`.\n[secrets.{name}]\nkind = \"keychain\"\n"
+                ),
+                (_, _, Some(variable)) => format!(
+                    "# Read from the environment of whoever starts corduroy.\n\
+                     [secrets.{name}]\nenv = \"{variable}\"\n"
+                ),
+                (_, _, None) => continue,
+            };
+            text.push('\n');
+            text.push_str(&entry);
+        }
+        text
+    }
+
+    /// The agent file: the model, the shell, the shipped add-ons with their grants, and
+    /// where the keys come from, if that is said.
+    #[must_use]
+    pub fn text(self) -> String {
+        let (kind, model) = self.vendor.provider();
+        // With a key for both, the vendor the loop does not use reviews its work.
+        let alone = || {
+            (
+                String::new(),
+                format!("main/{model}"),
+                "The same model, with fresh eyes, reviews",
+            )
+        };
+        let (reviewer, review_model, review_said) = self.reviewer.map_or_else(alone, |other| {
+            let (kind, model) = other.provider();
+            (
+                format!(
+                    "\n# A second provider, so another vendor's model reviews what the main \
+                     one writes.\n[providers.reviewer]\nkind = \"{kind}\"\n{}",
+                    self.credential(other)
+                ),
+                format!("reviewer/{model}"),
+                "Another vendor's model reviews",
+            )
+        });
+        let (shell, said) = if cfg!(windows) {
+            ("powershell", " Commands run in PowerShell.")
+        } else {
+            ("shell", "")
+        };
+        DEFAULT
+            .replace("{{reviewer}}", &reviewer)
+            .replace("{{secrets}}", &self.secrets_text())
+            .replace("{{credential}}", &self.credential(self.vendor))
+            .replace("{{review_said}}", review_said)
+            .replace("{{review_model}}", &review_model)
+            .replace("{{kind}}", kind)
+            .replace("{{model}}", model)
+            .replace("{{shell}}", shell)
+            .replace("{{shell_said}}", said)
+    }
 }
 
 /// The agent `corduroy init` writes, and the one used when there is no agent file.
@@ -458,9 +659,9 @@ max_turns = 50
 
 [providers.main]
 kind = "{{kind}}"   # anthropic, openai, ollama, *-compatible, or a provider oi-kit knows
-# max_tokens = 16000   # the most one answer may take; by default, the model's own limit
+{{credential}}# max_tokens = 16000   # the most one answer may take; by default, the model's own limit
 # thinking = "medium"  # off, low, medium, high or max, for a model that can think
-{{reviewer}}
+{{reviewer}}{{secrets}}
 [kernels.shell]
 kind = "{{shell}}"      # a persistent shell in {workspace}: shell (sh) or powershell
 
@@ -568,6 +769,18 @@ grants = { fs-read = ["{data}/plugins", "{data}/plugins/*"], plugins = "*", stat
 "#;
 
 impl Grant {
+    /// The patterns the grant reaches, as written.
+    #[must_use]
+    pub fn allowed(&self) -> Vec<&str> {
+        match self {
+            Self::One(pattern) => vec![pattern.as_str()],
+            Self::Many(patterns)
+            | Self::Scoped {
+                allow: patterns, ..
+            } => patterns.iter().map(String::as_str).collect(),
+        }
+    }
+
     fn scope(&self, places: &Places) -> Scope {
         let (allow, deny): (Vec<&String>, Vec<&String>) = match self {
             Self::One(pattern) => (vec![pattern], Vec::new()),
@@ -711,8 +924,8 @@ fn load(
     Ok(harness.plugin(plugin))
 }
 
-/// The native plugins: the extensions every agent gets, the providers, the kernels, the MCP
-/// servers and the secrets, in that order. Returns those that did not start, and the
+/// The native plugins: the extensions every agent gets, the providers, the secrets, the
+/// kernels and the MCP servers, in that order. Returns those that did not start, and the
 /// providers that could not be built but that the agent can do without.
 fn natives(
     harness: &Harness,
@@ -738,6 +951,21 @@ fn natives(
         loaded.push((format!("extension {kind}"), id));
     }
     let mut failed = providers(harness, file)?;
+    // Before what names one: an MCP server reveals its token when it connects.
+    for (name, secret) in &file.secrets {
+        let what = format!("secret `{name}`");
+        let config = serde_json::to_value(secret)
+            .map_err(|error| AgentError::new(format!("{what}: {error}")))?;
+        let kind = secret.extension();
+        if !kinds.has(&kind) {
+            return Err(AgentError::new(format!(
+                "{what} is of kind `{}`, which this command does not have",
+                secret.kind_said(),
+            )));
+        }
+        let id = load(harness, places, kinds, (&what, name, &kind), config)?;
+        loaded.push((format!("secret {name}"), id));
+    }
     for (name, kernel) in &file.kernels {
         let what = format!("kernel `{name}`");
         let kind = kernel_kind(&kernel.kind);
@@ -759,20 +987,6 @@ fn natives(
             .map_err(|error| AgentError::new(format!("{what}: {error}")))?;
         let id = load(harness, places, kinds, (&what, name, MCP), config)?;
         loaded.push((format!("mcp {name}"), id));
-    }
-    for (name, secret) in &file.secrets {
-        let what = format!("secret `{name}`");
-        let config = serde_json::to_value(secret)
-            .map_err(|error| AgentError::new(format!("{what}: {error}")))?;
-        let kind = secret.extension();
-        if !kinds.has(&kind) {
-            return Err(AgentError::new(format!(
-                "{what} is of kind `{}`, which this command does not have",
-                secret.kind.as_deref().unwrap_or("env"),
-            )));
-        }
-        let id = load(harness, places, kinds, (&what, name, &kind), config)?;
-        loaded.push((format!("secret {name}"), id));
     }
     failed.extend(unstarted(harness, loaded));
     Ok(failed)
@@ -930,7 +1144,8 @@ mod tests {
 
     /// The model the default agent's `review` asks, and the providers it has.
     fn reviewing(anthropic: bool, openai: bool) -> (String, String, Vec<String>) {
-        let file = AgentFile::parse(&default_for(anthropic, openai)).unwrap();
+        let starter = Starter::choose(None, anthropic, openai, Keys::Unsaid);
+        let file = AgentFile::parse(&starter.text()).unwrap();
         let review = file.plugins.iter().find(|p| p.name == "review").unwrap();
         let model = review.config.as_ref().unwrap()["model"]
             .as_str()
@@ -944,8 +1159,8 @@ mod tests {
     #[test]
     fn with_both_keys_the_other_vendor_reviews() {
         let (main, review, providers) = reviewing(true, true);
-        assert_eq!(main, ANTHROPIC.1);
-        assert_eq!(review, format!("reviewer/{}", OPENAI.1));
+        assert_eq!(main, Vendor::Anthropic.provider().1);
+        assert_eq!(review, format!("reviewer/{}", Vendor::OpenAi.provider().1));
         assert_eq!(providers, ["main", "reviewer"]);
     }
 
@@ -976,6 +1191,79 @@ mod tests {
             let error = AgentFile::parse(&typo).unwrap_err().to_string();
             assert!(error.contains("unknown field"), "{error}");
         }
+    }
+
+    /// The secrets an agent file names, each with its kind and its other keys.
+    fn secrets_of(file: &AgentFile) -> Vec<(String, String, String)> {
+        file.secrets
+            .iter()
+            .map(|(name, entry)| {
+                let config = serde_json::to_string(&entry.config).unwrap();
+                (name.clone(), entry.kind_said().to_owned(), config)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_agent_init_writes_says_where_each_key_comes_from() {
+        let entry = |name: &str, kind: &str, config: &str| {
+            (name.to_owned(), kind.to_owned(), config.to_owned())
+        };
+        // An agent with no file says nothing, as before: each provider reads its variable.
+        let unsaid = Starter::choose(None, true, true, Keys::Unsaid);
+        let file = AgentFile::parse(&unsaid.text()).unwrap();
+        assert!(file.secrets.is_empty());
+        assert_eq!(file.providers["main"].spec.secret, None);
+
+        // In the keychain: an entry for each vendor, named by its provider.
+        let kept = Starter::choose(None, true, true, Keys::Keychain);
+        let file = AgentFile::parse(&kept.text()).unwrap();
+        assert_eq!(
+            secrets_of(&file),
+            [
+                entry("anthropic", "keychain", "{}"),
+                entry("openai", "keychain", "{}")
+            ]
+        );
+        assert_eq!(
+            file.providers["main"].spec.secret.as_deref(),
+            Some("anthropic")
+        );
+        assert_eq!(
+            file.providers["reviewer"].spec.secret.as_deref(),
+            Some("openai")
+        );
+
+        // In the environment, written down.
+        let env = Starter::choose(Some(Vendor::OpenAi), false, false, Keys::Environment);
+        let file = AgentFile::parse(&env.text()).unwrap();
+        assert_eq!(
+            secrets_of(&file),
+            [entry("openai", "env", r#"{"env":"OPENAI_API_KEY"}"#)]
+        );
+        assert_eq!(file.model, Vendor::OpenAi.provider().1);
+
+        // A ChatGPT plan is a sign-in whatever else is said, kept in the keychain if keys are.
+        for (keys, config) in [
+            (Keys::Unsaid, "{}"),
+            (Keys::Environment, "{}"),
+            (Keys::Keychain, r#"{"keep":"keychain"}"#),
+        ] {
+            let plan = Starter::choose(Some(Vendor::ChatGpt), true, true, keys);
+            let file = AgentFile::parse(&plan.text()).unwrap();
+            assert_eq!(secrets_of(&file), [entry("chatgpt", "chatgpt", config)]);
+            assert_eq!(
+                file.providers["main"].spec.secret.as_deref(),
+                Some("chatgpt")
+            );
+            assert_eq!(file.providers.len(), 1);
+        }
+
+        // A model served here has no key to keep anywhere.
+        let local = Starter::choose(Some(Vendor::Ollama), true, true, Keys::Keychain);
+        let file = AgentFile::parse(&local.text()).unwrap();
+        assert!(file.secrets.is_empty());
+        assert_eq!(file.providers["main"].spec.kind, "ollama");
     }
 
     #[test]
@@ -1051,7 +1339,8 @@ mod tests {
         assert_eq!(
             error,
             "extension `box`: this command has no extension kind `docker-kernel` (it has: \
-             chatgpt-secret, env-secret, http-client, mcp, powershell-kernel, shell-kernel)"
+             chatgpt-secret, env-secret, http-client, keychain-secret, mcp, powershell-kernel, \
+             shell-kernel)"
         );
 
         let refusing = Extensions::none().kind("picky", |_| Err("`image` is required".into()));
@@ -1164,6 +1453,54 @@ mod tests {
         let agent = assemble_with(&file, &places, &own).unwrap();
         assert_eq!(agent.harness.secrets().names(), ["token-from-the-keychain"]);
         assert!(agent.failed.is_empty(), "{:?}", agent.failed);
+    }
+
+    #[test]
+    fn an_mcp_server_sends_the_secret_it_names_which_is_there_before_it_connects() {
+        use corduroy_std::keychain::{Keychain as _, Memory};
+
+        let server = "[mcp.remote]\nurl = \"http://127.0.0.1:9/mcp\"\nsecret = \"token\"\n\
+                      timeout_seconds = 2\n";
+        // A secret the file does not have is refused when the file is read.
+        let error = AgentFile::parse(&format!("{BARE}{server}"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("names the secret `token`, and there is no [secrets.token]"),
+            "{error}"
+        );
+
+        // One source for a token, not two.
+        let places = Places::new(corduroy_test_support::scratch("cli-mcp-secret"), None);
+        let kept = format!("{BARE}{server}[secrets.token]\nkind = \"keychain\"\n");
+        let both = kept.replace(
+            "secret = \"token\"",
+            "secret = \"token\"\nbearer_token_env = \"X\"",
+        );
+        let error = assemble(&AgentFile::parse(&both).unwrap(), &places)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "MCP server `remote`: names both a `secret` and a `bearer_token_env`: give one"
+        );
+
+        // Kept in the keychain, the token is read when the server is connected to. Nothing
+        // listens there, so the server does not start, for that reason and not for its token.
+        let keychain = Arc::new(Memory::new());
+        keychain.set("token", "t0ken").unwrap();
+        let standard = Standard::new().with_keychain(Arc::<Memory>::clone(&keychain));
+        let agent = assemble_from(&AgentFile::parse(&kept).unwrap(), &places, &standard).unwrap();
+        assert_eq!(keychain.reads(), 1);
+        let [unstarted] = agent.failed.as_slice() else {
+            panic!(
+                "only the server should not have started: {:?}",
+                agent.failed
+            );
+        };
+        assert_eq!(unstarted.plugin, "mcp remote");
+        assert!(!unstarted.reason.contains("secret"), "{}", unstarted.reason);
+        assert!(!unstarted.reason.contains("t0ken"), "{}", unstarted.reason);
     }
 
     #[test]

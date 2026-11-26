@@ -580,10 +580,11 @@ and whatever holds the host's authority was compiled in by whoever built the bin
 
 - **Turning on an extension the command already has is configuration.** The shipped
   command has the providers and the kinds `shell-kernel`, `powershell-kernel`, `mcp`,
-  `env-secret` and `http-client`; the agent file picks which are loaded (`[providers.*]`,
+  `env-secret`, `keychain-secret`, `chatgpt-secret` and `http-client`; the agent file picks which are loaded (`[providers.*]`,
   `[kernels.*]`, `[mcp.*]`, `[secrets.*]`, `[extensions.<name>]`). Every entry but a
   provider is built from a kind of the command's `Standard`, so a command of one's own can
-  swap any of them (secrets from a keychain, a sandboxed kernel) without touching the rest;
+  swap any of them (secrets from a vault of its own, a sandboxed kernel) without touching
+  the rest;
   provider kinds are to join them ([How people meet it](#how-people-meet-it)). A new *kind* of
   extension is Rust in a command of one's own (see [In the `corduroy`
   command](#in-the-corduroy-command) below). Native code is never loaded at run time.
@@ -1910,9 +1911,10 @@ is supported are still open (A11), as is whether a review from outside is a cond
 
 Five things are decided here: what a person reaches the agent through, what the standard set
 holds at 1.0, where a credential comes from, which parts of a provider's entry are ours, and
-what an add-on is as something kept and passed on. All of it is *planned*. The code is as
-[Three tiers](#three-tiers-core-extensions-add-ons) and the [reference](README.md#reference)
-pages describe it, and [Order of work](#order-of-work) lists what changes.
+what an add-on is as something kept and passed on. Most of it is *planned*; the keychain is
+built. The code is as [Three tiers](#three-tiers-core-extensions-add-ons) and the
+[reference](README.md#reference) pages describe it, and [Order of work](#order-of-work)
+lists what is built and what changes.
 
 **The terminal is the front end of 1.0.** The command ships no server and speaks no
 protocol, so no wire format freezes with 1.0. Driving the harness from another program
@@ -1988,6 +1990,19 @@ person's own login. It costs one step, once, and that step is accepted.
 - *No file of variables.* A `.env` file is not a source. A password manager's secrets
   service, or a tool that describes secrets by a schema, is a kind that can be added after
   1.0, since kinds are added and none is renamed.
+
+As built (`corduroy-keychain`, and the `keychain-secret` kind of the standard set): the
+keychain is a part of the `Standard` like the log's store, so a command of one's own swaps
+it and the tests hand in one that lives in memory. An item is kept under the service
+`corduroy` and the entry's name, so it is the person's and shared by their agents, as a
+sign-in is. It is read when first needed and kept for the rest of that run of the command,
+since a keychain may ask the person each time it is read. A ChatGPT sign-in is kept there
+too where its entry says so (`keep = "keychain"`); the Windows Credential Manager takes
+2560 bytes in an item, less than a sign-in's tokens, so a long value is kept as numbered
+pieces there. The names in use (the kind `keychain`, `corduroy secrets set`, `keep`,
+`secret` on an MCP entry) are not final: they are the ones
+[H7](open-questions.md#h7-are-the-agent-files-older-names-final) is to confirm, and
+[Trials](trials.md) lists the ways to try each against its alternative.
 
 **A provider's entry is ours.** The agent file is a stable contract, and `[providers.*]`
 followed whatever the provider library accepts. What is promised is a named list.
@@ -2299,15 +2314,21 @@ the step it waits on is done.
     read.
 17. How [people meet it](#how-people-meet-it). *Built:* `secret` on a provider entry, its
     value taken from `Secrets` for every request (beside `api_key_env`, which has not gone
-    yet); a `[secrets.*]` entry picking its kind with `kind`, and the first kind beside the
-    environment's, `chatgpt`: a ChatGPT plan signed in to through the browser
-    (`corduroy login`, `corduroy-chatgpt`), kept in the person's own directory and not the
-    keychain, which is not built. *Decided, not built:* the handle an
-    extension drives through gaining an answer to an ask and a stop; a keychain kind for
-    secrets on macOS, Windows and Linux, a command that puts a value into it, and `init`
-    preferring it; provider kinds as kinds of the `Standard`, five of them promised and the
+    yet), and on an MCP entry, as its bearer token (beside `bearer_token_env`); a
+    `[secrets.*]` entry picking its kind with `kind`; the keychain kind for macOS, Windows
+    and Linux (`corduroy-keychain`), a part of the `Standard` that can be swapped, with no
+    fallback where a machine has none; the command that puts a value into it without
+    showing it (`corduroy secrets set`), and the one that lists how every secret stands;
+    `init` writing keychain entries where the machine has a keychain and environment entries
+    where it has none; the `chatgpt` kind: a ChatGPT plan signed in to through the browser
+    (`corduroy login`, `corduroy-chatgpt`), kept in the person's own directory or, where
+    its entry says so, in the keychain. *Decided, not built:* the handle an
+    extension drives through gaining an answer to an ask and a stop; provider kinds as
+    kinds of the `Standard`, five of them promised and the
     library's other names marked as outside the promise; `api_key_env` going from a
-    provider entry, nothing read from the environment unasked, and a missing key an
+    provider entry and `bearer_token_env` from an MCP entry, nothing read from the
+    environment unasked (the agent with no file still names no secret, so its provider
+    reads its own variable), and a missing key an
     error that names the line to add; oi-kit's shorthand that reads variables no longer
     offered; the
     folder store as the default once its proof has passed; a package (a folder with a

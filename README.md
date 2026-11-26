@@ -86,14 +86,21 @@ export ANTHROPIC_API_KEY=...                    # or OPENAI_API_KEY; without eit
 ```
 
 ```bash
+cargo corduroy init                             # optional: an agent file, its key kept in your keychain
+```
+
+```bash
 cargo corduroy --workspace ~/some/project      # talk to the agent; /help for commands
 ```
 
 Without an agent file it runs the default agent: the Pi tools on a shell in the workspace,
 skills, and an approval gate that asks before anything that writes. `cargo corduroy init`
 writes that agent to `corduroy.toml` so you can change it: the providers, the kernels, each
-add-on and exactly what it is granted. `corduroy run <prompt>` runs one prompt; `corduroy
-check` says what the agent has without calling a model; `corduroy log` prints the event
+add-on and exactly what it is granted, with each key read from your operating system's
+keychain (`corduroy secrets set <name>` puts it there) where the machine has one.
+`corduroy run <prompt>` runs one prompt; `corduroy
+check` says what the agent has without calling a model; `corduroy doctor` tries it for real
+(each key, each kernel, one short question to each model); `corduroy log` prints the event
 log, with the time of each event, which is kept in `.corduroy/log.jsonl`. Ctrl-C stops a run (the running tool is told, the rest of its calls do not run); kill
 the process instead and `corduroy continue` picks the run up, or `corduroy stop` ends it; leave a question unanswered and the run waits, in the log, until you do.
 
@@ -200,7 +207,8 @@ in [`examples/local-model/`](examples/local-model/corduroy.toml) against Liquid 
 | --- | --- |
 | `crates/corduroy-core` | Dependency-free core, `no_std` with an allocator (microcontrollers included; the default `std` feature adds what needs an OS): plugin contexts, capabilities, event stream with sessions and a `Log` trait, the registries plugins contribute to (tools, prompts, kernels, gates, services, models, secrets, HTTP clients) |
 | `crates/corduroy-cli` | The `corduroy` command: an agent file (providers, kernels, secrets, extensions, plugins and their grants) run in a terminal; a library, so a binary can swap the standard extensions' parts or add extension kinds |
-| `crates/corduroy-std` | The standard extensions for macOS, Windows and Linux, as one `Standard` whose parts (kinds, kernels, the log store, add-ons) can each be swapped |
+| `crates/corduroy-std` | The standard extensions for macOS, Windows and Linux, as one `Standard` whose parts (kinds, kernels, the log store, the keychain, add-ons) can each be swapped |
+| `crates/corduroy-keychain` | The operating system's keychain (the macOS Keychain, the Windows Credential Manager, the Secret Service) as where a secret's value is kept |
 | `crates/corduroy-mcp` | MCP servers (stdio, through a kernel, or streamable HTTP) as plugins |
 | `crates/corduroy-providers` | Model providers from `oi-kit-providers` (Anthropic, OpenAI, Ollama and the providers Goose knows), converted to the harness's own messages at the boundary |
 | `crates/corduroy-http` | The HTTP client behind the `http` capability, which never follows a redirect |

@@ -18,6 +18,15 @@ variable:
 export GITHUB_AUTH="Bearer ghp_..."
 ```
 
+Or keep it in your keychain, out of the environment:
+
+```toml
+[secrets.github]
+kind = "keychain"         # put there with: corduroy secrets set github
+```
+
+The add-on cannot tell the difference: it gets the same handle either way.
+
 ## 2. Use it from the add-on
 
 In Rust, with `corduroy-guest`:

@@ -16,9 +16,57 @@ kind = "anthropic"        # reads ANTHROPIC_API_KEY; "openai" reads OPENAI_API_K
 
 To read the key from another variable, add `api_key_env = "MY_KEY"`.
 
-## Name a secret instead
+## Keep the key in your keychain
 
-A provider can take its key from a `[secrets.<name>]` entry. The value is then read for
+A key in an environment variable is plain text that every program you start can read. Your
+operating system's keychain keeps it encrypted behind your login. The provider names a
+secret, and the secret says it is kept there:
+
+```toml
+[providers.main]
+kind = "anthropic"
+secret = "anthropic"
+
+[secrets.anthropic]
+kind = "keychain"
+```
+
+Put the key in once. It is not shown as you type or paste it:
+
+```bash
+corduroy secrets set anthropic
+```
+
+Or copy it from the variable it is in now, and then take the variable out of your shell's
+start-up file:
+
+```bash
+printenv ANTHROPIC_API_KEY | corduroy secrets set anthropic
+```
+
+`corduroy init` writes an agent this way wherever the machine has a keychain, and tells you
+this command. Then see that it works:
+
+```bash
+corduroy secrets          # is each key there?
+```
+
+```bash
+corduroy doctor           # does the model answer with it?
+```
+
+The item is yours, not the workspace's: every agent file of yours with a
+`[secrets.anthropic]` of this kind reads it. `corduroy secrets remove anthropic` takes it
+out. On a machine without a keychain (a server, a container) there is nothing to fall back
+to: use `env` there, below.
+
+On macOS the Keychain may ask whether `corduroy` may use the item. "Always Allow" holds for
+that copy of the program, so a build you make yourself is asked again after each rebuild; an
+installed build is asked once.
+
+## Name a secret read from the environment
+
+A provider can take its key from any `[secrets.<name>]` entry. The value is then read for
 every request, not once at the start, so a key that is replaced while the agent runs is the
 one sent:
 
@@ -46,9 +94,10 @@ secret = "chatgpt"
 
 [secrets.chatgpt]
 kind = "chatgpt"
+keep = "keychain"         # leave out to keep the sign-in in a file of your own
 ```
 
-Sign in once, in the browser:
+`corduroy init chatgpt` writes the whole agent this way. Sign in once, in the browser:
 
 ```bash
 corduroy login
@@ -60,7 +109,13 @@ use it from; see and limit it at <https://chatgpt.com/settings/usage>. A request
 does not cover fails the run with OpenAI's reason, followed by what you can do about it
 (the usage page, or `corduroy login` again): nothing falls back to another way of paying. Do not set `max_tokens` on this provider: a plan-paid request is refused a limit.
 
-On a machine with no browser, sign in on one that has, then copy
+With `keep = "keychain"` the tokens are in your keychain and no file holds them; without
+it they are in `~/.config/corduroy/chatgpt/chatgpt.json`, readable by you alone. Adding the
+key later moves a sign-in you already have: run `corduroy login` once more, and it is moved
+without the browser. `corduroy secrets` says who is signed in, where the sign-in is kept and
+how long its token is good for.
+
+On a machine with no browser, leave `keep` out, sign in on a machine that has one, then copy
 `~/.config/corduroy/chatgpt/chatgpt.json` over a secure channel to the same place there.
 
 `examples/chatgpt-plan/corduroy.toml` is the default agent set up this way.

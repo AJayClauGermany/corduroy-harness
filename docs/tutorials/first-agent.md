@@ -75,7 +75,26 @@ corduroy init
 
 ```text
 wrote /home/you/corduroy-tutorial/corduroy.toml: edit it to change what the agent can do
+put the key `anthropic` in the macOS Keychain:  corduroy secrets set anthropic
+  ($ANTHROPIC_API_KEY is set here; this copies it:  printenv ANTHROPIC_API_KEY | corduroy secrets set anthropic)
+then try it for real:  corduroy doctor
 ```
+
+With a key from step 2, the agent reads it from your operating system's keychain, where it
+is kept encrypted, and not from the environment. Run the command `init` printed to copy it
+there, once:
+
+```bash
+printenv ANTHROPIC_API_KEY | corduroy secrets set anthropic
+```
+
+```text
+kept `anthropic` in the macOS Keychain
+```
+
+(On a machine without a keychain, such as a container, `init` says so and writes an agent
+that reads the variable; there is then nothing to copy. With the local model there is no
+key at all.)
 
 Open `corduroy.toml`. Everything this agent can do is in it: which model it asks, the shell
 it runs commands in, and a list of `[[plugins]]`, each with exactly what it is

@@ -12,12 +12,13 @@
 //! | Outbound HTTP | [`http`] | the client behind the `http` capability, which never follows redirects |
 //! | Models | [`providers`] | Anthropic, OpenAI-compatible, Ollama and others |
 //! | MCP | [`mcp`] | MCP servers' tools, over standard input and output or HTTP |
-//! | Secrets | [`extension::ENV_SECRET`], [`extension::CHATGPT_SECRET`] | credentials read from the environment, or a `ChatGPT` plan signed in to through the browser ([`chatgpt`], [`sign_in`]); never handed to a plugin |
+//! | Secrets | [`extension::KEYCHAIN_SECRET`], [`extension::ENV_SECRET`], [`extension::CHATGPT_SECRET`] | credentials kept in the system's keychain ([`keychain`], put there with a [`Keep`]), read from the environment, or a `ChatGPT` plan signed in to through the browser ([`chatgpt`], [`sign_in`]); never handed to a plugin |
 //! | Add-ons | [`wasm`] | WebAssembly plugins, each holding only the capabilities it was granted |
 //!
 //! [`Standard`] is that set as one value, made of parts that can each be swapped: the
 //! extension kinds an agent file can ask for (kernels among them), the extensions every agent
-//! gets, how the event log is stored, and whether add-ons are loaded at all. A command for
+//! gets, how the event log is stored, the keychain secrets are kept in, and whether add-ons
+//! are loaded at all. A command for
 //! another kind of machine starts from [`Standard::new`] and changes the parts that do not fit,
 //! or leaves this crate out and brings its own, over the same core and loop.
 //!
@@ -39,6 +40,7 @@
 
 pub mod extension;
 pub mod places;
+pub mod secrets;
 pub mod sign_in;
 
 use std::collections::BTreeMap;
@@ -51,13 +53,17 @@ use corduroy_harness::core::{EventStream, LogError, SessionId};
 pub use corduroy_harness::wasm;
 pub use corduroy_http as http;
 pub use corduroy_jsonl as jsonl;
+pub use corduroy_keychain as keychain;
+use corduroy_keychain::Keychain;
 pub use corduroy_mcp as mcp;
 pub use corduroy_providers as providers;
 pub use corduroy_shell as shell;
 pub use extension::{
-    Asked, Built, CHATGPT_SECRET, ENV_SECRET, Extensions, MCP, kernel_kind, secret_kind,
+    Asked, Built, CHATGPT_SECRET, ENV_SECRET, Extensions, KEYCHAIN_SECRET, MCP, kernel_kind,
+    secret_kind,
 };
 pub use places::{DATA_DIR, Places};
+pub use secrets::{Keep, State};
 pub use sign_in::SignIn;
 
 /// Opens the event log kept at a path.
@@ -74,6 +80,9 @@ pub struct Standard {
     log: Arc<OpenLog>,
     remove: Arc<RemoveSession>,
     sign_ins: BTreeMap<String, Arc<dyn SignIn>>,
+    keeps: BTreeMap<String, Arc<dyn Keep>>,
+    states: BTreeMap<String, Arc<secrets::Stand>>,
+    keychain: Arc<dyn Keychain>,
     addons: bool,
 }
 
@@ -82,6 +91,7 @@ impl fmt::Debug for Standard {
         f.debug_struct("Standard")
             .field("kinds", &self.kinds)
             .field("defaults", &self.defaults)
+            .field("keychain", &self.keychain.name())
             .field("addons", &self.addons)
             .finish_non_exhaustive()
     }
@@ -95,12 +105,12 @@ impl Default for Standard {
 
 impl Standard {
     /// The standard set: the [built-in kinds](Extensions::builtin), the HTTP client for
-    /// every agent, the event log in a JSON Lines file, and add-ons.
+    /// every agent, the event log in a JSON Lines file, the system's keychain, and add-ons.
     #[must_use]
     pub fn new() -> Self {
-        let chatgpt: Arc<dyn SignIn> = Arc::new(sign_in::ChatGptSignIn);
-        Self {
-            kinds: Extensions::builtin(),
+        let env: Arc<secrets::Stand> = Arc::new(secrets::env_state);
+        let bare = Self {
+            kinds: Extensions::none(),
             defaults: vec!["http-client".to_owned()],
             log: Arc::new(|path| jsonl::open(path).map_err(|error| error.to_string())),
             remove: Arc::new(|path, session| {
@@ -113,9 +123,81 @@ impl Standard {
                     .map(|sessions| sessions.into_iter().collect())
                     .map_err(|error| error.to_string())
             }),
-            sign_ins: BTreeMap::from([(CHATGPT_SECRET.to_owned(), chatgpt)]),
+            sign_ins: BTreeMap::new(),
+            keeps: BTreeMap::new(),
+            states: BTreeMap::from([(ENV_SECRET.to_owned(), env)]),
+            keychain: Arc::new(keychain::Missing::new("none was named")),
             addons: true,
-        }
+        };
+        bare.with_kinds(&Extensions::builtin())
+            .with_keychain(keychain::Os::new())
+    }
+
+    /// Keep secrets in `keychain`, not in the system's own: the values of
+    /// [`KEYCHAIN_SECRET`] entries, and the sign-ins of [`CHATGPT_SECRET`] entries that say
+    /// `keep = "keychain"`. The kinds, how a value is put in, how a person signs in and how
+    /// each stands all read it from then on, so name it after any kinds of one's own that
+    /// go by those names.
+    #[must_use]
+    pub fn with_keychain(mut self, keychain: impl Keychain + 'static) -> Self {
+        let keychain: Arc<dyn Keychain> = Arc::new(keychain);
+        self.kinds = self.kinds.keeping_in(&keychain);
+        let chatgpt = sign_in::ChatGptSignIn::new(Arc::clone(&keychain));
+        self.sign_ins
+            .insert(CHATGPT_SECRET.to_owned(), Arc::new(chatgpt));
+        let keep = secrets::InKeychain::new(Arc::clone(&keychain));
+        self.keeps
+            .insert(KEYCHAIN_SECRET.to_owned(), Arc::new(keep));
+        let (items, sign_ins) = (Arc::clone(&keychain), Arc::clone(&keychain));
+        let kept: Arc<secrets::Stand> =
+            Arc::new(move |asked| secrets::keychain_state(asked, &*items));
+        let signed: Arc<secrets::Stand> =
+            Arc::new(move |asked| secrets::chatgpt_state(asked, &sign_ins));
+        self.states.insert(KEYCHAIN_SECRET.to_owned(), kept);
+        self.states.insert(CHATGPT_SECRET.to_owned(), signed);
+        self.keychain = keychain;
+        self
+    }
+
+    /// The keychain secrets are kept in.
+    #[must_use]
+    pub fn keychain(&self) -> &Arc<dyn Keychain> {
+        &self.keychain
+    }
+
+    /// Put in, and take out, the value of extensions of the kind `kind` with `keep`, in
+    /// place of how it was done before, if it was.
+    #[must_use]
+    pub fn with_keep(mut self, kind: impl Into<String>, keep: impl Keep + 'static) -> Self {
+        self.keeps.insert(kind.into(), Arc::new(keep));
+        self
+    }
+
+    /// How a person puts in the value of extensions of the kind `kind`, if that kind's
+    /// value is put in at all.
+    #[must_use]
+    pub fn keep(&self, kind: &str) -> Option<&Arc<dyn Keep>> {
+        self.keeps.get(kind).filter(|_| self.kinds.has(kind))
+    }
+
+    /// Say how a secret of the kind `kind` stands with `stand`, in place of how it was said
+    /// before, if it was.
+    #[must_use]
+    pub fn with_state(
+        mut self,
+        kind: impl Into<String>,
+        stand: impl Fn(&Asked<'_>) -> State + Send + Sync + 'static,
+    ) -> Self {
+        self.states.insert(kind.into(), Arc::new(stand));
+        self
+    }
+
+    /// How the secret of the entry `asked`, of the kind `kind`, stands: whether its value
+    /// can be had, without the value. `None` if the kind does not say.
+    #[must_use]
+    pub fn state(&self, kind: &str, asked: &Asked<'_>) -> Option<State> {
+        let stand = self.states.get(kind).filter(|_| self.kinds.has(kind))?;
+        Some(stand(asked))
     }
 
     /// Sign in for extensions of the kind `kind` with `sign_in`, in place of how it was done

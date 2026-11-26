@@ -27,6 +27,8 @@ serde = { workspace = true }
 serde_json = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["signal"] }
 toml = { workspace = true }
+# A value typed for the keychain is read without showing it.
+rpassword = "7.5.5"
 
 [dev-dependencies]
 corduroy-test-support = { workspace = true }

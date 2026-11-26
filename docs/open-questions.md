@@ -352,10 +352,16 @@ freeze ([What is safe by default](design.md#what-is-safe-by-default)): a masked 
 in a shell is written only into requests to those hosts, and a provider's key no longer
 follows a `base_url` pointed somewhere else.
 
+The keychain makes the question sharper. A value kept there is the person's, shared by
+every agent file that names a secret alike, so a file someone else wrote can name it and a
+provider whose `base_url` is theirs.
+
 *Direction.* A defaulted `hosts()` on `Secret`, checked wherever a value is written into a
 request: the host for an add-on, a kernel's filter for a shell, a provider for its key.
 Decide what a secret that names no host means (it goes nowhere, or anywhere), and how the
-agent file states the hosts.
+agent file states the hosts. For a secret in the keychain there is a second place to state
+them: beside the value, said by the person when they put it in, where no workspace's file
+can change them. Decide whether that is where they belong, at least for that kind.
 
 ### B10. In what order are prompt parts rendered?
 
@@ -1225,8 +1231,17 @@ chosen: the keychain's kind (a `[secrets.*]` entry picks its kind with `kind`), 
 that stores a value, `secret` on an MCP entry, the manifest's file name and
 keys, the key by which an agent file lists a package, and the command that promotes one.
 
+The first three are built under names that are not yet confirmed: `kind = "keychain"`;
+`corduroy secrets set <name>` and `secrets remove`, beside `corduroy secrets`, which lists;
+`secret` on an MCP entry. `corduroy login <name>` and `logout` do the same for a keychain
+secret, so both spellings of "put a value in" can be tried side by side. Two more came with
+them: `keep` on a `chatgpt` secret (`file` or `keychain`), and `corduroy doctor`.
+[Trials](trials.md) says how to try each.
+
 *Direction.* Confirm the old ones, and choose the new ones in one sitting, saying *add-on*
-where an add-on is meant.
+where an add-on is meant. For the secrets' names: keep one of `secrets set` and `login` for
+a value and drop the other; decide whether `keep` should be left out of the file once the
+keychain is where a sign-in goes by default; and whether `doctor` is `check` with a flag.
 
 ### H8. How much of MCP is in 1.0?
 
@@ -1249,8 +1264,16 @@ The keychain is in the standard set on all three
 Credential Manager, and the Secret Service on Linux, which a machine with nobody logged in
 does not run.
 
-*Direction.* Decide whether the full suite on all three is a condition of 1.0, and how the
-keychain kinds are tested where CI has no keychain. Find out
+How the keychain kinds are tested is built one way: everything above the system's own store
+runs against a keychain in memory, on every platform; one test keeps, reads and removes a
+throwaway item in the real one, and runs only where it is asked for
+(`CORDUROY_REQUIRE_KEYCHAIN`): in CI on macOS, on Windows, and on Linux inside a D-Bus
+session with a keyring made for it. The
+Windows store's pieces (a value longer than one credential holds) are tested everywhere
+against a small store, and against the real one only there.
+
+*Direction.* Decide whether the full suite on all three is a condition of 1.0, and whether
+that one test against the real keychain is enough for the keychain kinds. Find out
 what Windows offers for confining a process, and then either promise a confined shell
 there or say that 1.0's shell on Windows is the plain one, chosen by the person.
 
