@@ -250,6 +250,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be95d4a884358a21a199689323c29e9256b4a1b315e22f183d155422041d3a9a"
 
 [[package]]
+name = "corduroy-chatgpt"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "corduroy-core",
+ "corduroy-http",
+ "corduroy-test-support",
+ "ring",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "corduroy-cli"
 version = "0.1.0"
 dependencies = [
@@ -319,6 +332,7 @@ dependencies = [
 name = "corduroy-providers"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "base64 0.23.1",
  "corduroy-harness",
@@ -327,6 +341,7 @@ dependencies = [
  "rmcp",
  "serde",
  "serde_json",
+ "tokio",
  "toml",
 ]
 
@@ -342,6 +357,7 @@ dependencies = [
 name = "corduroy-std"
 version = "0.1.0"
 dependencies = [
+ "corduroy-chatgpt",
  "corduroy-harness",
  "corduroy-http",
  "corduroy-jsonl",

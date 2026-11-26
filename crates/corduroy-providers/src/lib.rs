@@ -7,12 +7,17 @@
 //! the providers oi-kit already knows (`groq`, `mistral`, `deepseek` and the rest; see
 //! [`known`]).
 //!
-//! API keys are read from the environment variable the spec names, by the provider, when it
-//! is built. They are never part of the spec, the agent file or the event log.
+//! A provider's credential is the secret the spec names (`secret`), revealed from the
+//! [`Secrets`] registry for every request, so a credential that changes while the agent runs
+//! (a token that is renewed) is the one sent. Without `secret`, an API key is read from the
+//! environment variable the spec names, by the provider, when it is built. Either way it is
+//! never part of the spec, the agent file or the event log.
 //!
 //! Each request asks for at most the spec's `max_tokens`, by default the most the model may
 //! write as oi-kit's model catalog has it (4096 for a model it does not know), and thinks
-//! only as hard as the spec's `thinking` says.
+//! only as hard as the spec's `thinking` says. A request to `OpenAI`'s Responses API is the
+//! exception: it carries a limit only when the spec states one, and the system prompt as
+//! `instructions`, which is the shape an account paying through a `ChatGPT` plan is held to.
 //!
 //! What is built is a [`corduroy_harness::Provider`]: it speaks the harness's own messages,
 //! and converts to and from oi-kit's for each request. oi-kit's types go no further than this
@@ -32,13 +37,19 @@
 )]
 
 pub mod adapter;
+pub mod auth;
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
 use corduroy_harness::Provider;
-use oi_kit_providers::declarative::{EnvKeyResolver, fixed_provider_config_entries, from_json};
+use corduroy_harness::core::Secrets;
+use oi_kit_provider_types::base::Provider as OiKitProvider;
+use oi_kit_providers::declarative::{
+    EnvKeyResolver, deserialize_provider_config, fixed_provider_config_entries, from_json,
+};
+use oi_kit_providers::{anthropic, openai};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
@@ -56,6 +67,11 @@ pub struct ProviderSpec {
     /// (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`); Ollama needs none.
     #[serde(default)]
     pub api_key_env: Option<String>,
+    /// The secret holding the credential: the name of an entry in the [`Secrets`] registry,
+    /// revealed for every request. In place of `api_key_env`, for the engines that take a
+    /// key (`anthropic`, `openai` and their `-compatible` forms).
+    #[serde(default)]
+    pub secret: Option<String>,
     /// Extra headers sent with every request.
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
@@ -102,6 +118,7 @@ impl ProviderSpec {
             kind: kind.into(),
             base_url: None,
             api_key_env: None,
+            secret: None,
             headers: BTreeMap::new(),
             timeout_seconds: None,
             streaming: None,
@@ -186,7 +203,12 @@ fn config(name: &str, spec: &ProviderSpec) -> Result<Value, BuildError> {
                     spec.kind
                 ))
             })?;
-        let api_key_env = spec.api_key_env.as_deref().unwrap_or(engine.api_key_env);
+        // A secret stands in for the key: nothing is read from the environment then.
+        let api_key_env = if spec.secret.is_some() {
+            ""
+        } else {
+            spec.api_key_env.as_deref().unwrap_or(engine.api_key_env)
+        };
         Map::from_iter([
             ("name".to_owned(), json!(engine.id)),
             ("engine".to_owned(), json!(engine.protocol)),
@@ -240,9 +262,64 @@ fn config(name: &str, spec: &ProviderSpec) -> Result<Value, BuildError> {
 ///
 /// # Errors
 ///
-/// Returns a [`BuildError`] for an unknown kind, a missing base URL or API key, or a
-/// configuration oi-kit refuses.
+/// Returns a [`BuildError`] for an unknown kind, a missing base URL or API key, a spec that
+/// names a `secret` (which needs [`build_with`]), or a configuration oi-kit refuses.
 pub fn build(name: &str, spec: &ProviderSpec) -> Result<Arc<dyn Provider>, BuildError> {
+    assemble(name, spec, None)
+}
+
+/// Build the provider `spec` describes, with the secret it names taken from `secrets`.
+///
+/// The secret is revealed each time the provider sends a request. It need not be registered
+/// yet: a request made while it is missing fails, saying so.
+///
+/// # Errors
+///
+/// As [`build`], and for a spec whose kind takes no `secret` or that names both a `secret`
+/// and an `api_key_env`.
+pub fn build_with(
+    name: &str,
+    spec: &ProviderSpec,
+    secrets: &Arc<Secrets>,
+) -> Result<Arc<dyn Provider>, BuildError> {
+    assemble(name, spec, Some(secrets))
+}
+
+/// The path of `url`: what follows its host, without the query.
+fn path_of(url: &str) -> &str {
+    let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let path = after_scheme
+        .find('/')
+        .map_or("", |at| after_scheme.split_at(at).1);
+    path.split(['?', '#']).next().unwrap_or(path)
+}
+
+/// A secret a provider sends as its credential: the registry it is in, and its name there.
+type Named = (Arc<Secrets>, String);
+
+/// The secret `spec` names, if it names one.
+fn credential(
+    name: &str,
+    spec: &ProviderSpec,
+    secrets: Option<&Arc<Secrets>>,
+) -> Result<Option<Named>, BuildError> {
+    match (&spec.secret, secrets) {
+        (None, _) => Ok(None),
+        (Some(_), _) if spec.api_key_env.is_some() => Err(BuildError(format!(
+            "provider `{name}` names both a secret and an api_key_env: give one"
+        ))),
+        (Some(secret), Some(secrets)) => Ok(Some((Arc::clone(secrets), secret.clone()))),
+        (Some(secret), None) => Err(BuildError(format!(
+            "provider `{name}` names the secret `{secret}`, and was built without the secrets"
+        ))),
+    }
+}
+
+fn assemble(
+    name: &str,
+    spec: &ProviderSpec,
+    secrets: Option<&Arc<Secrets>>,
+) -> Result<Arc<dyn Provider>, BuildError> {
     let config = config(name, spec)?;
     if let Some(temperature) = spec.temperature
         && !(0.0..=2.0).contains(&temperature)
@@ -251,18 +328,52 @@ pub fn build(name: &str, spec: &ProviderSpec) -> Result<Arc<dyn Provider>, Build
             "provider `{name}`: temperature {temperature} is not between 0 and 2"
         )));
     }
-    let provider = from_json(&config.to_string(), None, EnvKeyResolver::new())
-        .map_err(|error| BuildError(format!("provider `{name}`: {error:#}")))?;
+    let refused = |error: anyhow::Error| BuildError(format!("provider `{name}`: {error:#}"));
+    let secret = credential(name, spec, secrets)?;
+    let protocol = engine(&spec.kind).map(|engine| engine.protocol);
+    let provider: Arc<dyn OiKitProvider> = match protocol {
+        Some("openai") => {
+            let parsed = deserialize_provider_config(&config.to_string()).map_err(refused)?;
+            let builder = openai::from_declarative_config(parsed, None, EnvKeyResolver::new())
+                .map_err(refused)?
+                .map_api_client(|client| match secret {
+                    Some((secrets, secret)) => client.with_auth(auth::bearer(secrets, secret)),
+                    None => client,
+                });
+            Arc::new(builder.build())
+        }
+        Some("anthropic") if secret.is_some() => {
+            let parsed = deserialize_provider_config(&config.to_string()).map_err(refused)?;
+            let builder = anthropic::from_declarative_config(parsed, None, EnvKeyResolver::new())
+                .map_err(refused)?
+                .map_api_client(|client| match secret {
+                    Some((secrets, secret)) => client.with_auth(auth::api_key(secrets, secret)),
+                    None => client,
+                });
+            Arc::new(builder.build())
+        }
+        _ if secret.is_some() => {
+            return Err(BuildError(format!(
+                "provider `{name}` ({}) takes no secret: `secret` is for anthropic, openai \
+                 and their -compatible forms",
+                spec.kind
+            )));
+        }
+        _ => {
+            Arc::from(from_json(&config.to_string(), None, EnvKeyResolver::new()).map_err(refused)?)
+        }
+    };
     let settings = adapter::Settings {
         provider: provider.get_name().to_owned(),
+        openai_path: (protocol == Some("openai"))
+            .then(|| config.get("base_url").and_then(Value::as_str))
+            .flatten()
+            .map(|url| openai::derive_base_path(path_of(url))),
         max_tokens: spec.max_tokens,
         temperature: spec.temperature,
         thinking: spec.thinking,
     };
-    Ok(Arc::new(adapter::Adapted::new(
-        Arc::from(provider),
-        settings,
-    )))
+    Ok(Arc::new(adapter::Adapted::new(provider, settings)))
 }
 
 #[cfg(test)]
@@ -350,6 +461,60 @@ mod tests {
                 .contains("CORDUROY_TEST_KEY_THAT_IS_NOT_SET"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn a_secret_stands_in_for_the_key_and_nothing_is_read_from_the_environment() {
+        let spec = ProviderSpec {
+            secret: Some("key".into()),
+            ..ProviderSpec::new("openai")
+        };
+        let named = config("main", &spec).unwrap();
+        assert_eq!(named["api_key_env"], "");
+        assert_eq!(named["requires_auth"], false);
+        // No secret is registered and no key is set: it builds, and would fail when asked.
+        let secrets = Arc::new(Secrets::new());
+        assert!(build_with("main", &spec, &secrets).is_ok());
+        let anthropic = ProviderSpec {
+            secret: Some("key".into()),
+            ..ProviderSpec::new("anthropic")
+        };
+        assert!(build_with("main", &anthropic, &secrets).is_ok());
+    }
+
+    #[test]
+    fn a_secret_is_refused_where_it_cannot_be_used() {
+        let secrets = Arc::new(Secrets::new());
+        let named = |kind: &str| ProviderSpec {
+            secret: Some("key".into()),
+            ..ProviderSpec::new(kind)
+        };
+        let error = build("main", &named("openai")).err().unwrap();
+        assert!(error.to_string().contains("without the secrets"), "{error}");
+        let error = build_with("local", &named("ollama"), &secrets)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("takes no secret"), "{error}");
+        let both = ProviderSpec {
+            api_key_env: Some("SOME_KEY".into()),
+            ..named("openai")
+        };
+        let error = build_with("main", &both, &secrets).err().unwrap();
+        assert!(error.to_string().contains("give one"), "{error}");
+    }
+
+    #[test]
+    fn a_urls_path_is_what_follows_its_host() {
+        assert_eq!(
+            path_of("https://api.openai.com/v1/chat/completions"),
+            "/v1/chat/completions"
+        );
+        assert_eq!(
+            path_of("http://127.0.0.1:8080/v1/responses?x=1"),
+            "/v1/responses"
+        );
+        assert_eq!(path_of("https://example.com"), "");
+        assert_eq!(path_of("localhost:11434/api"), "/api");
     }
 
     #[test]

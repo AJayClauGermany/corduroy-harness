@@ -15,8 +15,8 @@
 //!
 //! The agent file's other native entries are built the same way. `[kernels.<name>]` with
 //! `kind = "shell"` asks for the kind `shell-kernel` ([`kernel_kind`]), `[mcp.<name>]` for the
-//! kind [`MCP`] and `[secrets.<name>]` for the kind [`ENV_SECRET`], each with the entry's keys
-//! as its configuration. So a command built for another system can bring a kernel, an MCP
+//! kind [`MCP`] and `[secrets.<name>]` for the kind [`ENV_SECRET`], or `<kind>-secret` where
+//! the entry gives a `kind` ([`secret_kind`]), each with the entry's keys as its configuration. So a command built for another system can bring a kernel, an MCP
 //! client or a source of secrets of its own, under a kind of its own or under the standard
 //! kind's name.
 
@@ -26,6 +26,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use corduroy_chatgpt::{ChatGpt, Store, chatgpt_secret};
 use corduroy_harness::core::{Plugin, SECRETS, Secret, Secrets, Spawn, plugin_fn};
 use corduroy_mcp::{Transport, mcp_server};
 use corduroy_shell::{ShellKernel, shell_kernel_of};
@@ -36,8 +37,18 @@ use crate::places::Places;
 /// The extension kind a `[mcp.<name>]` entry is built from.
 pub const MCP: &str = "mcp";
 
-/// The extension kind a `[secrets.<name>]` entry is built from.
+/// The extension kind a `[secrets.<name>]` entry is built from, unless it gives a `kind`.
 pub const ENV_SECRET: &str = "env-secret";
+
+/// The extension kind of a secret that is a `ChatGPT` sign-in: what a `[secrets.<name>]`
+/// entry with `kind = "chatgpt"` is built from.
+pub const CHATGPT_SECRET: &str = "chatgpt-secret";
+
+/// The extension kind a `[secrets.<name>]` entry of `kind` is built from: `<kind>-secret`.
+#[must_use]
+pub fn secret_kind(kind: &str) -> String {
+    format!("{kind}-secret")
+}
 
 /// The extension kind a `[kernels.<name>]` entry of `kind` is built from: `<kind>-kernel`.
 #[must_use]
@@ -215,6 +226,26 @@ fn env_secret_in(asked: &Asked<'_>) -> Built {
     )))
 }
 
+/// The `ChatGPT` sign-in `[secrets.<name>]` names: the one kept under the entry's name in
+/// the person's own directory, so that every agent of theirs that names it shares it.
+///
+/// # Errors
+///
+/// If the entry has a setting (the kind takes none), its name cannot name a file, or there
+/// is no directory of the person's own.
+pub fn chatgpt_in(asked: &Asked<'_>) -> Result<ChatGpt, String> {
+    asked.only(&[])?;
+    let plain = |character: char| character.is_ascii_alphanumeric() || "-_".contains(character);
+    if asked.name.is_empty() || !asked.name.chars().all(plain) {
+        return Err(
+            "a ChatGPT sign-in is kept under its entry's name, which may hold only letters, \
+             digits, `-` and `_`"
+                .to_owned(),
+        );
+    }
+    Ok(ChatGpt::new(Store::named(&Places::person()?, asked.name)))
+}
+
 /// The plugin of an extension, or what is wrong with its entry.
 pub type Built = Result<Box<dyn Plugin>, String>;
 
@@ -249,6 +280,7 @@ impl Extensions {
     /// | `http-client` | none | the client the `http` capability sends through, for `http` and `https` |
     /// | `mcp` | `command` (with `args`, `env` and `kernel`, `shell` by default) or `url` (with `bearer_token_env`), and `timeout_seconds` | the tools of one MCP server, as `<name>__<tool>`; what `[mcp.<name>]` builds |
     /// | `env-secret` | `env` | the secret named like the entry, read from that environment variable when it is used; what `[secrets.<name>]` builds |
+    /// | `chatgpt-secret` | none | the secret named like the entry: the access token of a `ChatGPT` sign-in (`corduroy login`), renewed as it runs out; what `[secrets.<name>]` with `kind = "chatgpt"` builds |
     #[must_use]
     pub fn builtin() -> Self {
         Self::none()
@@ -270,6 +302,12 @@ impl Extensions {
             })
             .kind(MCP, mcp_server_in)
             .kind(ENV_SECRET, env_secret_in)
+            .kind(CHATGPT_SECRET, |asked| {
+                Ok(Box::new(chatgpt_secret(
+                    asked.name.to_owned(),
+                    chatgpt_in(asked)?,
+                )))
+            })
     }
 
     /// Add the kind `name`, built by `build`. A kind of that name already there is replaced.

@@ -1,0 +1,28 @@
+[package]
+name = "corduroy-chatgpt"
+description = "Sign in with ChatGPT for the corduroy harness: a ChatGPT plan as a secret a provider sends, signed in to through the browser and renewed as it runs out."
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+corduroy-core = { workspace = true, features = ["std"] }
+corduroy-http = { workspace = true }
+base64 = { workspace = true, features = ["std"] }
+# Random values, SHA-256 for PKCE, and the RSA check of the ID token's signature. The
+# version the TLS stack already carries.
+ring = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+corduroy-test-support = { workspace = true }

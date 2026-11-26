@@ -25,6 +25,7 @@ corduroy-wasm = { path = "crates/corduroy-wasm", version = "0.1.0" }
 corduroy-jsonl = { path = "crates/corduroy-jsonl", version = "0.1.0" }
 corduroy-shell = { path = "crates/corduroy-shell", version = "0.1.0" }
 corduroy-http = { path = "crates/corduroy-http", version = "0.1.0" }
+corduroy-chatgpt = { path = "crates/corduroy-chatgpt", version = "0.1.0" }
 corduroy-mcp = { path = "crates/corduroy-mcp", version = "0.1.0" }
 corduroy-providers = { path = "crates/corduroy-providers", version = "0.1.0" }
 corduroy-std = { path = "crates/corduroy-std", version = "0.1.0" }
@@ -51,6 +52,9 @@ rmcp = { version = "3.11.0", default-features = false }
 # what the model is sent. The version oi-kit and rmcp already carry.
 base64 = { version = "0.23.1", default-features = false, features = ["alloc"] }
 anyhow = { version = "1", default-features = false }
+# Sign in with ChatGPT: random values, SHA-256 and the RSA check of an ID token. The version
+# the TLS stack already carries.
+ring = "0.17.14"
 # The HTTP client behind the `http` capability: blocking, so it fits a plugin's blocking call.
 ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
 async-trait = "0.1"

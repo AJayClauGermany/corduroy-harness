@@ -17,6 +17,7 @@ workspace = true
 [dependencies]
 corduroy-harness = { workspace = true, features = ["tokio", "wasm"] }
 corduroy-http = { workspace = true }
+corduroy-chatgpt = { workspace = true }
 corduroy-jsonl = { workspace = true }
 corduroy-shell = { workspace = true }
 corduroy-mcp = { workspace = true }
