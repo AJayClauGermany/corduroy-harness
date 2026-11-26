@@ -23,7 +23,9 @@ The conversation the model sees is rebuilt from these events alone.
      time                id  session source topic       cause         payload
 ```
 
-A step's events are one **commit**: stored together, or not at all.
+A step's events are one **commit**: stored together, or not at all. In the file a commit is
+one line, an array of its events. A line that is `[]` is a commit of nothing, which builds
+before this one wrote; it reads as nothing.
 
 ## The run
 

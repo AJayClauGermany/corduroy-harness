@@ -328,6 +328,11 @@ impl Log for JsonlLog {
             }
             last += 1;
         }
+        // A commit of nothing leaves no line: a log an earlier build wrote may hold such
+        // lines (`[]`), which read as nothing.
+        if batch.is_empty() {
+            return Ok(());
+        }
         // One write for the whole commit, so a crash cannot store only some of its events.
         let line = format!("{}\n", line_of(batch));
         self.file
@@ -458,6 +463,25 @@ mod tests {
         // A header, then one line per commit.
         assert_eq!(text.lines().count(), 4);
         assert_eq!(text.lines().next(), Some(r#"{"corduroy-log":2}"#));
+    }
+
+    #[test]
+    fn a_commit_of_nothing_leaves_no_line_and_those_an_earlier_build_left_are_read() {
+        let path = log_in("jsonl-empty-commit");
+        let stream = open(&path).unwrap();
+        stream.commit([]).unwrap();
+        stream.emit(user("a")).unwrap();
+        stream.commit([]).unwrap();
+        drop(stream);
+        let text = fs::read_to_string(&path).unwrap();
+        // The header and the one commit.
+        assert_eq!(text.lines().count(), 2, "{text}");
+
+        // As an earlier build wrote it: a line for every commit, empty ones included.
+        fs::write(&path, format!("{text}[]\n[]\n")).unwrap();
+        let stream = open(&path).unwrap();
+        assert_eq!(stream.events().len(), 1);
+        assert_eq!(stream.emit(user("b")).unwrap().get(), 2);
     }
 
     #[test]

@@ -453,6 +453,10 @@ impl Inner {
         if let Some(error) = &self.failed {
             return Err(error.clone());
         }
+        // A commit of nothing is nothing: no line in the log, and no wait for a disk.
+        if drafts.is_empty() {
+            return Ok(Vec::new());
+        }
         // One reading per commit, and never an earlier one than the commit before had.
         let now = self
             .clock
@@ -954,6 +958,24 @@ mod tests {
         assert_eq!(batches.lock().unwrap().as_slice(), [stream.events()]);
         // Both listener calls happened after the one batch was in the log.
         assert_eq!(*stored_when_heard.lock().unwrap(), [1, 1]);
+    }
+
+    #[test]
+    fn a_commit_of_nothing_stores_nothing() {
+        let recorder = Recorder::default();
+        let (batches, broken) = (Arc::clone(&recorder.batches), Arc::clone(&recorder.broken));
+        let stream = EventStream::new().with_log(recorder);
+
+        assert_eq!(stream.commit([]).unwrap(), []);
+        stream.emit(user("message")).unwrap();
+        assert_eq!(stream.commit([]).unwrap(), []);
+
+        // The log was handed the one event, and never an empty batch.
+        assert_eq!(batches.lock().unwrap().as_slice(), [stream.events()]);
+        // A stream that is closed still says so, whatever it is asked to store.
+        broken.store(1, Ordering::SeqCst);
+        stream.emit(user("lost")).unwrap_err();
+        stream.commit([]).unwrap_err();
     }
 
     #[test]
