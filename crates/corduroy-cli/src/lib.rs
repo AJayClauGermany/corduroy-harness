@@ -5,6 +5,7 @@
 //! from the parts of the standard extensions ([`corduroy_std::Standard`]). [`extension`]
 //! re-exports the kinds of extension a command can be built with. [`terminal`] shows what
 //! the agent does as it is committed to the log and asks a person what the gates ask.
+//! [`report`] reads what a run did, and how long each part took, off the log.
 //! [`command`] is the command line; the binary only calls it, so a binary of your own can be
 //! the same command with more extension kinds.
 
@@ -16,4 +17,5 @@
 pub mod agent;
 pub mod command;
 pub mod extension;
+pub mod report;
 pub mod terminal;

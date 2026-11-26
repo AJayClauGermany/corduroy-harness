@@ -17,6 +17,7 @@
 //! | `gate/answer` | `user` | `{"id", "tool", "allow", "reason"}`, caused by its `tool/call`: a person's answer to a gate that asked |
 //! | `tool/start` | `host` | `{"id", "tool"}`, caused by its `tool/call`: the tool is about to run |
 //! | `tool/result` | `environment` | `{"id", "tool", "ok", "output"}`, and `"content"` when the result is not one block of text, caused by its `tool/call` |
+//! | `model/request` | `host` | `{"provider", "model", "messages", "tools"}`: the model is about to be asked, with that many messages and tools; what follows it in the session (the model's `message`, or a `turn/end`) says when the answer came |
 //! | `usage` | `agent` | `{"model", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens", "stop"}`, each count only if the provider gave it; the cache counts are part of `input_tokens` and the reasoning count of `output_tokens`; `stop` is why the model stopped (`finished`, `limit`, `tool_calls` or `refused`), if the provider said |
 //! | `turn/end` | `host` | `{"status"}`: `finished`, `turn-limit`, `failed` (with `"reason"`), `stopped` or `yielded` |
 //! | `run/restart` | `host` | `{"attempt"}`: an unfinished run was picked up again |
@@ -84,6 +85,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use anyhow::{Context as _, Result};
+use corduroy_core::ModelRequest;
 use corduroy_core::sync::Lock;
 use corduroy_core::{
     Decision, Draft, Event, EventId, EventStream, LogError, Message, Part, Query, Role, SessionId,
@@ -102,6 +104,9 @@ const TURN_END: &str = "turn/end";
 
 /// Topic of the event that reports what a model request cost.
 const USAGE: &str = "usage";
+
+/// Topic of the event that records a request going out to the model.
+pub const MODEL_REQUEST: &str = "model/request";
 
 /// Topic of the event that records an unfinished run being picked up again.
 const RESTART: &str = "run/restart";
@@ -1491,6 +1496,23 @@ impl Journal {
             Some((event, tool)) => (draft.cause(event), tool),
             None => (draft, String::new()),
         }
+    }
+
+    /// Record that `request` is about to go to the model `provider` serves. This is its own
+    /// commit, so the log says when the model was asked, and that it was, even if no answer
+    /// ever comes.
+    pub(crate) fn ask_started(&self, provider: &str, request: &ModelRequest) -> Result<()> {
+        let payload = json!({
+            "provider": provider,
+            "model": request.model,
+            "messages": request.messages.len(),
+            "tools": request.tools.len(),
+        });
+        let draft = Draft::new(Source::Host, MODEL_REQUEST)
+            .session(self.id.clone())
+            .payload(payload.to_string());
+        self.events.emit(draft)?;
+        Ok(())
     }
 
     /// Record that a person asked the run to stop.

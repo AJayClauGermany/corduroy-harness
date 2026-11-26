@@ -116,6 +116,6 @@ pub use provider::{
     DEFAULT_PROVIDER, PROVIDERS, Provider, ProviderError, ProviderPlugin, Providers, provider,
 };
 pub use session::{
-    Answer, Ask, COMPACTION, Effect, End, Journal, MAIN, PROCESS_START, ProcessInfo, Removal,
-    SESSION_REMOVED, SIGNAL, Session, SessionInfo, Sessions, Wait, removal,
+    Answer, Ask, COMPACTION, Effect, End, Journal, MAIN, MODEL_REQUEST, PROCESS_START, ProcessInfo,
+    Removal, SESSION_REMOVED, SIGNAL, Session, SessionInfo, Sessions, Wait, removal,
 };

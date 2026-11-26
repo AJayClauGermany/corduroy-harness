@@ -90,10 +90,10 @@ async fn each_step_of_the_loop_is_one_line_of_the_log() {
 
     harness.run("go").await.unwrap();
 
-    // The prompt; the model's call (message, tool/call and usage together); the tool
-    // starting; its result; the message handing the result to the model; the answer; and
-    // the end of the turn.
-    assert_eq!(lines(&path) - setup, 7);
+    // The prompt; the request to the model; the model's call (message, tool/call and usage
+    // together); the tool starting; its result; the message handing the result to the
+    // model; the second request; the answer; and the end of the turn.
+    assert_eq!(lines(&path) - setup, 9);
 }
 
 /// A log that stores nothing and refuses every commit after the first `healthy` ones.
@@ -194,10 +194,10 @@ async fn sessions_the_stream_was_not_handed_are_read_from_the_store() {
 #[tokio::test]
 async fn a_step_the_log_refuses_ends_the_run_before_anyone_sees_it() {
     let commits = Arc::new(AtomicUsize::new(0));
-    // Room for the session's start, the plugin's activation, the prompt and the model's
-    // call, but not the result.
+    // Room for the session's start, the plugin's activation, the prompt, the request to
+    // the model and the model's call, but not the result.
     let log = Failing {
-        healthy: 4,
+        healthy: 5,
         commits: Arc::clone(&commits),
     };
     let (harness, model) = harness(
@@ -212,7 +212,7 @@ async fn a_step_the_log_refuses_ends_the_run_before_anyone_sees_it() {
     assert_eq!(error.to_string(), "event log: the disk is full");
     // The result that was not stored is in neither the stream nor the conversation, and
     // the model was not asked again.
-    assert_eq!(harness.events().len(), 6);
+    assert_eq!(harness.events().len(), 7);
     let journal = harness.journal(&MAIN.into()).unwrap();
     assert_eq!(journal.session().conversation().len(), 2);
     assert_eq!(model.requests().len(), 1);
@@ -251,9 +251,10 @@ fn asks(calls: &[(&str, &str)]) -> Message {
 /// The events of a run in which the model made `request` and the process then died after
 /// `stored` more commits, part of the way through the tools.
 async fn interrupted_run(request: Message, stored: usize) -> Vec<Event> {
-    // The session's start, the plugin's activation, the prompt and the model's message.
+    // The session's start, the plugin's activation, the prompt, the request to the model
+    // and the model's message.
     let log = Failing {
-        healthy: 4 + stored,
+        healthy: 5 + stored,
         commits: Arc::new(AtomicUsize::new(0)),
     };
     let model = Arc::new(ScriptedProvider::new([request]));
@@ -399,9 +400,10 @@ fn results(session: &Session) -> Vec<Vec<Content>> {
 async fn a_finished_image_is_handed_over_from_the_log_and_the_tool_is_not_run_again() {
     // The process died once `snap` had returned and its result was stored, before the
     // message handing that result to the model was: the session's start, the plugin's
-    // activation, the prompt, the model's message, the tool's start and its result.
+    // activation, the prompt, the request to the model, the model's message, the tool's
+    // start and its result.
     let log = Failing {
-        healthy: 6,
+        healthy: 7,
         commits: Arc::new(AtomicUsize::new(0)),
     };
     let model = Arc::new(ScriptedProvider::new([asks(&[("c1", "snap")])]));

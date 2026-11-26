@@ -9,7 +9,8 @@ corduroy [options] check           load the agent and say what it has, without a
 corduroy [options] sessions        list the sessions in the log
 corduroy [options] sessions remove <name>
                                    take a session, and those it started, out of the log
-corduroy [options] log             print the event log
+corduroy [options] log             print the event log, or with --session one session's part
+corduroy [options] report [N]      what the session's last run (or last N) did, with timings
 corduroy init                      write the default agent file to edit
 corduroy --version                 print the version (and commit) of this build
 ```
@@ -65,9 +66,27 @@ the old one in one step, so a crash leaves one or the other. Nothing else in the
 plugin state, other sessions and the events about the agent itself stay. The agent is not put
 together for this, and no other `corduroy` may have the log open. It cannot be undone.
 
-**`log`** Print every event in the log, one per line, with the time it was stored (UTC).
-See [Events](events.md) for how to read a line. The first lines each process writes are its
+**`log`** Print every event in the log, one per line, with the time it was stored (UTC, to
+the millisecond). With `--session <name>`, only that session's events and those of the
+sessions it started. See [Events](events.md) for how to read a line. The first lines each process writes are its
 `process/start`: what program, version and platform wrote what follows.
+
+**`report [N]`** Print what there is to hand to whoever looks into a problem, about the
+session's last run, or its last `N`: the version, what `check` prints, and for each run
+
+- how it ended and how long it took;
+- what wrote it (the `process/start` before it);
+- what it waited on, a line each with how long: every request to the model (provider,
+  model, how many messages and tools, then the tokens and why it stopped, or the failure),
+  every tool call, and every question a gate put to a person;
+- every event stored while it went, with the time it was stored, the time since the run
+  began and the time since the event before. Payloads are cut at 1000 characters; the log
+  has them whole.
+
+Nothing is asked of a model, and the keys are not in it: the log never holds a secret's
+value. It does hold what you typed and what the tools returned, so read it before you send
+it. `corduroy report > report.txt` keeps it as a file. Model requests are timed in runs
+made by a build that records `model/request`; older runs show the rest.
 
 **`init`** Write the default agent to `<workspace>/corduroy.toml`. Refuses if the file
 exists. The model is chosen from the environment: Anthropic if `ANTHROPIC_API_KEY` is set,

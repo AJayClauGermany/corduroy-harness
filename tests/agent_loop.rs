@@ -116,13 +116,15 @@ async fn every_event_records_its_source_and_cause() {
             "#1 host session/start in main",
             "#2 host plugin/activated",
             "#3 user message in main",
-            "#4 agent message in main",
-            "#5 agent tool/call in main <- #4",
-            "#7 host tool/start in main <- #5",
-            "#8 environment tool/result in main <- #5",
-            "#9 environment message in main",
-            "#10 agent message in main",
-            "#12 host turn/end in main",
+            "#4 host model/request in main",
+            "#5 agent message in main",
+            "#6 agent tool/call in main <- #5",
+            "#8 host tool/start in main <- #6",
+            "#9 environment tool/result in main <- #6",
+            "#10 environment message in main",
+            "#11 host model/request in main",
+            "#12 agent message in main",
+            "#14 host turn/end in main",
         ]
     );
 }
