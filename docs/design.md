@@ -2297,14 +2297,16 @@ the step it waits on is done.
     call with its trail on `Run`, a context for `Operation::run`, and `Run` no longer
     handing out the harness; `write` and `edit` refusing a file that changed since it was
     read.
-17. How [people meet it](#how-people-meet-it). *Decided, none of it built:* the handle an
+17. How [people meet it](#how-people-meet-it). *Built:* `secret` on a provider entry, its
+    value taken from `Secrets` for every request (beside `api_key_env`, which has not gone
+    yet). *Decided, not built:* the handle an
     extension drives through gaining an answer to an ask and a stop; a keychain kind for
     secrets on macOS, Windows and Linux, a command that puts a value into it, and `init`
     preferring it; provider kinds as kinds of the `Standard`, five of them promised and the
-    library's other names marked as outside the promise; `secret` on a provider entry in
-    place of `api_key_env`, nothing read from the environment unasked, and a missing key an
-    error that names the line to add; a key resolver over `Secrets` in place of oi-kit's
-    own, and its shorthand that reads variables no longer offered; the
+    library's other names marked as outside the promise; `api_key_env` going from a
+    provider entry, nothing read from the environment unasked, and a missing key an
+    error that names the line to add; oi-kit's shorthand that reads variables no longer
+    offered; the
     folder store as the default once its proof has passed; a package (a folder with a
     manifest and a component or a script), its wants a request and the person's yes kept
     for the grants and not the code; an ask that lets the person give a package more than

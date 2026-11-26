@@ -759,7 +759,15 @@ fn natives(
 fn providers(harness: &Harness, file: &AgentFile) -> Result<Vec<Unstarted>, AgentError> {
     let mut failed = Vec::new();
     for (name, entry) in &file.providers {
-        match corduroy_providers::build(name, &entry.spec) {
+        if let Some(secret) = &entry.spec.secret
+            && !file.secrets.contains_key(secret)
+        {
+            return Err(AgentError::new(format!(
+                "provider `{name}` names the secret `{secret}`, and there is no \
+                 [secrets.{secret}]"
+            )));
+        }
+        match corduroy_providers::build_with(name, &entry.spec, harness.secrets()) {
             Ok(built) => {
                 let described = entry
                     .models

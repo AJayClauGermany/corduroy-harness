@@ -39,11 +39,12 @@ is what `provider` refers to.
 | --- | --- | --- |
 | `kind` | string | `anthropic`, `openai`, `ollama`, `anthropic-compatible`, `openai-compatible`, or the name of another provider oi-kit knows (`corduroy_providers::known`). |
 | `base_url` | string | Where the API is. Each kind has a default; the `-compatible` kinds need one. |
-| `api_key_env` | string | The environment variable holding the key. Defaults: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`; Ollama needs none. |
+| `api_key_env` | string | The environment variable holding the key, read once when the agent starts. Defaults: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`; Ollama needs none. |
+| `secret` | string | The name of a [`[secrets.<name>]`](#secretsname) entry holding the key, in place of `api_key_env`. It is read for every request, so a value that changes while the agent runs is the one sent, and nothing is read from the environment unless that entry says so. For `anthropic`, `openai` and their `-compatible` kinds. |
 | `headers` | table | Extra headers sent with every request. |
 | `timeout_seconds` | integer | How long one request may take in all. |
 | `streaming` | boolean | Whether to stream responses. Each kind has a default. |
-| `max_tokens` | integer | The most one answer may take. Default: the model's own limit from oi-kit's catalogue, or 4096 for a model it does not know. |
+| `max_tokens` | integer | The most one answer may take. Default: the model's own limit from oi-kit's catalogue, or 4096 for a model it does not know. A request to OpenAI's Responses API (the `openai` kinds asked for an o-series, GPT-5 or GPT-6 model, or given a `base_url` ending in `responses`) carries a limit only when this is set. |
 | `temperature` | float | Sampling temperature. Default: the model's own. |
 | `thinking` | string | `off`, `low`, `medium`, `high` or `max`, for a model that can think before it answers. |
 
@@ -93,7 +94,8 @@ Which kernel an add-on may use is the security decision. See
 
 ## `[secrets.<name>]`
 
-A secret an add-on may use through the `secret` capability without ever seeing its value.
+A secret: what a provider sends as its key when its entry names it (`secret`), and what an
+add-on may use through the `secret` capability without ever seeing its value.
 
 | Key | Type | Meaning |
 | --- | --- | --- |

@@ -16,6 +16,21 @@ kind = "anthropic"        # reads ANTHROPIC_API_KEY; "openai" reads OPENAI_API_K
 
 To read the key from another variable, add `api_key_env = "MY_KEY"`.
 
+## Name a secret instead
+
+A provider can take its key from a `[secrets.<name>]` entry. The value is then read for
+every request, not once at the start, so a key that is replaced while the agent runs is the
+one sent:
+
+```toml
+[providers.main]
+kind = "openai"
+secret = "openai-key"
+
+[secrets.openai-key]
+env = "MY_OPENAI_KEY"
+```
+
 ## Ollama
 
 ```toml

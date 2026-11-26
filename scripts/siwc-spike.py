@@ -7,10 +7,12 @@
                                      (--body FILE [--adapt]: a request the harness built;
                                      two are in scripts/siwc-spike-bodies/)
     scripts/siwc-spike.py refresh    exchange the refresh token for a new pair
+    scripts/siwc-spike.py token      print the access token (renewed if it has run out), to
+                                     hand the harness: export TOKEN="$(... token)"
     scripts/siwc-spike.py logout     revoke the refresh token and delete what was saved
 
 Standard library only (Python 3.9+). Tokens are kept in
-~/.config/corduroy/siwc-spike/credentials.json (mode 0600) and are never printed.
+~/.config/corduroy/siwc-spike/credentials.json (mode 0600); only `token` prints one.
 
 What this does not do: verify the ID token's signature (that needs RSA, which the
 standard library lacks). It checks the claims only; the real implementation must verify.
@@ -297,6 +299,19 @@ def access_token() -> str:
     return record["access_token"]
 
 
+def token(_: argparse.Namespace) -> None:
+    record = saved()
+    if not record:
+        raise Failed("not signed in; run login first")
+    if time.time() > record["saved_at"] + record["expires_in"] - 300:
+        stdout, sys.stdout = sys.stdout, sys.stderr  # keep what refresh says off the pipe
+        try:
+            record = refresh()
+        finally:
+            sys.stdout = stdout
+    say(record["access_token"])
+
+
 def models(_: argparse.Namespace) -> None:
     listing = json.load(request(f"{RESOURCE}/models", bearer=access_token()))
     entries = listing.get("models") or listing.get("data") or []
@@ -407,6 +422,7 @@ def main() -> int:
     )
     entry.set_defaults(run=ask)
     commands.add_parser("refresh").set_defaults(run=refresh)
+    commands.add_parser("token").set_defaults(run=token)
     commands.add_parser("logout").set_defaults(run=logout)
     args = parser.parse_args()
     try:
