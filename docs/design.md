@@ -94,9 +94,10 @@ add-on defines a loop is still in [Open questions](open-questions.md) (E12).
 
 **What is left out.** Nothing is refused for good. The test for anything proposed is whether
 it serves the agent adapting itself, for this use; what does not is neither built in nor
-promised. The command line is the front end, and enough. An editor (through a protocol
-editors and agents share), a terminal interface, or a page in a browser showing what the
-agent has built and been granted, may grow from it; none is a condition of 1.0.
+promised. The command line is the front end, and enough. A page in a browser showing what
+the agent has built and been granted, an editor (through a protocol editors and agents
+share), or a terminal interface, may grow from it; none is a condition of 1.0, and the page
+is the first of them ([How people meet it](#how-people-meet-it)).
 
 ## The shape
 
@@ -582,7 +583,8 @@ and whatever holds the host's authority was compiled in by whoever built the bin
   `env-secret` and `http-client`; the agent file picks which are loaded (`[providers.*]`,
   `[kernels.*]`, `[mcp.*]`, `[secrets.*]`, `[extensions.<name>]`). Every entry but a
   provider is built from a kind of the command's `Standard`, so a command of one's own can
-  swap any of them (secrets from a keychain, a sandboxed kernel) without touching the rest. A new *kind* of
+  swap any of them (secrets from a keychain, a sandboxed kernel) without touching the rest;
+  provider kinds are to join them ([How people meet it](#how-people-meet-it)). A new *kind* of
   extension is Rust in a command of one's own (see [In the `corduroy`
   command](#in-the-corduroy-command) below). Native code is never loaded at run time.
 - **An add-on is built on its own** (`cargo plugins`, `corduroy-js build`, `corduroy-py
@@ -961,8 +963,10 @@ What the command does follows from it:
 - *The notice is the front end's.* A line in a terminal, a toast in a desktop application.
 - *A session from outside can be held for the person.* It passes the gate at
   `session/start`, so a policy can ask before it goes on in the background.
-- *A protocol for front ends is still open* (H11). The mode that stays up serves plugins,
-  not other programs.
+- *1.0 has no protocol for front ends.* The mode that stays up serves plugins, not other
+  programs. A front end is an extension with a format of its own, and the handle it drives
+  through gains answering an ask and stopping a run
+  ([How people meet it](#how-people-meet-it)).
 
 **The session is the unit of concurrency.** The driver makes the question real: the
 person's run, a session started from outside and several children can all be ready
@@ -1099,7 +1103,9 @@ failure has been dealt with.
 | The test-driven pair, end to end | The second [measured use](#what-it-is-for): two agents with different loops, tools and views finishing one task. It needs an add-on to define a loop and sessions to differ. |
 
 Not waited on: a scheduler and kernel snapshots, which serve unattended work and come after
-1.0; secrets from a keychain and code mode, which may be built before it and need not be.
+1.0; and code mode, which may be built before it and need not be. Secrets from a keychain
+are no proof of the surface, but they are in the standard set at 1.0, and the second store
+ships once it has passed ([How people meet it](#how-people-meet-it)).
 
 The `message` event's payload is the core's `Message` (`{"role", "parts"}`, see
 `corduroy_core::message`), part of the log contract like the rest: parts gain kinds, and a
@@ -1452,8 +1458,8 @@ Opening a workspace reads the workspace file and the sessions in use, so startin
 not grow with history; an old session is read when asked for, removing one deletes a file,
 and searching history is searching files. A commit that touches two files (a session
 starting) must still be stored whole or not at all, which is the store's to solve and part
-of what the proof shows. Whether it replaces the single file as the default is decided once
-it works; the single file stays as the simple store either way. Anything faster than
+of what the proof shows. It replaces the single file as the default once it works
+([How people meet it](#how-people-meet-it)); the single file stays as the simple store. Anything faster than
 paging through old sessions (an index, search) is an add-on's or an extension's to build
 beside the log, not a promise of the log. Branching a session from an earlier point fits
 the layout as a new file whose start names the event it branches from, and is still an
@@ -1625,7 +1631,9 @@ What the core must guarantee, because the author is now the agent (built):
   (disposed with it) and starts when the tree next settles: the harness settles it before
   every step of the loop, so a tool the child registers is offered to the model at the next
   step. *Not yet durable:* a loaded plugin lasts as long as its loader in this process; a
-  loader that wants it back after a restart loads it again (from its `state`, say).
+  loader that wants it back after a restart loads it again (from its `state`, say). Decided,
+  not built: a package the person approved is loaded again by the host
+  ([How people meet it](#how-people-meet-it)).
 
 **Guest languages.** JavaScript/TypeScript and Python come first, since those are what other
 harnesses' extensions are written in; the Rust plugins are the reference, not the expected
@@ -1793,7 +1801,9 @@ kernel's list, or as the address of a provider or an MCP server in an agent file
 
 **One path for every credential.** A provider's key and an MCP server's token come through
 `Secrets`, as an add-on's secrets do, so a keychain in place of the environment covers all
-of them. The person's own environment is where they come from by default (`env-secret`). A
+of them. They come from the operating system's keychain where the machine has one, and
+from the person's own environment (`env-secret`) where an entry says so
+([How people meet it](#how-people-meet-it)). A
 credential is then in one of three states as far as a shell is concerned:
 
 | State | What the shell has | How it gets there |
@@ -1822,7 +1832,7 @@ credential is then in one of three states as far as a shell is concerned:
 
 | Place | Whose | Holds |
 | --- | --- | --- |
-| Account level | The person's. Outside every workspace, and out of reach of every shell and add-on. | Their own agent file, their answers, and for each workspace its log and its compiled-code cache. |
+| Account level | The person's. Outside every workspace, and out of reach of every shell and add-on. | Their own agent file, their answers, the packages they promoted ([How people meet it](#how-people-meet-it)), and for each workspace its log and its compiled-code cache. |
 | Project level | The workspace's: `corduroy.toml` and `.corduroy/`. | The project's agent file, and what the agent builds there: skills, memories, its add-ons. It may be committed and shared. |
 
 - *What enforces is never the agent's to write:* the grants, the log, the command and the
@@ -1878,7 +1888,7 @@ model](explanation/security-model.md) becomes the list of them, with the test fo
 | 1 | An add-on does only what its grants allow. | Built. |
 | 2 | The shell reaches only the files, hosts and variables listed for it. A shell that cannot be confined does not start unless the person chose the plain one. | Built for variables: every kernel starts from an empty environment. Not built: files and hosts, which wait on the confined kernel. |
 | 3 | What enforces is out of the agent's reach: the grants, the log, the command and its add-ons, the person's answers. | For add-ons, protected paths cover the agent file, the log, the command and the cache. Not built: the shipped add-ons, the answers, and anything for a shell. |
-| 4 | Whatever the agent builds or loads holds at most what its loader holds, and a person approved the load. | No amplification and the gate are built. A person cannot answer yet: an ask at `plugin/load` is a denial (C15). Not built: a session with grants of its own, which this guarantee is read as covering ([What an extension can reach](#what-an-extension-can-reach)). |
+| 4 | Whatever the agent builds or loads holds at most what its loader holds, and a person approved the load. | No amplification and the gate are built. A person cannot answer yet: an ask at `plugin/load` is a denial (C15). Not built: a session with grants of its own, which this guarantee is read as covering ([What an extension can reach](#what-an-extension-can-reach)); and a package given more by the person's own answer, which is the one way past a loader's grants ([How people meet it](#how-people-meet-it)). |
 | 5 | A workspace changes nothing about what the agent may do until the person accepts its file. | Not built. |
 | 6 | No credential's value reaches an add-on. A shell holds a value only where an agent file the person wrote or accepted says so, and a masked one goes only to the hosts its secret names. | Built for add-ons. For a shell, a value in the command's environment reaches it only through `pass`; masking is not built, and a credential in a file the shell can read is still within reach. |
 
@@ -1895,6 +1905,217 @@ model](explanation/security-model.md) becomes the list of them, with the test fo
 that breaks a frozen contract, announced as one. How it is announced and how long a release
 is supported are still open (A11), as is whether a review from outside is a condition of 1.0
 (P9).
+
+## How people meet it
+
+Five things are decided here: what a person reaches the agent through, what the standard set
+holds at 1.0, where a credential comes from, which parts of a provider's entry are ours, and
+what an add-on is as something kept and passed on. All of it is *planned*. The code is as
+[Three tiers](#three-tiers-core-extensions-add-ons) and the [reference](README.md#reference)
+pages describe it, and [Order of work](#order-of-work) lists what changes.
+
+**The terminal is the front end of 1.0.** The command ships no server and speaks no
+protocol, so no wire format freezes with 1.0. Driving the harness from another program
+still means linking it.
+
+- *The first thing beyond the terminal is a page in a browser,* served on this machine by
+  the command. A page comes before an editor's protocol because it travels: the same page
+  sits inside a desktop shell (Tauri, Electron), and can later be reached from a phone. An
+  editor, through a protocol editors and agents share, may follow it.
+- *A front end is an extension.* It listens on a socket, which no capability gives an
+  add-on, so it is native and compiled into the command, and the core and the loop learn
+  nothing of it. What it speaks is its own. That becomes a [stable](#what-is-stable)
+  contract when the extension ships, as any standard extension's configuration is, and
+  nothing about it is promised before then.
+- *It drives through the handle every extension has.*
+  [What an extension can reach](#what-an-extension-can-reach) gives an extension four
+  things: start a session, send one a message, raise a signal, and read. A front end also
+  has to answer an ask and stop a run, which only the host's `Harness` does today. The
+  handle gains both, so that a front end can be written without the command changing.
+- *It answers for who reaches it.* Any program on the machine can open a local port, and a
+  phone is not on the machine at all. A front end lets nobody in without a token. That is
+  asked of the extension when it is built, and not of 1.0.
+- *What two connected harnesses speak is their plugins' own.* The
+  [proof](#what-the-freeze-waits-on) that connects another harness has to put something on
+  the wire before 1.0. It tests the core, and promises no format: what the two plugins say
+  to each other may change with them.
+
+**What the standard set holds at 1.0.** Each part is a promise of the
+[stable](#what-is-stable) kind: what its kind does and how it is configured stays. So the
+list is short, and what is left out is said.
+
+| Part | At 1.0 |
+| --- | --- |
+| Kernels | The confined shell, which is the default agent's ([What is safe by default](#what-is-safe-by-default)). The plain shell and PowerShell, chosen by name. |
+| Outbound HTTP | The client behind the `http` capability, as today. |
+| Secrets | From the operating system's keychain, and from the environment (below). |
+| MCP | Servers over standard input and output, and over HTTP. How much of the protocol is still open (H8 in [Open questions](open-questions.md)). |
+| Providers | Five kinds (below). |
+| The log | The [folder store](#what-the-record-promises), which is the default once its proof has passed. The single file stays, as the simple store. |
+| Add-ons | The WebAssembly host, and the add-ons shipped with the command, which keep changing as before. |
+
+Not in it, and not promised by 1.0: a scheduler; a front end other than the terminal; code
+mode; snapshots of a kernel; and any source of secrets but those two.
+
+- *The folder store is the default because sessions multiply.* One file is read whole at
+  start and grows with every agent that ever ran. With a file for each session, starting
+  does not grow with history and removing a session is deleting a file, which is what a
+  workspace where several agents work needs.
+- *Code mode may be built before 1.0 and is not among its promises.* What it leans on is
+  there already: a kernel does not know who calls it, so add-ons written in different
+  languages that serve one session reach the same shell and what it holds. Between sessions
+  nothing is shared, [as decided](#what-an-extension-can-reach). Whether code in a kernel
+  can call back into the agent is still open (B27).
+
+**A credential comes from the keychain where there is one.** The safe choice is to be the
+easy one. A value in an environment variable, or in a file of variables beside a project,
+is plain text that every program the person starts can read, and that is copied or
+committed by accident. The operating system's keychain keeps it encrypted behind the
+person's own login. It costs one step, once, and that step is accepted.
+
+- *Two kinds, and the entry says which.* A `[secrets.<name>]` entry is built from a keychain
+  kind (the macOS Keychain, the Windows Credential Manager, the Secret Service on Linux) or
+  from the environment (`env-secret`, as today).
+- *The core does not change.* It has the `Secrets` registry and no more. The keychain is an
+  extension of the standard set, and a device without an operating system does not have it.
+- *`corduroy init` writes keychain entries where the machine has one,* and environment
+  entries where it has none: a server with nobody logged in, a container.
+- *No silent fallback.* An entry that names the keychain on a machine without one fails,
+  and says so. The command never changes a credential's source by itself, as it never
+  starts a plain shell in place of a confined one.
+- *The person puts a value in with a command* that asks for it without showing it. It goes
+  from the person to the keychain, and never through the agent, an agent file or the log.
+- *No file of variables.* A `.env` file is not a source. A password manager's secrets
+  service, or a tool that describes secrets by a schema, is a kind that can be added after
+  1.0, since kinds are added and none is renamed.
+
+**A provider's entry is ours.** The agent file is a stable contract, and `[providers.*]`
+followed whatever the provider library accepts. What is promised is a named list.
+
+- *Five kinds:* `anthropic`, `openai`, `ollama`, `anthropic-compatible` and
+  `openai-compatible`. They name protocols: the two API shapes most services speak, and
+  Ollama's own. Anything else that speaks one of the shapes is reached through a
+  `-compatible` kind and a `base_url`: llama.cpp's server, OpenRouter, a gateway.
+- *Other names are shorthand, outside the promise.* A name the provider library knows
+  (`groq`, `mistral` and the rest) works for as long as the library has it. The reference
+  says so, and each is reachable through a promised kind.
+- *Provider kinds are kinds of the `Standard`,* like every other section's, so a command of
+  one's own adds or swaps one.
+- *A provider names its secret.* `secret = "<name>"` names a `[secrets.<name>]` entry, and
+  `api_key_env` goes, as an MCP server's `bearer_token_env` does
+  ([What is safe by default](#what-is-safe-by-default)). A kind that needs no key, as a
+  model served on this machine usually does, names none.
+- *Nothing reads the environment unasked.* A provider that needs a key and names no secret
+  is an error when the agent is put together, and the message says which line to add. There
+  is no default variable looked up quietly.
+- *`corduroy init` may look.* The person ran it, so it may see which of the well-known
+  variables are set and offer them. It writes where the credential comes from, never the
+  value.
+- *Which keys.* Those that say how a provider is reached are ours, and stay: `kind`,
+  `base_url`, `secret`, `headers` and `timeout_seconds`. Those that describe a model
+  (`[providers.<name>.models.<model>]`) were decided
+  [earlier](#what-the-core-is-made-of). Those that set a request (`max_tokens`,
+  `temperature`, `thinking`, `streaming`) stay as written until it is decided what a request
+  itself carries (G11, G9).
+
+**1.0 may ship on oi-kit.** It is an alpha with no promise of stability, so the condition is
+that nothing of it shows: no key or kind of the agent file and no field of the log is
+oi-kit's. That holds once the above is built. It is used in one crate, behind the loop's
+`Provider`, for building a provider, converting messages, its catalogue of models and its
+retries, and replacing it changes that crate and nothing a person wrote. One thing is still
+to check: that a key can be handed to it from `Secrets`, where today its own resolver reads
+the environment.
+
+**An add-on ships as a package.** A folder holding a manifest and either a component or a
+script the script host runs. The manifest is a small file of text: a name, a description, a
+version, and what the add-on wants.
+
+- *It is made for its author and its reader.* The [author](#what-it-is-for) 1.0 is built
+  around is the agent, and the reader is the person who says yes. A folder of text is
+  something the agent writes in one go and a person reads before answering.
+- *A bare `.wasm` file with a `[[plugins]]` entry stays,* for a one-off and for what a
+  person wires by hand.
+- *Nothing is signed and there is nowhere to fetch one from.* Passing a package on is
+  copying its folder. The hash of what a package holds is recorded at every load, and is
+  what a signature or a registry would later be built on.
+- *The version is a label for people.* It decides nothing.
+
+**What a package wants is a request.** The manifest grants nothing. A package starts with
+nothing, and whatever it holds, it asked for and was given.
+
+**The yes attaches to the grants, not to the code.** The person approves
+[what a thing may do, not how it works](#what-it-is-for), and that is taken at its word:
+
+| What changed | What happens |
+| --- | --- |
+| The code, within what was already allowed | Nothing is asked. The agent may rewrite its add-on as often as the work needs. Each load records the new hash. |
+| What it wants: a capability it did not have, or more of one it has | The person is asked about the difference, and only that: one more host, a place to write. |
+
+An add-on that searches the web shows the course of it. It is written first with nothing,
+and can sort and list results it cannot yet fetch. It asks for `http`, and the person
+allows one search service or any host. Changing to another service is a question only if
+the answer named the first. Later it wants to keep what it fetched, and asks for a
+directory to read and write.
+
+- *Why this is safe to allow.* An add-on does only what its grants allow whatever its code
+  is (the first [guarantee](#what-is-safe-by-default)), so a file swapped for another gains
+  nothing the person did not give.
+- *A stricter rule is a gate's.* `plugin/load` is still asked of the gates at every load,
+  with the hash, so a policy that asks again whenever the code changes can be written.
+- *How wide an answer may be* (this host, or any) is part of what a person can answer to an
+  ask, which is still open (G6).
+
+**Only the person's answer gives more than the loader holds.** A load through the `plugins`
+capability is granted within what its loader holds, as now. A package that wants more is
+not simply refused: the person is asked, and that ask is no gate's to waive. A yes is the
+person's own, kept with their other [answers](#what-is-safe-by-default), and it reaches
+the package because the person gave it and not because a loader had it to pass on. The
+agent never gives itself anything. The fourth guarantee is read so: whatever the agent
+builds or loads holds at most what its loader holds, or what the person's own answer gave
+it. With nobody there, the ask waits in the log as any ask does. All of this needs a person
+to be able to answer at `plugin/load`, which is a condition of the freeze already (C15).
+
+**An approved package comes back.** The answers are kept at account level for each
+workspace: which package, and what it was granted. When the agent starts, the host loads
+each package approved for the workspace with those grants. What the agent built yesterday
+is there today, and nothing has to load it again.
+
+- *A package that is gone is not loaded,* and its answer stays, harmless.
+- *A bare component loaded through `plugins`* lasts as long as its loader, as today.
+- *Who may change what.* What the agent built in the project it may read, change, replace
+  and remove. What the person added, as an entry of an agent file or a package they
+  promoted, only the person changes. It follows from the
+  [two places](#what-is-safe-by-default) and needs no rule of its own: the agent file is
+  protected, and the account level is out of the agent's reach. Whether taking away a
+  package that guards a decision point is asked first is still open (D3).
+
+**Two places for packages.**
+
+| Place | Holds | Who writes it |
+| --- | --- | --- |
+| The project (`.corduroy/`) | What the agent builds for this work. It may be committed and shared, and a package that came with a clone is a request like any other. | The agent, and the person. |
+| The account level | Packages the person promoted, to be had in every workspace. | The person, through a command. |
+
+- *Promoting is the person's act.* A command copies the package's folder to the account
+  level. The two copies are then separate, and the agent cannot change the promoted one.
+- *A promoted name comes before a project's.* A name is looked for in
+  `CORDUROY_PLUGIN_PATH`, then among the shipped add-ons, then among the promoted ones, and
+  in the project last, so a workspace stands in for neither.
+- *A project adapts a promoted package by building on it,* not by copying it. A linter
+  promoted from a JavaScript project is used in a TypeScript one through a small package
+  that strips the types and calls it, as a tool or a service.
+- *Whether a promoted package's grants go with it* to each workspace, or are asked for in
+  each, is still open (H6).
+
+**What is not promised.**
+
+- *A server, a protocol or a page* in 1.0, and any format for what connected harnesses say
+  to each other.
+- *A registry, signatures, or a version that means something.*
+- *A package that wraps a plugin made for another harness,* so that sets of them can be
+  passed on together, and *an agent that looks after the promoted packages.* Both may come
+  after 1.0, and the manifest and the hash are what they would be built on.
+- *That a provider named by the library's shorthand keeps its name.*
 
 ## Shipped plugins: the Goose baseline
 
@@ -2068,6 +2289,20 @@ the step it waits on is done.
     call with its trail on `Run`, a context for `Operation::run`, and `Run` no longer
     handing out the harness; `write` and `edit` refusing a file that changed since it was
     read.
+17. How [people meet it](#how-people-meet-it). *Decided, none of it built:* the handle an
+    extension drives through gaining an answer to an ask and a stop; a keychain kind for
+    secrets on macOS, Windows and Linux, a command that puts a value into it, and `init`
+    preferring it; provider kinds as kinds of the `Standard`, five of them promised and the
+    library's other names marked as outside the promise; `secret` on a provider entry in
+    place of `api_key_env`, nothing read from the environment unasked, and a missing key an
+    error that names the line to add; the check that oi-kit takes a key from `Secrets`; the
+    folder store as the default once its proof has passed; a package (a folder with a
+    manifest and a component or a script), its wants a request and the person's yes kept
+    for the grants and not the code; an ask that lets the person give a package more than
+    its loader holds; approved packages loaded by the host at start; the account-level
+    place for promoted packages, the command that promotes one, and the order in which a
+    name is looked for. Not in 1.0: the page in a browser, which is the first front end
+    after the terminal.
 
 ## Open questions
 
@@ -2077,9 +2312,10 @@ answer. The list below is this record's own, older and broader: an entry that ha
 settled by 1.0 is there as well, and one that can wait is only here.
 
 - **Grant files.** The `corduroy` agent file is the first form: one file naming the plugins
-  of an agent and what each may do, as Goose's recipes and Cordis's `cordis.yml` do. Still
-  open: a grant file per plugin shipped with it (Zed's `extension.toml`, Tauri's capability
-  files), so a plugin states what it wants and the agent file only narrows it.
+  of an agent and what each may do, as Goose's recipes and Cordis's `cordis.yml` do. Decided,
+  not built: an add-on ships as a package whose manifest states what it wants, as a request
+  (Zed's `extension.toml`, Tauri's capability files), and the person's answers say what it
+  gets ([How people meet it](#how-people-meet-it)).
 - **Scrubbing the log.** If the model does write a sensitive value into a tool call, the
   assistant message holding it is committed before any gate is asked, so neither a deny nor a
   rewrite keeps it out of the log. If that matters it is a property of the log (a filter
@@ -2107,7 +2343,9 @@ settled by 1.0 is there as well, and one that can wait is only here.
 - **Providers of our own.** `corduroy-providers` still builds on oi-kit-providers, an
   alpha, for the HTTP side of each model's API. It is confined to that crate, behind the
   harness's `Provider`, so replacing it (with clients of our own for the two or three APIs
-  that matter, or with another crate) touches nothing else.
+  that matter, or with another crate) touches nothing else. 1.0 may ship on it, once nothing
+  of it shows in the agent file ([How people meet it](#how-people-meet-it)); when to replace
+  it can wait.
 - **Scopes below a service.** The `service` capability is scoped by service name, so a
   grant gives all of a service's methods. `service:method` resources would let a grant
   name one.
@@ -2125,8 +2363,9 @@ settled by 1.0 is there as well, and one that can wait is only here.
 - **Blocking.** Tool calls run on blocking threads, but event listeners run inline on the
   thread that emitted, including inside the async loop. Slow listeners would need a queue.
 - **Durable loads.** Plugins loaded by a plugin are not reloaded after a restart unless their
-  loader does it. A plugin store (components by hash, with the grants they were loaded with)
-  would let the host do it, and is also where grant files come in.
+  loader does it. Decided, not built: the host loads again each package the person approved,
+  from their answers ([How people meet it](#how-people-meet-it)). A bare component loaded
+  through `plugins` still lasts only as long as its loader.
 - **Approving a load.** `plugin/load` cannot ask a person yet; see Automations.
 - **Shipping precompiled plugins.** wasmtime's cache removes the cost of every load but the
   first on a machine. Removing that one too means distributing compiled code, which is read
