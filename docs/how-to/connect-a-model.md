@@ -57,8 +57,8 @@ corduroy login
 After that the agent runs as with a key. The token is renewed as it runs out; `corduroy
 logout` revokes the sign-in. Usage counts against your plan, alongside every other tool you
 use it from; see and limit it at <https://chatgpt.com/settings/usage>. A request the plan
-does not cover fails the run with OpenAI's reason: nothing falls back to another way of
-paying. Do not set `max_tokens` on this provider: a plan-paid request is refused a limit.
+does not cover fails the run with OpenAI's reason, followed by what you can do about it
+(the usage page, or `corduroy login` again): nothing falls back to another way of paying. Do not set `max_tokens` on this provider: a plan-paid request is refused a limit.
 
 On a machine with no browser, sign in on one that has, then copy
 `~/.config/corduroy/chatgpt/chatgpt.json` over a secure channel to the same place there.

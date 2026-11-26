@@ -90,6 +90,8 @@ provider, `reviewer`, so the `review` add-on asks OpenAI's model about Anthropic
 | `  ! plugin <name> failed/stopped: reason` | an add-on could not start, or trapped too often |
 | `  ↻ picking up a run that was cut short` | a restart |
 | `  [<session>] …` | a line from a sub-agent's session |
+| `Using ChatGPT plan. Manage usage: <address>` | before a run, when the model's provider is paid by a [ChatGPT sign-in](agent-file.md#secretsname): whose account the run is on, and where to see and limit what it uses |
+| a line after `the run failed: …` | when such a run fails for a reason that is the plan's (its usage limit, a sign-in no longer accepted, something a plan does not pay for): what you can do about it. Where OpenAI's reason carries no code, the line is a guess and says "if" |
 
 **Ctrl-C** while a run goes asks it to stop: the running tool is told, calls not yet begun do
 not run, and the run ends as stopped. A second Ctrl-C leaves at once, and the run is

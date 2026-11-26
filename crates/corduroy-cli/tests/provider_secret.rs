@@ -118,6 +118,25 @@ fn endpoint(text: &'static str) -> std::io::Result<(SocketAddr, Seen)> {
     Ok((address, seen))
 }
 
+/// An endpoint that answers every request with `status` and `body`.
+fn refusal(status: &'static str, body: &Value) -> std::io::Result<SocketAddr> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let address = listener.local_addr()?;
+    let body = body.to_string();
+    thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let _sent = read(&stream);
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+                 Connection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _written = (&stream).write_all(response.as_bytes());
+        }
+    });
+    Ok(address)
+}
+
 fn corduroy(workspace: &Path, args: &[&str], env: &[(&str, &str)]) -> std::io::Result<Output> {
     Command::new(env!("CARGO_BIN_EXE_corduroy"))
         .arg("--workspace")
@@ -233,6 +252,57 @@ fn plan_file(address: SocketAddr) -> String {
     )
 }
 
+/// Keep a sign-in under `own`, the person's own directory, as the secret `chatgpt`: good for
+/// an hour from now.
+fn sign_in(own: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    let kept = own.join("corduroy").join("chatgpt");
+    fs::create_dir_all(&kept)?;
+    let record = json!({
+        "email": "person@example.com", "issuer": "https://auth.openai.com",
+        "subject": "user-1", "client_id": "oaiapp_1", "ext_agent_host_id": "urn:uuid:0",
+        "id_token": "id", "access_token": "plan-t0ken", "refresh_token": "refresh-t0ken",
+        "token_type": "Bearer", "expires_in": 3600, "saved_at": now,
+        "scopes": ["openid", "chatgpt.tokens.use.direct"],
+    });
+    fs::write(kept.join("chatgpt.json"), record.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn a_failure_of_the_plan_is_followed_by_what_the_person_can_do() {
+    let workspace = scratch("cli-chatgpt-refused");
+    let own = scratch("cli-chatgpt-refused-own");
+    let own_text = own.to_string_lossy().into_owned();
+    let env = [
+        ("XDG_CONFIG_HOME", own_text.as_str()),
+        ("APPDATA", own_text.as_str()),
+    ];
+    sign_in(&own).unwrap();
+
+    // The service refuses the sign-in: the run fails with its reason, then what to do.
+    let refusing = refusal(
+        "401 Unauthorized",
+        &json!({"error": {"message": "not accepted", "code": "subscription_sharing_invalid_user"}}),
+    )
+    .unwrap();
+    fs::write(workspace.join("corduroy.toml"), plan_file(refusing)).unwrap();
+    let output = corduroy(&workspace, &["run", "say hello"], &env).unwrap();
+    let said = format!("{}{}", text(&output.stdout), text(&output.stderr));
+    assert!(!output.status.success(), "{said}");
+    assert!(
+        said.contains("the run failed") && said.contains("not accepted"),
+        "{said}"
+    );
+    assert!(
+        said.contains("sign in again with `corduroy login`"),
+        "{said}"
+    );
+    assert!(!said.contains("t0ken"), "{said}");
+}
+
 #[test]
 fn a_chatgpt_sign_in_is_the_token_a_provider_sends_and_its_absence_names_the_command() {
     let workspace = scratch("cli-chatgpt");
@@ -255,21 +325,7 @@ fn a_chatgpt_sign_in_is_the_token_a_provider_sends_and_its_absence_names_the_com
     );
     assert!(seen.lock().unwrap().is_empty());
 
-    // A sign-in kept under the secret's name, good for an hour from now.
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let kept = own.join("corduroy").join("chatgpt");
-    fs::create_dir_all(&kept).unwrap();
-    let record = json!({
-        "email": "person@example.com", "issuer": "https://auth.openai.com",
-        "subject": "user-1", "client_id": "oaiapp_1", "ext_agent_host_id": "urn:uuid:0",
-        "id_token": "id", "access_token": "plan-t0ken", "refresh_token": "refresh-t0ken",
-        "token_type": "Bearer", "expires_in": 3600, "saved_at": now,
-        "scopes": ["openid", "chatgpt.tokens.use.direct"],
-    });
-    fs::write(kept.join("chatgpt.json"), record.to_string()).unwrap();
+    sign_in(&own).unwrap();
 
     let output = corduroy(&workspace, &["run", "say hello"], &env).unwrap();
     let stdout = text(&output.stdout);
@@ -280,6 +336,11 @@ fn a_chatgpt_sign_in_is_the_token_a_provider_sends_and_its_absence_names_the_com
     );
     let sent = seen.lock().unwrap().first().cloned().unwrap();
     assert_eq!(sent.authorization, "Bearer plan-t0ken");
+    // The person is told whose account pays, and where to see what it has used.
+    assert!(
+        stdout.contains("Using ChatGPT plan. Manage usage: https://chatgpt.com/settings/usage"),
+        "{stdout}"
+    );
     let log = text(&corduroy(&workspace, &["log"], &env).unwrap().stdout);
     assert!(!log.contains("t0ken") && !stdout.contains("t0ken"));
 }

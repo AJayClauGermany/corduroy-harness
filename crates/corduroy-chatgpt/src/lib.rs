@@ -15,9 +15,13 @@
 //!   agent file's `[secrets.<name>]` entry of `kind = "chatgpt"` asks for. A provider entry
 //!   that names it sends the token of the moment with every request.
 //!
+//! [`advice`] is what to tell the person: that their plan is what pays, and what to do when
+//! a request it was to pay for fails.
+//!
 //! The tokens are never printed, logged or put in an error. No client secret and no partner
 //! key are involved: the flow is the public-client one, with PKCE.
 
+pub mod advice;
 pub mod id_token;
 pub mod random;
 pub mod secret;

@@ -30,7 +30,7 @@ use std::sync::{Arc, Mutex};
 use corduroy_harness::core::{Query, SessionId};
 use corduroy_harness::{Harness, MAIN, Status};
 
-use corduroy_std::Standard;
+use corduroy_std::{SignIn, Standard};
 
 use crate::agent::{AGENT_FILE, Agent, AgentFile, Places, assemble_from};
 use crate::extension::{Asked, Extensions};
@@ -223,18 +223,26 @@ async fn run(options: Options, standard: &Standard, out: &Out) -> Result<ExitCod
         harness.start_session(session.clone(), None)?;
     }
     let mut input = io::BufReader::new(io::stdin());
+    let paid = paid_by(&agent.file, standard);
+    if let (Some(line), [] | ["run" | "continue", ..]) = (
+        paid.as_ref().and_then(|paid| paid.using()),
+        command.as_slice(),
+    ) {
+        say(out, &line);
+    }
+    let paid = paid.as_deref();
     match command.as_slice() {
-        [] => chat(harness, session, &mut input, out).await,
+        [] => chat(harness, session, &mut input, &Shown { out, paid }).await,
         ["run", words @ ..] if !words.is_empty() => {
             let _shown = terminal::watch(harness, &session, out);
             let prompt = words.join(" ");
             let outcome = terminal::prompt(harness, &session, &prompt, &mut input, out).await?;
-            Ok(finish(&outcome.status, out))
+            Ok(finish(&outcome.status, &Shown { out, paid }))
         }
         ["continue"] => {
             let _shown = terminal::watch(harness, &session, out);
             let outcome = terminal::resume(harness, &session, &mut input, out).await?;
-            Ok(finish(&outcome.status, out))
+            Ok(finish(&outcome.status, &Shown { out, paid }))
         }
         ["stop"] => {
             let stopped = harness.stop(&session)?;
@@ -384,10 +392,36 @@ fn stamp(time: u64) -> String {
     )
 }
 
-fn finish(status: &Status, out: &Out) -> ExitCode {
-    if let Some(line) = terminal::ending(status) {
-        say(out, &line);
+/// How the secret of the provider the loop asks is signed in to, if its kind is.
+fn paid_by(file: &AgentFile, standard: &Standard) -> Option<Arc<dyn SignIn>> {
+    let secret = file.providers.get(&file.provider)?.spec.secret.as_ref()?;
+    let kind = file.secrets.get(secret)?.extension();
+    standard.sign_in(&kind).cloned()
+}
+
+/// Where a run's end is said, and what its model is paid through, if that is signed in to.
+struct Shown<'a> {
+    out: &'a Out,
+    paid: Option<&'a dyn SignIn>,
+}
+
+impl Shown<'_> {
+    /// Say how a run ended, if there is something to say, and what the person can do about
+    /// a failure that is the account's.
+    fn end(&self, status: &Status) {
+        if let Some(line) = terminal::ending(status) {
+            say(self.out, &line);
+        }
+        if let (Status::Failed { reason }, Some(paid)) = (status, self.paid)
+            && let Some(advice) = paid.advise(reason)
+        {
+            say(self.out, &advice);
+        }
     }
+}
+
+fn finish(status: &Status, shown: &Shown<'_>) -> ExitCode {
+    shown.end(status);
     match status {
         Status::Finished { .. } | Status::Yielded => ExitCode::SUCCESS,
         // As a program interrupted by Ctrl-C does.
@@ -500,8 +534,9 @@ async fn chat(
     harness: &Harness,
     mut session: SessionId,
     input: &mut (dyn BufRead + Send),
-    out: &Out,
+    ends: &Shown<'_>,
 ) -> Result<ExitCode, Box<dyn Error>> {
+    let out = ends.out;
     say(
         out,
         "corduroy: type a prompt, /help for commands, /exit or ctrl-d to leave",
@@ -509,8 +544,8 @@ async fn chat(
     let mut shown = terminal::watch(harness, &session, out);
     let outcome = terminal::resume(harness, &session, input, out).await?;
     let started = !outcome.session.conversation().is_empty();
-    if let Some(line) = terminal::ending(&outcome.status).filter(|_| started) {
-        say(out, &line);
+    if started {
+        ends.end(&outcome.status);
     }
     loop {
         say_prompt(out);
@@ -532,9 +567,7 @@ async fn chat(
             }
             Typed::Prompt(prompt) => {
                 let outcome = terminal::prompt(harness, &session, prompt, input, out).await?;
-                if let Some(line) = terminal::ending(&outcome.status) {
-                    say(out, &line);
-                }
+                ends.end(&outcome.status);
             }
         }
     }

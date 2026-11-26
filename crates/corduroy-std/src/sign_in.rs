@@ -8,7 +8,7 @@
 //! [`Standard`]: crate::Standard
 
 use corduroy_chatgpt::sign_in::{Front, open_in_browser};
-use corduroy_chatgpt::{ChatGpt, USAGE_URL};
+use corduroy_chatgpt::{ChatGpt, USAGE_URL, advice};
 
 use crate::extension::{Asked, chatgpt_in};
 
@@ -28,6 +28,18 @@ pub trait SignIn: Send + Sync {
     ///
     /// Says why the sign-in is still there.
     fn sign_out(&self, asked: &Asked<'_>, say: &mut dyn FnMut(&str)) -> Result<(), String>;
+
+    /// A line to show the person when a run starts whose model is reached with a secret of
+    /// this kind: whose account it is on. None by default.
+    fn using(&self) -> Option<String> {
+        None
+    }
+
+    /// What the person can do about the reason such a run failed, if this kind knows.
+    /// Nothing by default.
+    fn advise(&self, _failure: &str) -> Option<String> {
+        None
+    }
 }
 
 /// Sign in with `ChatGPT`, through the person's browser.
@@ -63,5 +75,13 @@ impl SignIn for ChatGptSignIn {
             say("Nobody was signed in to ChatGPT.");
         }
         Ok(())
+    }
+
+    fn using(&self) -> Option<String> {
+        Some(advice::using())
+    }
+
+    fn advise(&self, failure: &str) -> Option<String> {
+        advice::advice(failure)
     }
 }
