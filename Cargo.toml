@@ -120,6 +120,10 @@ name = "demo"
 required-features = ["wasm"]
 
 [[test]]
+name = "addons"
+required-features = ["wasm"]
+
+[[test]]
 name = "baseline"
 required-features = ["wasm"]
 
@@ -141,6 +145,10 @@ required-features = ["wasm"]
 
 [[test]]
 name = "subagents"
+required-features = ["wasm"]
+
+[[test]]
+name = "viewer"
 required-features = ["wasm"]
 
 # A tool that blocks until it is stopped needs another thread to stop it from.

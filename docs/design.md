@@ -1924,6 +1924,10 @@ still means linking it.
   the command. A page comes before an editor's protocol because it travels: the same page
   sits inside a desktop shell (Tauri, Electron), and can later be reached from a phone. An
   editor, through a protocol editors and agents share, may follow it.
+- *Until then the record can be looked at as a page of files.* The `viewer` add-on
+  (built) writes what it reads through `log-read` into a directory, and a browser opens it
+  as files. It shows and cannot be answered through, so it is no front end, promises no
+  format, and needs nothing the plugin world does not already give.
 - *A front end is an extension.* It listens on a socket, which no capability gives an
   add-on, so it is native and compiled into the command, and the core and the loop learn
   nothing of it. What it speaks is its own. That becomes a [stable](#what-is-stable)

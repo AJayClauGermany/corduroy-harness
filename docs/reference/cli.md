@@ -237,6 +237,7 @@ several. The agent is not put together for this.
 | `<workspace>/.corduroy/log.jsonl` | the event log (the agent file's `log` moves it) |
 | `<workspace>/.corduroy/cache/` | compiled add-ons, so a second start is fast |
 | `<workspace>/.corduroy/skills/`, `memory/` | what the default agent's `skills` and `memory` add-ons keep |
+| `<workspace>/.corduroy/viewer/` | the [`viewer`](shipped-add-ons.md#viewer) add-on's page of the log: open `index.html` in a browser. A copy of the log, which add-ons granted the workspace can read |
 | `~/.config/corduroy/` (`$XDG_CONFIG_HOME/corduroy`; on Windows `%APPDATA%\corduroy`) | what is yours whatever you work on: `chatgpt/<secret>.json`, a ChatGPT sign-in (readable by you alone) where its entry says `keep = "file"`, and `host-id`, a random name for this computer that the sign-in sends |
 | your keychain, service `corduroy` | the values of `kind = "keychain"` secrets, each under its secret's name, and the ChatGPT sign-ins kept there, as `chatgpt-sign-in.<secret>`: in the macOS Keychain (Keychain Access shows them), the Windows Credential Manager (as `<name>.corduroy`) or the Secret Service on Linux (`secret-tool search service corduroy`) |
 

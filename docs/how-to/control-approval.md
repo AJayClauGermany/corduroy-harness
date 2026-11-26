@@ -20,6 +20,11 @@ config = { mode = "smart" }
 | `approve` | ask you | ask you |
 | `chat` | refused | refused: the agent only talks |
 
+What is read-only is each tool's own word (`corduroy check` marks them). In the default
+agent `read`, `tree`, `grep` and `find` are, so the agent looks around without asking;
+`bash` is not, whatever the command, and neither is `web_fetch`, which changes nothing here
+but sends an address out.
+
 ## Always allow, or never allow, particular tools
 
 ```toml
@@ -27,7 +32,9 @@ config = { mode = "smart", allow = ["todo_write", "memory_save"], deny = ["bash"
 ```
 
 Names are exact tool names (`corduroy check` lists them; MCP tools are `<server>__<tool>`).
-`deny` wins over `allow`, and both win over the mode.
+`deny` wins over `allow`, and both win over the mode. To have pages fetched without a
+question each time, allow `web_fetch`, and consider keeping its `http` grant to the hosts
+you mean ([fetch](../reference/shipped-add-ons.md#fetch)).
 
 ## Run unattended
 

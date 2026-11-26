@@ -420,9 +420,9 @@ impl AgentFile {
 
     /// The default agent for a workspace with no agent file: a model served on this machine
     /// by Ollama, which needs no key, the Pi toolset on a shell in the workspace (PowerShell
-    /// on Windows, told to the model, `sh` elsewhere), the approval and inspect gates, the
-    /// Goose-baseline plugins (skills, hints, todo, memory, recall, summarize, compact,
-    /// subagents) and `review`.
+    /// on Windows, told to the model, `sh` elsewhere), `search` and `fetch`, the approval and
+    /// inspect gates, the Goose-baseline plugins (skills, hints, todo, memory, recall,
+    /// summarize, compact, subagents), `today`, `review` and the `viewer` page.
     ///
     /// It reads nothing from the environment: no key is looked for, and none decides whose
     /// model is asked. An agent for a vendor that takes a key is what `corduroy init` writes
@@ -693,6 +693,22 @@ fs-read = ["{workspace}", "{workspace}/*"]
 fs-write = { allow = ["{workspace}", "{workspace}/*"], deny = ["{workspace}/.git/*"] }
 kernel = "shell"
 
+# grep and find: searching the workspace without a command. They only look, so the approval
+# gate below does not ask about them as it does about a grep run in the shell.
+[[plugins]]
+name = "search"
+path = "search.wasm"
+grants = { fs-read = ["{workspace}", "{workspace}/*"] }
+
+# web_fetch: a page on the web, as text. It may ask any host, and the approval gate asks you
+# about each fetch, since an address is something sent out. To stop the asking, add
+# "web_fetch" to approval's allow list; to keep it to some hosts, name them here in place
+# of "*" (http = ["docs.rs", "github.com"]).
+[[plugins]]
+name = "fetch"
+path = "fetch.wasm"
+grants = { http = "*" }
+
 # Procedures the agent saves for itself.
 [[plugins]]
 name = "skills"
@@ -722,6 +738,14 @@ name = "hints"
 path = "hints.wasm"
 config = { files = ["{workspace}/AGENTS.md", "{workspace}/.goosehints", "{workspace}/CLAUDE.md"] }
 grants = { fs-read = ["{workspace}/AGENTS.md", "{workspace}/.goosehints", "{workspace}/CLAUDE.md"] }
+
+# Today's date in the system prompt, which a model otherwise takes from its training. It is
+# the date in UTC unless you say how far your clock is from it:
+# config = { utc_offset = "+01:00" }.
+[[plugins]]
+name = "today"
+path = "today.wasm"
+grants = { clock = "wall" }
 
 # A todo list for each session, kept across turns and restarts.
 [[plugins]]
@@ -774,6 +798,20 @@ name = "compact"
 path = "compact.wasm"
 config = { model = "main/{{model}}" }
 grants = { llm = "main/{{model}}" }
+
+# The log as a page: open {data}/viewer/index.html in a browser to see each session's
+# conversation, tool calls, timings, tokens and what went wrong, following a run as it goes.
+# It only shows; you still answer and type in the terminal. The directory holds a copy of
+# the log, so set enabled = false if nothing should hold one.
+[[plugins]]
+name = "viewer"
+path = "viewer.wasm"
+config = { dir = "{data}/viewer" }
+[plugins.grants]
+log-read = "*"
+fs-read = ["{data}/viewer", "{data}/viewer/*"]
+fs-write = ["{data}/viewer", "{data}/viewer/*"]
+log = "*"
 
 # Lets the model load more plugins from the plugin directory, never granting more than this
 # entry holds. Off by default.
@@ -1152,10 +1190,10 @@ mod tests {
     fn the_default_agent_parses() {
         let file = AgentFile::parse(&AgentFile::default_text()).unwrap();
         assert_eq!(file.provider, "main");
-        assert_eq!(file.plugins.len(), 13);
+        assert_eq!(file.plugins.len(), 17);
         assert_eq!(
             file.plugins.iter().filter(|plugin| plugin.enabled).count(),
-            12
+            16
         );
         assert!(file.plugins[0].grants.contains_key("kernel"));
     }

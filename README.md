@@ -102,7 +102,8 @@ unless a file says so.
 `corduroy run <prompt>` runs one prompt; `corduroy
 check` says what the agent has without calling a model; `corduroy doctor` tries it for real
 (each key, each kernel, one short question to each model); `corduroy log` prints the event
-log, with the time of each event, which is kept in `.corduroy/log.jsonl`. Ctrl-C stops a run (the running tool is told, the rest of its calls do not run); kill
+log, with the time of each event, which is kept in `.corduroy/log.jsonl`; the same log is a page in a browser at
+`.corduroy/viewer/index.html`, which follows a run as it goes. Ctrl-C stops a run (the running tool is told, the rest of its calls do not run); kill
 the process instead and `corduroy continue` picks the run up, or `corduroy stop` ends it; leave a question unanswered and the run waits, in the log, until you do.
 
 ## Extending it
@@ -225,6 +226,7 @@ in [`examples/local-model/`](examples/local-model/corduroy.toml) against Liquid 
 | `plugins/skills` | Agent-written `SKILL.md` files with a prompt index and a review nudge |
 | `plugins/approval` | A gate: permission modes with allow and deny lists |
 | `plugins/{hints,todo,memory,recall,summarize,compact,subagents,inspect,plugin-manager}` | The rest of the Goose baseline: context files, a todo list, memories, searching earlier sessions, summaries by a second model, auto-compaction, sub-agents, a gate inspecting calls, loading plugins at run time |
+| `plugins/{search,fetch,today,viewer}` | For work in a real workspace: `grep` and `find` without a shell, a web page as text, today's date in the prompt, and the log as a page in a browser |
 | `plugins/testbed` | For the host's own tests: makes host calls, loads plugins, echoes events and traps on demand |
 | `crates/corduroy-test-support` | Test-only helpers: finds the built plugins, makes scratch directories |
 | `tests/`, `crates/*/tests/` | Integration tests through the public API |

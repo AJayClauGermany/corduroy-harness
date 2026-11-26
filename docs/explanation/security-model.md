@@ -39,7 +39,9 @@ gate asking you first. If you switch `approval` to `auto`, `bash` is unconfined.
   symbolic links followed, so `{workspace}/link-to-etc/passwd` is checked as `/etc/passwd`.
 - **Protected paths stay out of reach.** The host binary, the compiled-code cache, and in the
   `corduroy` command the agent file and the log, are refused to `fs-read` and `fs-write`
-  whatever a grant says. An add-on cannot rewrite the record or its own grants.
+  whatever a grant says. An add-on cannot rewrite the record or its own grants. A copy an
+  add-on was granted to make is not the log: the [`viewer`](../reference/shipped-add-ons.md#viewer)
+  page is ordinary files, as readable and writable as their directory's grants say.
 - **Processes start only through kernels.** No capability starts a process another way, so a
   sandboxed kernel also sandboxes MCP servers started through it.
 - **No amplification.** An add-on that loads another grants it at most what it holds itself,
