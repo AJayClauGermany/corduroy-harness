@@ -1035,6 +1035,7 @@ impl Harness {
             let reason = format!("no model provider is registered as `{}`", self.provider);
             return Ok(Step::End(End::Failed(reason)));
         };
+        journal.ask_started(&self.provider, request)?;
         let Some(reply) = stop.unless_asked(provider.complete(request)).await else {
             return self.stopped(journal);
         };

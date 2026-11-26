@@ -19,8 +19,8 @@ The conversation the model sees is rebuilt from these events alone.
 `corduroy log` prints one per line:
 
 ```text
-2026-11-23T10:15:33Z #53 main [host] gate/decision (after #51) {"point":"tool/call",…}
-     time            id  session source topic       cause         payload
+2026-11-23T10:15:33.412Z #53 main [host] gate/decision (after #51) {"point":"tool/call",…}
+     time                id  session source topic       cause         payload
 ```
 
 A step's events are one **commit**: stored together, or not at all.
@@ -40,6 +40,7 @@ Source: the table in [`src/session.rs`](../../src/session.rs).
 | `tool/result` | environment | `{"id", "tool", "ok", "output"}`, plus `"content"` when the result is not one block of text |
 | `tool/wait` | host | `{"id", "tool", "signal"}`: the call's result comes with that signal |
 | `signal` | environment | `{"name", "payload"}`: what a waiting call waited for |
+| `model/request` | host | `{"provider", "model", "messages", "tools"}`: the model is about to be asked, with that many messages and tools. Its own commit, so its time is when the request went out; the model's `message` (or the `turn/end` of a request that failed) is when the answer came |
 | `usage` | agent | `{"model", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens", "stop"}`, each count only if the provider gave it; `stop` is why the model stopped (`finished`, `limit`: cut off at the most it may write, `tool_calls` or `refused`), if the provider said |
 | `compaction` | host | `{"summary", "keep_from", "by"}`: the messages before `keep_from` are summarised |
 | `run/restart` | host | `{"attempt"}`: an unfinished run was picked up again |
@@ -49,6 +50,11 @@ Source: the table in [`src/session.rs`](../../src/session.rs).
 A run is **unfinished** from its first `message` to its `turn/end`. One that has no
 `turn/end` because a gate asked, or because a call waits for a signal, is **waiting**, not
 interrupted; `corduroy continue` asks the question again rather than counting a restart.
+
+Times say how long things took, since every commit carries when it was stored: the model
+from `model/request` to its `message`, a tool from `tool/start` to `tool/result`, a person
+from the `gate/decision` that asked to their `gate/answer`. `corduroy report` works these
+out.
 
 A tool call leaves a trail, one commit at a time: `tool/call`, then `tool/start`, then
 `tool/result`. After a crash this says whether each call never started (it runs), was

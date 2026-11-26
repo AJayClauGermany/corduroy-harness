@@ -210,6 +210,55 @@ fn a_prompt_runs_through_a_real_provider_tools_and_a_person_answering_the_gate()
 }
 
 #[test]
+fn a_report_says_what_a_run_waited_on_and_a_session_has_its_part_of_the_log() {
+    let workspace = scratch("cli-report");
+    let plugins = plugin("pi-tools").parent().unwrap().to_owned();
+    let target = workspace.join("hello.txt");
+    let (address, _seen) = model(vec![
+        tool_call("write", &json!({"path": target, "content": "hi\n"})),
+        answer("I wrote hello.txt."),
+    ])
+    .unwrap();
+    fs::write(
+        workspace.join("corduroy.toml"),
+        agent_file(address, &plugins),
+    )
+    .unwrap();
+    let run = corduroy(&workspace, &["run", "write", "it"], "y\n").unwrap();
+    assert!(run.status.success(), "{}", text(&run.stderr));
+
+    // The report says what the run waited on, and names the build and the agent's model.
+    let report = corduroy(&workspace, &["report"], "").unwrap();
+    let report = text(&report.stdout);
+    for said in [
+        "corduroy 0.",
+        "model     fake-model from fake",
+        "run 1 of 1 in `main`: ",
+        ", finished",
+        "model   fake/fake-model asked with 1 messages and",
+        "answered: 10 in, 5 out, stop tool_calls",
+        "person  approval asked about write (call_1) in `main`: allowed",
+        "tool    write (call_1) in `main`: returned",
+        "[host] model/request",
+    ] {
+        assert!(report.contains(said), "{said} missing from\n{report}");
+    }
+
+    // A session's part of the log is its own events, each with its time to the millisecond.
+    let own = corduroy(&workspace, &["--session", "main", "log"], "").unwrap();
+    let own = text(&own.stdout);
+    assert!(
+        own.contains("turn/end") && !own.contains("process/start"),
+        "{own}"
+    );
+    assert!(
+        own.lines()
+            .all(|line| line.get(19..20) == Some(".") && line.get(23..24) == Some("Z")),
+        "{own}"
+    );
+}
+
+#[test]
 fn the_providers_settings_reach_the_model() {
     let workspace = scratch("cli-settings");
     let plugins = plugin("pi-tools").parent().unwrap().to_owned();

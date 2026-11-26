@@ -43,6 +43,8 @@ Using the `corduroy` command:
   deny lists, unattended runs.
 - [Stop, resume and recover runs](how-to/recover-runs.md): Ctrl-C, `continue`, `stop`,
   sessions.
+- [Report a problem](how-to/report-a-problem.md): `corduroy report`, what a run did and how
+  long each part took, in one piece to hand over.
 - [Add an MCP server](how-to/add-an-mcp-server.md).
 - [Give an add-on a secret](how-to/use-secrets-and-http.md) and let it make HTTP requests.
 

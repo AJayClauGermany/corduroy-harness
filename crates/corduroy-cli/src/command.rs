@@ -9,7 +9,8 @@
 //! corduroy [options] sessions        list the sessions in the log
 //! corduroy [options] sessions remove <name>
 //!                                    take a session, and those it started, out of the log
-//! corduroy [options] log             print the event log
+//! corduroy [options] log             print the event log, or with --session one session's part
+//! corduroy [options] report [N]      what the session's last run (or last N) did, with timings
 //! corduroy init                      write the default agent file to edit
 //! corduroy [options] login [name]    sign in for a secret of the agent that needs it (a ChatGPT plan)
 //! corduroy [options] logout [name]   sign out again: revoke and forget what was kept
@@ -27,18 +28,20 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
-use corduroy_harness::core::{Query, SessionId};
+use corduroy_harness::core::{Event, Query, SessionId};
 use corduroy_harness::{Harness, MAIN, Status};
 
 use corduroy_std::{SignIn, Standard};
 
 use crate::agent::{AGENT_FILE, Agent, AgentFile, Places, assemble_from};
 use crate::extension::{Asked, Extensions};
+use crate::report::{below, report, stamp};
 use crate::terminal::{self, Out, say};
 
 const USAGE: &str = "usage: corduroy [--agent FILE] [--workspace DIR] [--session NAME] \
                      [--model NAME] [--provider NAME] [--version] [run PROMPT | continue | stop | check | sessions | \
-                     sessions remove NAME | log | init | login [SECRET] | logout [SECRET]]";
+                     sessions remove NAME | log | report [N] | init | login [SECRET] | \
+                     logout [SECRET]]";
 
 /// `corduroy` and its version, with the commit it was built from when the build said
 /// (`CORDUROY_COMMIT`, set by the release workflow).
@@ -255,14 +258,11 @@ async fn run(options: Options, standard: &Standard, out: &Out) -> Result<ExitCod
             Ok(ExitCode::SUCCESS)
         }
         ["check"] => Ok(check(&agent, out)),
-        ["sessions"] => {
-            for info in harness.session_list() {
-                let parent = info.parent.map(|parent| format!(" (from {parent})"));
-                say(out, &format!("{}{}", info.id, parent.unwrap_or_default()));
-            }
-            Ok(ExitCode::SUCCESS)
-        }
-        ["log"] => print_log(harness, out),
+        ["sessions"] => Ok(list_sessions(harness, out)),
+        // Everything, unless a session was named: then that session and those it started.
+        ["log"] => print_log(harness, options.session.as_ref().map(|_| &session), out),
+        ["report"] => print_report(&agent, &session, "1", out),
+        ["report", count] => print_report(&agent, &session, count, out),
         _ => Err(USAGE.into()),
     }
 }
@@ -320,21 +320,65 @@ fn sign(
     Ok(ExitCode::SUCCESS)
 }
 
-/// Print every event in the log, a page at a time, so that what the stream does not hold in
+/// Print the sessions in the log, each with the session it was started from.
+fn list_sessions(harness: &Harness, out: &Out) -> ExitCode {
+    for info in harness.session_list() {
+        let parent = info.parent.map(|parent| format!(" (from {parent})"));
+        say(out, &format!("{}{}", info.id, parent.unwrap_or_default()));
+    }
+    ExitCode::SUCCESS
+}
+
+/// Every event in the log, read a page at a time, so that what the stream does not hold in
 /// memory is read from the store.
-fn print_log(harness: &Harness, out: &Out) -> Result<ExitCode, Box<dyn Error>> {
+fn all_events(harness: &Harness) -> Result<Vec<Event>, Box<dyn Error>> {
     const PAGE: usize = 1000;
+    let mut events = Vec::new();
     let mut query = Query::first(PAGE);
     loop {
         let page = harness.events().read(&query)?;
-        for event in &page {
-            say(out, &format!("{} {event}", stamp(event.time)));
-        }
-        match page.last() {
-            Some(last) if page.len() == PAGE => query = query.after(last.id),
-            _ => return Ok(ExitCode::SUCCESS),
+        let last = page.last().map(|last| last.id);
+        let full = page.len() == PAGE;
+        events.extend(page);
+        match last {
+            Some(last) if full => query = query.after(last),
+            _ => return Ok(events),
         }
     }
+}
+
+/// Print the events in the log, one per line with its time: those of `only` and the sessions
+/// it started, or all of them.
+fn print_log(
+    harness: &Harness,
+    only: Option<&SessionId>,
+    out: &Out,
+) -> Result<ExitCode, Box<dyn Error>> {
+    for event in all_events(harness)? {
+        if only.is_none_or(|session| below(&event, session)) {
+            say(out, &format!("{} {event}", stamp(event.time)));
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Print what there is to hand over about the last `count` runs of `session`: the build, the
+/// agent as `check` describes it, then the runs with their timings.
+fn print_report(
+    agent: &Agent,
+    session: &SessionId,
+    count: &str,
+    out: &Out,
+) -> Result<ExitCode, Box<dyn Error>> {
+    let count = count
+        .parse()
+        .map_err(|_| format!("`{count}` is not a number of runs\n{USAGE}"))?;
+    say(out, &version());
+    for line in described(agent) {
+        say(out, &line);
+    }
+    say(out, &report(&all_events(&agent.harness)?, session, count));
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Take `session`, and every session started from it, out of the log at `log`.
@@ -363,33 +407,6 @@ fn remove(
     };
     say(out, &said);
     Ok(ExitCode::SUCCESS)
-}
-
-/// `time`, in milliseconds since the Unix epoch, as `2026-11-22T17:31:05Z`.
-fn stamp(time: u64) -> String {
-    let seconds = time / 1000;
-    let (days, of_day) = (seconds / 86_400, seconds % 86_400);
-    // Days since 1970-01-01 to a date in the proleptic Gregorian calendar, by counting
-    // from 0000-03-01 so that a leap day is the last day of its year.
-    let shifted = days + 719_468;
-    let (era, day_of_era) = (shifted / 146_097, shifted % 146_097);
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let shifted_month = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
-    let month = if shifted_month < 10 {
-        shifted_month + 3
-    } else {
-        shifted_month - 9
-    };
-    let year = year_of_era + era * 400 + u64::from(month <= 2);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
-        of_day / 3600,
-        of_day % 3600 / 60,
-        of_day % 60
-    )
 }
 
 /// How the secret of the provider the loop asks is signed in to, if its kind is.
@@ -430,11 +447,12 @@ fn finish(status: &Status, shown: &Shown<'_>) -> ExitCode {
     }
 }
 
-/// Say what the agent has: its model, tools, gates and plugins.
-fn check(agent: &Agent, out: &Out) -> ExitCode {
+/// What the agent has, a line each: its model, log, registries, tools and the plugins that
+/// did not start.
+fn described(agent: &Agent) -> Vec<String> {
     let harness = &agent.harness;
     let file = &agent.file;
-    let lines = [
+    let mut lines = vec![
         format!("model     {} from {}", file.model, file.provider),
         format!("log       {}", agent.log.display()),
         format!("providers {}", harness.providers().names().join(", ")),
@@ -442,23 +460,28 @@ fn check(agent: &Agent, out: &Out) -> ExitCode {
         format!("gates     {}", harness.gates().names().join(", ")),
         format!("points    {}", harness.gates().points().join(", ")),
     ];
-    for line in lines {
-        say(out, &line);
-    }
     // What extensions added to the loop, if any did.
     let steps = harness.operations().names();
     if !steps.is_empty() {
-        say(out, &format!("steps     {}", steps.join(", ")));
+        lines.push(format!("steps     {}", steps.join(", ")));
     }
     for spec in harness.tools().specs() {
         let flags = if spec.read_only { " (read-only)" } else { "" };
-        say(out, &format!("tool      {}{flags}", spec.name));
+        lines.push(format!("tool      {}{flags}", spec.name));
     }
     for unstarted in &agent.failed {
-        say(
-            out,
-            &format!("failed    {}: {}", unstarted.plugin, unstarted.reason),
-        );
+        lines.push(format!(
+            "failed    {}: {}",
+            unstarted.plugin, unstarted.reason
+        ));
+    }
+    lines
+}
+
+/// Say what the agent has: its model, tools, gates and plugins.
+fn check(agent: &Agent, out: &Out) -> ExitCode {
+    for line in described(agent) {
+        say(out, &line);
     }
     if agent.failed.is_empty() {
         ExitCode::SUCCESS
@@ -584,14 +607,6 @@ fn say_prompt(out: &Out) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn times_are_shown_as_utc_dates() {
-        assert_eq!(stamp(0), "1970-01-01T00:00:00Z");
-        assert_eq!(stamp(951_782_400_000), "2000-02-29T00:00:00Z");
-        assert_eq!(stamp(1_795_368_645_804), "2026-11-22T17:30:45Z");
-        assert_eq!(stamp(4_102_444_799_999), "2099-12-31T23:59:59Z");
-    }
 
     #[test]
     fn a_stray_double_dash_is_ignored() {
