@@ -4,6 +4,8 @@
     scripts/siwc-spike.py login      sign in through the browser and save the tokens
     scripts/siwc-spike.py models     list the models the signed-in account may use
     scripts/siwc-spike.py ask        one streamed request billed to the ChatGPT plan
+                                     (--body FILE [--adapt]: a request the harness built;
+                                     two are in scripts/siwc-spike-bodies/)
     scripts/siwc-spike.py refresh    exchange the refresh token for a new pair
     scripts/siwc-spike.py logout     revoke the refresh token and delete what was saved
 
@@ -308,6 +310,8 @@ def models(_: argparse.Namespace) -> None:
 def ask(args: argparse.Namespace) -> None:
     if args.body:
         body = json.loads(Path(args.body).read_text())
+        if args.adapt:
+            body = adapted(body)
     else:
         if not args.model:
             raise Failed("give --model (a slug from `models`) or --body")
@@ -320,7 +324,7 @@ def ask(args: argparse.Namespace) -> None:
         }
     ended = None
     with request(f"{RESOURCE}/responses", body=body, bearer=access_token()) as stream:
-        say(f"HTTP {stream.status}, request id: {stream.headers.get('x-request-id', '')}\n")
+        say(f"HTTP {stream.status}; response headers: {', '.join(sorted(stream.headers.keys()))}\n")
         for raw in stream:
             line = raw.decode(errors="replace").strip()
             if not line.startswith("data:") or line == "data: [DONE]":
@@ -337,7 +341,32 @@ def ask(args: argparse.Namespace) -> None:
         raise Failed("the stream ended without response.completed")
     if ended.get("type") != "response.completed":
         raise Failed(f"{ended.get('type')}:\n{json.dumps(ended, indent=2)}")
-    say(f"response.completed; usage: {json.dumps(ended.get('response', {}).get('usage'))}")
+    response = ended.get("response", {})
+    for item in response.get("output", []):
+        detail = item.get("name", "")
+        if item.get("type") == "function_call":
+            detail = f"{item.get('name')} {item.get('arguments')}"
+        say(f"output item: {item.get('type')} {detail}")
+    usage = response.get("usage") or {}
+    counts = {key: value for key, value in usage.items() if isinstance(value, int)}
+    say(f"response.completed (id {response.get('id')}); usage: {json.dumps(counts)}")
+
+
+def adapted(body: dict) -> dict:
+    """`body` as the plan-usage preview wants it: no system-role items, no token limit."""
+    said, kept = [], []
+    for item in body.get("input", []):
+        if item.get("role") == "system":
+            content = item.get("content")
+            parts = content if isinstance(content, list) else [{"text": content}]
+            said.extend(str(part.get("text", "")) for part in parts)
+        else:
+            kept.append(item)
+    body = {key: value for key, value in body.items() if key != "max_output_tokens"}
+    body["input"] = kept
+    if said:
+        body["instructions"] = "\n\n".join(said)
+    return body
 
 
 def logout(_: argparse.Namespace) -> None:
@@ -371,6 +400,11 @@ def main() -> int:
     entry.add_argument("prompt", nargs="?", default="Say exactly: Hello, world!")
     entry.add_argument("--model", help="a slug from `models`")
     entry.add_argument("--body", help="send this JSON file as the request body instead")
+    entry.add_argument(
+        "--adapt",
+        action="store_true",
+        help="with --body: move system-role items to `instructions`, drop max_output_tokens",
+    )
     entry.set_defaults(run=ask)
     commands.add_parser("refresh").set_defaults(run=refresh)
     commands.add_parser("logout").set_defaults(run=logout)
