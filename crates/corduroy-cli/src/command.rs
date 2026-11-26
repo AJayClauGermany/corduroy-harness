@@ -226,19 +226,22 @@ async fn run(options: Options, standard: &Standard, out: &Out) -> Result<ExitCod
             Ok(ExitCode::SUCCESS)
         }
         ["check"] => Ok(check(&agent, out)),
-        ["sessions"] => {
-            for info in harness.session_list() {
-                let parent = info.parent.map(|parent| format!(" (from {parent})"));
-                say(out, &format!("{}{}", info.id, parent.unwrap_or_default()));
-            }
-            Ok(ExitCode::SUCCESS)
-        }
+        ["sessions"] => Ok(list_sessions(harness, out)),
         // Everything, unless a session was named: then that session and those it started.
         ["log"] => print_log(harness, options.session.as_ref().map(|_| &session), out),
         ["report"] => print_report(&agent, &session, "1", out),
         ["report", count] => print_report(&agent, &session, count, out),
         _ => Err(USAGE.into()),
     }
+}
+
+/// Print the sessions in the log, each with the session it was started from.
+fn list_sessions(harness: &Harness, out: &Out) -> ExitCode {
+    for info in harness.session_list() {
+        let parent = info.parent.map(|parent| format!(" (from {parent})"));
+        say(out, &format!("{}{}", info.id, parent.unwrap_or_default()));
+    }
+    ExitCode::SUCCESS
 }
 
 /// Every event in the log, read a page at a time, so that what the stream does not hold in
