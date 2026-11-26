@@ -2299,7 +2299,10 @@ the step it waits on is done.
     read.
 17. How [people meet it](#how-people-meet-it). *Built:* `secret` on a provider entry, its
     value taken from `Secrets` for every request (beside `api_key_env`, which has not gone
-    yet). *Decided, not built:* the handle an
+    yet); a `[secrets.*]` entry picking its kind with `kind`, and the first kind beside the
+    environment's, `chatgpt`: a ChatGPT plan signed in to through the browser
+    (`corduroy login`, `corduroy-chatgpt`), kept in the person's own directory and not the
+    keychain, which is not built. *Decided, not built:* the handle an
     extension drives through gaining an answer to an ask and a stop; a keychain kind for
     secrets on macOS, Windows and Linux, a command that puts a value into it, and `init`
     preferring it; provider kinds as kinds of the `Standard`, five of them promised and the

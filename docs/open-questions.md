@@ -1221,7 +1221,7 @@ any default with it, or starts from nothing each time.
 last moment to change that.
 
 New names arrive with [How people meet it](design.md#how-people-meet-it), and none is
-chosen: the keychain's kind and the key of a `[secrets.*]` entry that picks it, the command
+chosen: the keychain's kind (a `[secrets.*]` entry picks its kind with `kind`), the command
 that stores a value, `secret` on an MCP entry, the manifest's file name and
 keys, the key by which an agent file lists a package, and the command that promotes one.
 

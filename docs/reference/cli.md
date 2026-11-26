@@ -11,6 +11,8 @@ corduroy [options] sessions remove <name>
                                    take a session, and those it started, out of the log
 corduroy [options] log             print the event log
 corduroy init                      write the default agent file to edit
+corduroy [options] login [name]    sign in for a secret that needs it (a ChatGPT plan)
+corduroy [options] logout [name]   sign out again
 corduroy --version                 print the version (and commit) of this build
 ```
 
@@ -101,6 +103,18 @@ unfinished until `continue` or `stop`.
 | 1 | the run failed, reached the turn limit, or is waiting; `check` found a plugin that did not start; any error |
 | 130 | the run was stopped (as after Ctrl-C) |
 
+**`login [name]`** Sign in for a secret of the agent file whose kind is signed in to: a
+[`kind = "chatgpt"`](agent-file.md#secretsname) secret, which is a ChatGPT plan. It opens
+the browser at OpenAI's sign-in ("Continue with ChatGPT"), prints the address in case it
+does not open, and waits up to five minutes for you to come back to it; the answer arrives
+on `127.0.0.1` (port 1455, or another if that one is taken). The first sign-in registers
+this tool for your account; later ones reuse that registration. What is kept is in your own
+configuration directory (see [Files](#files)), so every workspace whose agent names a secret
+of the same name shares the sign-in. `name` says which secret, where the file has several.
+The agent is not put together for this.
+
+**`logout [name]`** Revoke that sign-in with OpenAI and remove what was kept.
+
 ## Files
 
 | Path | What |
@@ -109,9 +123,10 @@ unfinished until `continue` or `stop`.
 | `<workspace>/.corduroy/log.jsonl` | the event log (the agent file's `log` moves it) |
 | `<workspace>/.corduroy/cache/` | compiled add-ons, so a second start is fast |
 | `<workspace>/.corduroy/skills/`, `memory/` | what the default agent's `skills` and `memory` add-ons keep |
+| `~/.config/corduroy/` (`$XDG_CONFIG_HOME/corduroy`; on Windows `%APPDATA%\corduroy`) | what is yours whatever you work on: `chatgpt/<secret>.json`, a ChatGPT sign-in (readable by you alone), and `host-id`, a random name for this computer that the sign-in sends |
 
-The agent file, the log and the cache are out of reach of every add-on's `fs-read` and
-`fs-write`, whatever its grants say.
+The agent file, the log, the cache and your own configuration directory are out of reach of
+every add-on's `fs-read` and `fs-write`, whatever its grants say.
 
 ## Environment
 

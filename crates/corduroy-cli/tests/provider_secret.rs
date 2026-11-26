@@ -223,3 +223,89 @@ fn a_secret_that_cannot_be_revealed_fails_the_run_by_name_and_a_missing_one_the_
     let said = format!("{}{}", text(&output.stdout), text(&output.stderr));
     assert!(said.contains("there is no [secrets.token]"), "{said}");
 }
+
+/// An agent file whose provider is paid by a `ChatGPT` plan.
+fn plan_file(address: SocketAddr) -> String {
+    format!(
+        "provider = \"plan\"\nmodel = \"gpt-6-fake\"\n\n[providers.plan]\nkind = \"openai\"\n\
+         base_url = \"http://{address}/v1/chat/completions\"\nsecret = \"chatgpt\"\n\n\
+         [secrets.chatgpt]\nkind = \"chatgpt\"\n"
+    )
+}
+
+#[test]
+fn a_chatgpt_sign_in_is_the_token_a_provider_sends_and_its_absence_names_the_command() {
+    let workspace = scratch("cli-chatgpt");
+    let own = scratch("cli-chatgpt-own");
+    let (address, seen) = endpoint("Hello.").unwrap();
+    fs::write(workspace.join("corduroy.toml"), plan_file(address)).unwrap();
+    // The person's own directory, wherever this system keeps it.
+    let own_text = own.to_string_lossy().into_owned();
+    let env = [
+        ("XDG_CONFIG_HOME", own_text.as_str()),
+        ("APPDATA", own_text.as_str()),
+    ];
+
+    // Nobody is signed in: the run fails, saying how to, and nothing is sent.
+    let output = corduroy(&workspace, &["run", "say hello"], &env).unwrap();
+    let said = format!("{}{}", text(&output.stdout), text(&output.stderr));
+    assert!(
+        !output.status.success() && said.contains("corduroy login"),
+        "{said}"
+    );
+    assert!(seen.lock().unwrap().is_empty());
+
+    // A sign-in kept under the secret's name, good for an hour from now.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let kept = own.join("corduroy").join("chatgpt");
+    fs::create_dir_all(&kept).unwrap();
+    let record = json!({
+        "email": "person@example.com", "issuer": "https://auth.openai.com",
+        "subject": "user-1", "client_id": "oaiapp_1", "ext_agent_host_id": "urn:uuid:0",
+        "id_token": "id", "access_token": "plan-t0ken", "refresh_token": "refresh-t0ken",
+        "token_type": "Bearer", "expires_in": 3600, "saved_at": now,
+        "scopes": ["openid", "chatgpt.tokens.use.direct"],
+    });
+    fs::write(kept.join("chatgpt.json"), record.to_string()).unwrap();
+
+    let output = corduroy(&workspace, &["run", "say hello"], &env).unwrap();
+    let stdout = text(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{stdout}\n{}",
+        text(&output.stderr)
+    );
+    let sent = seen.lock().unwrap().first().cloned().unwrap();
+    assert_eq!(sent.authorization, "Bearer plan-t0ken");
+    let log = text(&corduroy(&workspace, &["log"], &env).unwrap().stdout);
+    assert!(!log.contains("t0ken") && !stdout.contains("t0ken"));
+}
+
+#[test]
+fn signing_in_needs_a_secret_that_is_signed_in_to() {
+    let workspace = scratch("cli-login-none");
+    fs::write(
+        workspace.join("corduroy.toml"),
+        "provider = \"p\"\nmodel = \"m\"\n\n[providers.p]\nkind = \"ollama\"\n\n\
+         [secrets.token]\nenv = \"SOME_TOKEN\"\n",
+    )
+    .unwrap();
+    let output = corduroy(&workspace, &["login"], &[]).unwrap();
+    let said = text(&output.stderr);
+    assert!(!output.status.success());
+    assert!(said.contains("kind = \"chatgpt\""), "{said}");
+
+    // A kind the command does not have is refused when the agent is put together.
+    fs::write(
+        workspace.join("corduroy.toml"),
+        "provider = \"p\"\nmodel = \"m\"\n\n[providers.p]\nkind = \"ollama\"\n\n\
+         [secrets.token]\nkind = \"vault\"\n",
+    )
+    .unwrap();
+    let output = corduroy(&workspace, &["check"], &[]).unwrap();
+    let said = format!("{}{}", text(&output.stdout), text(&output.stderr));
+    assert!(said.contains("kind `vault`"), "{said}");
+}

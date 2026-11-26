@@ -60,6 +60,27 @@ impl Places {
             .replace("{home}", &home_dir)
     }
 
+    /// The person's own directory for this tool, outside every workspace: what is theirs
+    /// whatever they work on, such as a sign-in. `$XDG_CONFIG_HOME/corduroy`, or
+    /// `~/.config/corduroy`; on Windows, `%APPDATA%\corduroy`.
+    ///
+    /// # Errors
+    ///
+    /// If the environment names none of those.
+    pub fn person() -> Result<PathBuf, String> {
+        let set = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
+        let config = if cfg!(windows) {
+            set("APPDATA").map(PathBuf::from)
+        } else {
+            set("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .or_else(|| set("HOME").map(|home| PathBuf::from(home).join(".config")))
+        };
+        config
+            .map(|config| config.join("corduroy"))
+            .ok_or_else(|| "there is no home directory to keep a person's own things in".to_owned())
+    }
+
     /// `value` with every string in it [expanded](Self::expand).
     #[must_use]
     pub fn expand_json(&self, value: Value) -> Value {

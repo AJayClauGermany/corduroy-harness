@@ -99,7 +99,15 @@ add-on may use through the `secret` capability without ever seeing its value.
 
 | Key | Type | Meaning |
 | --- | --- | --- |
-| `env` | string | The environment variable holding the value, read when a request needs it. |
+| `kind` | string | Where the value comes from: `env` (the default) or `chatgpt`, unless the command brings other kinds. The entry's other keys are that kind's. |
+| `env` | string | For `env`: the environment variable holding the value, read when a request needs it. |
+
+A `chatgpt` secret takes no other key. Its value is the access token of a sign-in with
+ChatGPT, made with [`corduroy login`](cli.md) and kept under the entry's name (letters,
+digits, `-` and `_`) in your own configuration directory. The token is renewed as it runs
+out, so the secret always reveals one that is good; if nobody is signed in, or the sign-in
+was revoked, revealing it fails and says to run `corduroy login`. Name it as the `secret`
+of an `openai` provider to have that provider's requests paid by your ChatGPT plan.
 
 ## `[mcp.<name>]`
 

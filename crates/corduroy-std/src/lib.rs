@@ -12,7 +12,7 @@
 //! | Outbound HTTP | [`http`] | the client behind the `http` capability, which never follows redirects |
 //! | Models | [`providers`] | Anthropic, OpenAI-compatible, Ollama and others |
 //! | MCP | [`mcp`] | MCP servers' tools, over standard input and output or HTTP |
-//! | Secrets | [`extension::ENV_SECRET`] | credentials read from the environment, never handed to a plugin |
+//! | Secrets | [`extension::ENV_SECRET`], [`extension::CHATGPT_SECRET`] | credentials read from the environment, or a `ChatGPT` plan signed in to through the browser ([`chatgpt`], [`sign_in`]); never handed to a plugin |
 //! | Add-ons | [`wasm`] | WebAssembly plugins, each holding only the capabilities it was granted |
 //!
 //! [`Standard`] is that set as one value, made of parts that can each be swapped: the
@@ -39,11 +39,14 @@
 
 pub mod extension;
 pub mod places;
+pub mod sign_in;
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
 
+pub use corduroy_chatgpt as chatgpt;
 use corduroy_harness::core::{EventStream, LogError, SessionId};
 pub use corduroy_harness::wasm;
 pub use corduroy_http as http;
@@ -51,8 +54,11 @@ pub use corduroy_jsonl as jsonl;
 pub use corduroy_mcp as mcp;
 pub use corduroy_providers as providers;
 pub use corduroy_shell as shell;
-pub use extension::{Asked, Built, ENV_SECRET, Extensions, MCP, kernel_kind};
+pub use extension::{
+    Asked, Built, CHATGPT_SECRET, ENV_SECRET, Extensions, MCP, kernel_kind, secret_kind,
+};
 pub use places::{DATA_DIR, Places};
+pub use sign_in::SignIn;
 
 /// Opens the event log kept at a path.
 type OpenLog = dyn Fn(&Path) -> Result<EventStream, String> + Send + Sync;
@@ -67,6 +73,7 @@ pub struct Standard {
     defaults: Vec<String>,
     log: Arc<OpenLog>,
     remove: Arc<RemoveSession>,
+    sign_ins: BTreeMap<String, Arc<dyn SignIn>>,
     addons: bool,
 }
 
@@ -91,6 +98,7 @@ impl Standard {
     /// every agent, the event log in a JSON Lines file, and add-ons.
     #[must_use]
     pub fn new() -> Self {
+        let chatgpt: Arc<dyn SignIn> = Arc::new(sign_in::ChatGptSignIn);
         Self {
             kinds: Extensions::builtin(),
             defaults: vec!["http-client".to_owned()],
@@ -105,8 +113,23 @@ impl Standard {
                     .map(|sessions| sessions.into_iter().collect())
                     .map_err(|error| error.to_string())
             }),
+            sign_ins: BTreeMap::from([(CHATGPT_SECRET.to_owned(), chatgpt)]),
             addons: true,
         }
+    }
+
+    /// Sign in for extensions of the kind `kind` with `sign_in`, in place of how it was done
+    /// before, if it was.
+    #[must_use]
+    pub fn with_sign_in(mut self, kind: impl Into<String>, sign_in: impl SignIn + 'static) -> Self {
+        self.sign_ins.insert(kind.into(), Arc::new(sign_in));
+        self
+    }
+
+    /// How a person signs in for extensions of the kind `kind`, if that kind needs it.
+    #[must_use]
+    pub fn sign_in(&self, kind: &str) -> Option<&Arc<dyn SignIn>> {
+        self.sign_ins.get(kind).filter(|_| self.kinds.has(kind))
     }
 
     /// Add the kinds of `kinds`, replacing those of the same name.

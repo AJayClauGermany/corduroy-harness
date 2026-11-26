@@ -62,7 +62,7 @@ use corduroy_harness::wasm::{CAPABILITIES, WORLD, WasmRuntime};
 use corduroy_harness::{Harness, ProcessInfo, provider};
 use corduroy_providers::ProviderSpec;
 pub use corduroy_std::{DATA_DIR, Places};
-use corduroy_std::{ENV_SECRET, MCP, Standard, kernel_kind};
+use corduroy_std::{ENV_SECRET, MCP, Standard, kernel_kind, secret_kind};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -199,13 +199,29 @@ pub struct KernelEntry {
     pub config: BTreeMap<String, toml::Value>,
 }
 
-/// A secret, read from the environment when a plugin's request needs it: an extension of the
-/// kind `env-secret`, with `env` as its configuration.
+/// A secret: an extension of the kind `<kind>-secret`, with the entry's other keys as its
+/// configuration. Without a `kind` it is read from the environment (`env-secret`, with `env`
+/// naming the variable).
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct SecretEntry {
-    /// The environment variable holding the value.
-    pub env: String,
+    /// Where the value comes from: `env` if left out, or `chatgpt` (a sign-in with
+    /// `ChatGPT`, made with `corduroy login`), unless the command brings other kinds.
+    #[serde(default, skip_serializing)]
+    pub kind: Option<String>,
+    /// The secret's own configuration: every other key of the entry. The kind refuses a key
+    /// it does not know.
+    #[serde(flatten)]
+    pub config: BTreeMap<String, toml::Value>,
+}
+
+impl SecretEntry {
+    /// The extension kind this entry is built from.
+    #[must_use]
+    pub fn extension(&self) -> String {
+        self.kind
+            .as_deref()
+            .map_or_else(|| ENV_SECRET.to_owned(), secret_kind)
+    }
 }
 
 /// An MCP server: a `command` started through a kernel, or a `url`. An extension of the kind
@@ -748,7 +764,14 @@ fn natives(
         let what = format!("secret `{name}`");
         let config = serde_json::to_value(secret)
             .map_err(|error| AgentError::new(format!("{what}: {error}")))?;
-        let id = load(harness, places, kinds, (&what, name, ENV_SECRET), config)?;
+        let kind = secret.extension();
+        if !kinds.has(&kind) {
+            return Err(AgentError::new(format!(
+                "{what} is of kind `{}`, which this command does not have",
+                secret.kind.as_deref().unwrap_or("env"),
+            )));
+        }
+        let id = load(harness, places, kinds, (&what, name, &kind), config)?;
         loaded.push((format!("secret {name}"), id));
     }
     failed.extend(unstarted(harness, loaded));
@@ -858,6 +881,10 @@ fn plugins(
         .protect(log);
     if let Some(path) = &places.file {
         runtime = runtime.protect(path);
+    }
+    // What is the person's own, a sign-in among it, is no add-on's to read.
+    if let Ok(own) = Places::person() {
+        runtime = runtime.protect(own);
     }
     let mut loaded = Vec::new();
     for entry in enabled {
@@ -1024,7 +1051,7 @@ mod tests {
         assert_eq!(
             error,
             "extension `box`: this command has no extension kind `docker-kernel` (it has: \
-             env-secret, http-client, mcp, powershell-kernel, shell-kernel)"
+             chatgpt-secret, env-secret, http-client, mcp, powershell-kernel, shell-kernel)"
         );
 
         let refusing = Extensions::none().kind("picky", |_| Err("`image` is required".into()));

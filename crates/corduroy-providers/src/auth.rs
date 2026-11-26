@@ -25,10 +25,13 @@ struct FromSecret {
 #[async_trait]
 impl AuthProvider for FromSecret {
     async fn get_auth_header(&self) -> anyhow::Result<(String, String)> {
-        // The reason never holds the value: `Secret::reveal` promises as much.
-        let value = self
-            .secrets
-            .reveal(&self.name)
+        // Revealing may take a while (a token renewed over the network), so it is not done
+        // on a thread the executor needs. The reason never holds the value:
+        // `Secret::reveal` promises as much.
+        let (secrets, name) = (Arc::clone(&self.secrets), self.name.clone());
+        let value = tokio::task::spawn_blocking(move || secrets.reveal(&name))
+            .await
+            .map_err(|_| anyhow!("secret `{}` could not be revealed", self.name))?
             .map_err(|why| anyhow!("secret `{}`: {why}", self.name))?;
         Ok(match self.scheme {
             Scheme::Bearer => ("Authorization".to_owned(), format!("Bearer {value}")),

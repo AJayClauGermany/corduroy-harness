@@ -1,9 +1,11 @@
-# A spike, like the script beside it: the default agent with its model paid for by a ChatGPT
-# plan. The access token comes from `scripts/siwc-spike.py`, through a variable:
+# The default agent with its model paid for by a ChatGPT plan, not an API key.
 #
-#   scripts/siwc-spike.py login
-#   export CORDUROY_CHATGPT_TOKEN="$(scripts/siwc-spike.py token)"
-#   cargo corduroy --agent scripts/siwc-spike-agent.toml --workspace DIR run "..."
+#   cargo corduroy --agent examples/chatgpt-plan/corduroy.toml login
+#   cargo corduroy --agent examples/chatgpt-plan/corduroy.toml --workspace DIR run "..."
+#
+# `login` opens the browser once ("Continue with ChatGPT"); the sign-in is kept in your own
+# configuration directory, outside every workspace, and renewed as it runs out. `logout`
+# revokes it. Usage counts against your plan: https://chatgpt.com/settings/usage
 #
 # Everything but the provider is `examples/local-model/corduroy.toml`.
 
@@ -11,17 +13,15 @@ system = """
 You are a careful coding agent working in {workspace}. Use the tools to do the task: read \
 before you change anything, keep changes small, check your work, then say briefly what you did."""
 provider = "chatgpt"
-model = "gpt-6-luna"   # any slug `scripts/siwc-spike.py models` lists; or pass --model
+model = "gpt-6-luna"   # a model your plan has; --model asks another
 max_turns = 20
 
 [providers.chatgpt]
 kind = "openai"
-secret = "chatgpt"      # read for every request, so a renewed token is the one sent
+secret = "chatgpt"      # the sign-in's token of the moment, with every request
 
-# The spike has no renewal inside the harness yet: the token is whatever the variable held
-# when the command started, good for an hour.
 [secrets.chatgpt]
-env = "CORDUROY_CHATGPT_TOKEN"
+kind = "chatgpt"        # a sign-in with ChatGPT; `corduroy login` makes it
 
 [kernels.shell]
 kind = "shell"
