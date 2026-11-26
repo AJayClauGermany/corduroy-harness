@@ -183,6 +183,20 @@ as design guidance, not noise.
   gets the plain variables (`corduroy_shell::PLAIN`) and what its entry sets or passes by
   name, never the command's own environment, which is where keys are. A new kernel does
   the same: clear the environment first, then add what was listed.
+- **A front end is an extension.** The core, the loop and the command speak no wire
+  protocol. Something that serves a page or an editor is an extension with a format of its
+  own, driving through the handle every extension has (see "How people meet it" in
+  `docs/design.md`).
+- **A credential's source is written in the agent file.** New code takes a key through
+  `Secrets` and never looks one up in the environment by itself; `api_key_env` and
+  `bearer_token_env` are to give way to naming a secret. Never fall back from one source
+  to another without the file saying so.
+- **The agent file's keys and kinds are ours.** Do not add one because a dependency accepts
+  it. oi-kit's names for providers beyond the five promised kinds are shorthand, outside
+  the promise, and one whose definition reads the environment is not to be offered.
+- **What an add-on wants is a request.** A manifest grants nothing, a person's yes is kept
+  for the grants and not the code, and only the person's own answer gives an add-on more
+  than its loader holds.
 - **Secrets never reach a plugin or the log.** `secret` hands out a `credential` handle;
   host functions that take one write the value into what they send and record only the
   secret's name. Do not record response bodies, which may echo it. An `HttpClient` must not

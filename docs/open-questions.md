@@ -29,21 +29,14 @@ listed here.
 
 Paths are relative to the repository root; `core/` stands for `crates/corduroy-core/src/`.
 
-## Where to start
+## What is decided
 
-The questions are not equally weighty. The ones below set the direction; most of the rest
-become small, or answer themselves, once these are decided. Take a group at a time, decide
-it, then read its sections again before moving on, because an answer here often removes or
-reshapes entries further down.
+The questions were not equally weighty. Eight groups of them set the direction, and all
+eight are decided. What is left is detail that hangs off one of those answers, or a
+mechanical choice (which types may grow, which names are final), best made in one sitting
+per section. Every question below is read against the eight.
 
-| Order | Group | Questions |
-| --- | --- | --- |
-| 8 | How people meet it | H1, H11, H14, I4 |
-
-Everything not in this table is detail that hangs off one of these, or a mechanical choice
-(which types may grow, which names are final) best made in one sitting per section once its
-group is settled. The first seven groups are decided, and every question below is read
-against them. Why this exists, and the two uses 1.0 is measured against, are in
+Why this exists, and the two uses 1.0 is measured against, are in
 [What it is for](design.md#what-it-is-for). What freezes, what is only stable and what
 "frozen" allows are in [What is stable](design.md#what-is-stable), with the four proofs
 [the freeze waits on](design.md#what-the-freeze-waits-on). Running without the standard
@@ -61,7 +54,10 @@ versions of the world a host accepts are in
 [How the plugin world grows](design.md#how-the-plugin-world-grows). What a session is
 started with and held to, what something outside a run may do, who takes a run on, what
 runs at once, and what a step an extension wrote may read and write are in
-[What an extension can reach](design.md#what-an-extension-can-reach).
+[What an extension can reach](design.md#what-an-extension-can-reach). What a person reaches
+the agent through, what the standard set holds, where a credential comes from, which parts
+of a provider's entry are ours, and what an add-on is as something kept and passed on are
+in [How people meet it](design.md#how-people-meet-it).
 
 ## P. Purpose and place
 
@@ -137,10 +133,15 @@ The design says the purpose of the plugin system is that the agent adapts the ha
 task. The SDKs, tutorials and reference are written for people. The two authors want
 different things: a model wants a script it can write in one go, a tight error when a grant
 refuses it, and a person to approve the load; a person wants packaging, versions and
-somewhere to publish ([I4](#i4-what-is-an-add-on-as-something-shipped)).
+somewhere to publish.
 
-*Direction.* Name the primary author. It decides which of the script host, the SDKs and a
-package format gets finished first.
+The author is named ([How people meet it](design.md#how-people-meet-it)): the agent writes,
+and the person reads and says yes. So a package is a folder of text around a script or a
+component, with no registry and a version that decides nothing.
+
+*Direction.* What is left is the order of work: whether the script host and the package are
+finished before the SDKs' own packaging, and how much the tutorials turn towards reading
+and approving what an agent wrote.
 
 ### P11. Is the plugin world ours alone, or meant for other hosts?
 
@@ -167,8 +168,10 @@ regression.
 
 A new terminal agent asks someone to change a habit. The alternatives are to sit behind
 something they already use (an editor, through a protocol editors and agents share), or
-inside something someone else ships. [H11](#h11-is-there-a-front-end-other-than-a-rust-program)
-asks about the mechanism; this asks about the intent.
+inside something someone else ships. The mechanism is decided
+([How people meet it](design.md#how-people-meet-it)): the terminal at 1.0, then a page in a
+browser served by an extension, which a desktop shell or a phone can show. This asks about
+the intent.
 
 *Direction.* The purpose is a harness a person uses, with the command line as its front end
 and adoption not a goal of 1.0 ([What it is for](design.md#what-it-is-for)). Leave this
@@ -626,6 +629,12 @@ is recorded and waits, in the log, for the answer
 ([What an extension can reach](design.md#what-an-extension-can-reach)). A session started
 from outside, which would run in the background, is the case.
 
+What a yes at `plugin/load` attaches to is decided as well
+([How people meet it](design.md#how-people-meet-it)): the grants and not the code, so the
+person is asked about what a package newly wants and nothing else. A package that wants
+more than its loader holds is asked of the person whatever the gates say, and the answer
+is kept at account level, where it also brings the package back after a restart.
+
 *Direction.* Decide whether an ask at any declared point can wait for a person, since that
 shapes `gate/answer`, which names a tool call today and has to name a session or a load as
 well; and whether a refusal the person may lift afterwards is an ask of that kind or an
@@ -637,8 +646,9 @@ One. A log has one writer, and the file store locks the file when it opens it, s
 terminals cannot work in the same workspace at once.
 
 *Direction.* Decide whether one process per log is the contract, with a service that owns
-the log and serves the others
-([H11](#h11-is-there-a-front-end-other-than-a-rust-program)), or whether readers may share.
+the log and serves the others, or whether readers may share. A front end is to be an
+extension inside the one process ([How people meet it](design.md#how-people-meet-it)), so
+a page in a browser does not need a second one.
 A file per session ([What the record promises](design.md#what-the-record-promises)) does
 not by itself allow two writers: ids are one sequence for the workspace.
 
@@ -706,9 +716,16 @@ the loop declares `session/start`, and the gates are asked with who is starting 
 started with: its model, loop, instructions, grants and limits. Which model a child may run
 on, and whether an orchestrator may start orchestrators, are then a gate's to say.
 
+Unloading is not a point today. The agent may remove what it built
+([How people meet it](design.md#how-people-meet-it)), and a package it built may guard a
+decision point, which no answer of the person's switches off
+([What is safe by default](design.md#what-is-safe-by-default)).
+
 *Direction.* Decide whether the loop declares the other two before 1.0, since gates written
 by third parties will key on the names. For `session/start`, what is left is the request's
-JSON ([D2](#d2-are-the-gate-requests-json-shapes-contract)).
+JSON ([D2](#d2-are-the-gate-requests-json-shapes-contract)). Decide whether taking away a
+plugin that guards a point is asked first, as loading one is. The leaning is yes, as a
+point the gates are asked at; what it might break has not been thought through.
 
 ### D4. Is name order, first strictest, the final rule?
 
@@ -727,13 +744,6 @@ one grant gives all four
 
 *Direction.* Decide whether the resource is `service` or `service:method` before grants are
 written against it.
-
-### D6. Does a plugin ship a statement of what it wants?
-
-Design's open question on grant files: the agent file grants; a plugin cannot say what it
-needs beyond its imports.
-
-*Direction.* Decide whether this belongs in 1.0's agent file contract or after.
 
 ### D10. What form does a tool's question to the person take?
 
@@ -917,8 +927,13 @@ against that session's `tools` grant.
 
 A plugin loaded by a plugin is gone after a restart unless its loader loads it again.
 
-*Direction.* Decide whether the host owes this (a plugin store), since `plugins.load`'s
-meaning freezes with the interface.
+What the host owes is decided ([How people meet it](design.md#how-people-meet-it)): a
+package the person approved is loaded again at start, from their answers, and a bare
+component loaded through `plugins` lasts as long as its loader, as today.
+
+*Direction.* What is left is the interface, whose meaning freezes: how a plugin asks for a
+package to be loaded (a function of `plugins`, inside its grant, or the load that exists
+given a folder), and what the call returns while the person has not yet answered.
 
 ### E18. Which service names are the harness's?
 
@@ -1012,7 +1027,12 @@ program that embeds the harness. Make the ones that will grow growable: `Harness
 
 `Answer` is closed. "Always allow this tool" has no form.
 
-*Direction.* Decide with [D1](#d1-is-a-verdict-allow-ask-or-deny-for-good).
+A package's ask adds a case ([How people meet it](design.md#how-people-meet-it)): asked for
+one host, the person may want to allow that host or any, so an answer can be wider or
+narrower than what was asked.
+
+*Direction.* Decide with [D1](#d1-is-a-verdict-allow-ask-or-deny-for-good), and say whether
+an answer may change the scope that was asked for.
 
 ### G7. Is `anyhow` part of the contract?
 
@@ -1057,6 +1077,11 @@ context from a rate limit or a bad key.
 
 `ModelRequest` carries messages, tools and a system prompt. The token limit, temperature,
 thinking, tool choice and a required output shape are fixed per provider entry.
+
+The provider entry's other keys are settled
+([How people meet it](design.md#how-people-meet-it)). `max_tokens`, `temperature` and
+`thinking` stay as written until this is answered, and are the last of that entry's keys to
+confirm.
 
 *Direction.* Decide which belong on the request (it is growable) and which stay
 configuration. The request is the core's now, and a plugin's model call fills in the same
@@ -1148,35 +1173,6 @@ from what events hold today.
 
 ## H. The standard set, the command and the agent file
 
-### H1. Which provider kinds and keys are contract?
-
-`[providers.*]` is the one section not built from a kind of the `Standard`
-(`crates/corduroy-cli/src/agent.rs:645`). Its keys follow oi-kit's settings, and "other
-providers oi-kit knows can be named directly as the `kind`": the agent file, a stable
-contract, inherits whatever an alpha dependency accepts.
-
-[What the core is made of](design.md#what-the-core-is-made-of) changed two things here. The
-`serve` key is gone, since the `llm` grant is the one list of models an add-on may ask, by
-`<provider>/<model>`. And a model's description (what it takes, its context) is stated or
-corrected in the file, under `[providers.<name>.models.<model>]`; those keys' names are
-among the ones to confirm.
-
-[What is safe by default](design.md#what-is-safe-by-default) changes a third: every
-credential comes through `Secrets`. A provider's `api_key_env`, and an MCP server's
-`bearer_token_env`, each read the environment on their own today, and give way to naming a
-secret.
-
-*Direction.* Provider kinds in `Standard` like the rest, and a named list of kinds and keys
-that are ours, those that describe a model and the one that names its secret among them.
-
-### H2. Does 1.0 ship on oi-kit?
-
-`corduroy-providers` is pinned to an exact alpha. It is confined to one crate behind
-`Provider`.
-
-*Direction.* Decide whether that is acceptable for 1.0 or whether clients of our own for
-two or three APIs come first.
-
 ### H3. What of the harness can the agent file set?
 
 Provider, model, system prompt and turn limit. Not the loop (so a `Loop` an extension
@@ -1207,16 +1203,30 @@ a shipped add-on's name resolves to the shipped one before anything a workspace 
 ([What is safe by default](design.md#what-is-safe-by-default)). `CORDUROY_PLUGIN_PATH`,
 which is the person's, still comes first.
 
+The order gains a step ([How people meet it](design.md#how-people-meet-it)): packages the
+person promoted are kept at account level and looked for after the shipped add-ons and
+before the project's.
+
 *Direction.* Decide the installed layout (beside the binary, a data directory, embedded),
 and with it where the account-level place is on each platform and what the agent file's
-strings call it, beside `{workspace}`, `{data}` and `{home}`.
+strings call it, beside `{workspace}`, `{data}` and `{home}`. Decide what a promoted
+package is granted in a workspace it has not been used in. The leaning is that grants
+belong to a workspace and are asked for in each, since the same package may be given a
+whole tree in one and a single folder in another; what is not settled is whether it brings
+any default with it, or starts from nothing each time.
 
 ### H7. Are the agent file's older names final?
 
 `[[plugins]]` reaches add-ons only, and the names stay by an earlier decision. 1.0 is the
 last moment to change that.
 
-*Direction.* Confirm.
+New names arrive with [How people meet it](design.md#how-people-meet-it), and none is
+chosen: the keychain's kind and the key of a `[secrets.*]` entry that picks it, the command
+that stores a value, `secret` on a provider and an MCP entry, the manifest's file name and
+keys, the key by which an agent file lists a package, and the command that promotes one.
+
+*Direction.* Confirm the old ones, and choose the new ones in one sitting, saying *add-on*
+where an add-on is meant.
 
 ### H8. How much of MCP is in 1.0?
 
@@ -1234,43 +1244,26 @@ A confined shell is promised on Linux and macOS
 test, so those tests run on both. What confines a shell on Windows has not been looked
 into; until one exists the shell there is opt-in, and the file tools work as everywhere.
 
-*Direction.* Decide whether the full suite on all three is a condition of 1.0. Find out
+The keychain is in the standard set on all three
+([How people meet it](design.md#how-people-meet-it)): the macOS Keychain, the Windows
+Credential Manager, and the Secret Service on Linux, which a machine with nobody logged in
+does not run.
+
+*Direction.* Decide whether the full suite on all three is a condition of 1.0, and how the
+keychain kinds are tested where CI has no keychain. Find out
 what Windows offers for confining a process, and then either promise a confined shell
 there or say that 1.0's shell on Windows is the plain one, chosen by the person.
-
-### H11. Is there a front end other than a Rust program?
-
-Driving a harness means linking it. An editor, a web page or a program in another language
-needs a protocol over a socket or a pipe. The design calls such things front ends that
-"need nothing from the core beyond sessions and signals".
-
-Part of what a server needs is decided
-([What an extension can reach](design.md#what-an-extension-can-reach)): the command gets a
-mode that stays up with no terminal and takes on whatever arrives, and the host's driver
-runs every session that is ready. That mode serves plugins and speaks no protocol of its
-own. A front end's notice of work in the background (a line, a toast) is the front end's.
-
-*Direction.* Decide whether 1.0 ships a server front end, and which protocol it speaks. If
-it does, the events and the harness's verbs become a wire format that freezes like the log.
-
-### H14. What is in the standard set at 1.0?
-
-Shell kernels, the HTTP client, secrets from the environment, MCP, the providers and the
-file log. Not a sandboxed kernel, a scheduler, a keychain or a second store.
-
-The confined kernel ships, with its filter for hosts and masked credentials, and is the
-default agent's shell ([What is safe by default](design.md#what-is-safe-by-default)).
-
-*Direction.* Fix the rest of the list. A second store is built as a proof
-([What the freeze waits on](design.md#what-the-freeze-waits-on)); decide whether it then
-ships. A scheduler and a keychain are stated to be out, or added.
 
 ### H15. Which outside conventions does 1.0 commit to?
 
 MCP, the hint files (`AGENTS.md`, `.goosehints`, `CLAUDE.md`), skills as folders, and APIs
 in OpenAI's and Anthropic's shapes. Each moves on its own schedule.
 
-*Direction.* Name the ones that are part of the promise, and the version of each.
+The API shapes are in the promise ([How people meet it](design.md#how-people-meet-it)):
+five provider kinds, two of them for whatever else speaks OpenAI's or Anthropic's shape.
+
+*Direction.* Name the others that are part of the promise, and the version of each, the
+two API shapes included: which of OpenAI's (chat completions, responses) a kind speaks.
 
 ## I. Add-ons and the guest SDKs
 
@@ -1292,16 +1285,6 @@ Both read `wit/corduroy.wit` from a path relative to this repository, which a pu
 package would not have, and their versions are independent of the WIT package's.
 
 *Direction.* Embed the world in each SDK and tie the versions.
-
-### I4. What is an add-on, as something shipped?
-
-A bare `.wasm` file, and an entry someone writes in the agent file. No name, version,
-description or wanted grants travel with it
-([D6](#d6-does-a-plugin-ship-a-statement-of-what-it-wants)); nothing is signed; there is
-nowhere to fetch one from.
-
-*Direction.* Decide whether 1.0 defines a package (a component and a manifest), even if a
-registry comes later. The hash already asked of the gates at `plugin/load` is the hook.
 
 ### I5. Which guest languages are promised?
 
@@ -1325,6 +1308,10 @@ default; the script host; the `tools` capability). Three things it leans on do n
 that survive a restart ([E16](#e16-are-loads-by-a-plugin-durable)), a person approving a
 load ([C15](#c15-can-a-person-answer-an-ask-at-pluginload)), and a scheduler.
 
+The first is decided ([How people meet it](design.md#how-people-meet-it)): what the agent
+builds is a package, the person's yes is kept for what it may do and not for its code, and
+the host loads an approved package again at start.
+
 The scheduler waits: it is an extension that raises signals and starts sessions, the way
 for it to do so is decided, and it is not in 1.0
 ([What an extension can reach](design.md#what-an-extension-can-reach)). An automation the
@@ -1332,4 +1319,5 @@ agent wrote can start a run when an event fires, holding at most its own grants;
 cannot do until there is a scheduler is wake at a time.
 
 *Direction.* The first two are conditions of the freeze: something the agent built must
-still be there tomorrow, and the person must be the one who allowed it.
+still be there tomorrow, and the person must be the one who allowed it. Both are decided
+and neither is built; the second waits on the form of the answer (C15).
