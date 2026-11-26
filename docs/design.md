@@ -2022,9 +2022,16 @@ followed whatever the provider library accepts. What is promised is a named list
 that nothing of it shows: no key or kind of the agent file and no field of the log is
 oi-kit's. That holds once the above is built. It is used in one crate, behind the loop's
 `Provider`, for building a provider, converting messages, its catalogue of models and its
-retries, and replacing it changes that crate and nothing a person wrote. One thing is still
-to check: that a key can be handed to it from `Secrets`, where today its own resolver reads
-the environment.
+retries, and replacing it changes that crate and nothing a person wrote.
+
+- *A key can be handed to it from `Secrets`* (checked against the pinned alpha.15). It asks
+  for a key through a trait of its own (`KeyResolver`) when a provider is built, and the
+  resolver that reads the environment is only the one `corduroy-providers` passes today.
+- *Some of its shorthand reads the environment by itself.* Fourteen of its 58 provider
+  definitions name variables of their own, for a part of an address or a switch, and oi-kit
+  looks those up directly. So a shorthand name whose definition does that is not offered:
+  nothing reads the environment unasked, and each is reachable through a `-compatible` kind
+  with the address written out.
 
 **An add-on ships as a package.** A folder holding a manifest and either a component or a
 script the script host runs. The manifest is a small file of text: a name, a description, a
@@ -2104,8 +2111,9 @@ is there today, and nothing has to load it again.
 - *A project adapts a promoted package by building on it,* not by copying it. A linter
   promoted from a JavaScript project is used in a TypeScript one through a small package
   that strips the types and calls it, as a tool or a service.
-- *Whether a promoted package's grants go with it* to each workspace, or are asked for in
-  each, is still open (H6).
+- *What a promoted package is granted in a workspace is still open* (H6). The leaning is
+  that grants belong to a workspace and are not carried from one to the next: a package
+  allowed a whole tree in one may be allowed a single folder in another.
 
 **What is not promised.**
 
@@ -2295,7 +2303,8 @@ the step it waits on is done.
     preferring it; provider kinds as kinds of the `Standard`, five of them promised and the
     library's other names marked as outside the promise; `secret` on a provider entry in
     place of `api_key_env`, nothing read from the environment unasked, and a missing key an
-    error that names the line to add; the check that oi-kit takes a key from `Secrets`; the
+    error that names the line to add; a key resolver over `Secrets` in place of oi-kit's
+    own, and its shorthand that reads variables no longer offered; the
     folder store as the default once its proof has passed; a package (a folder with a
     manifest and a component or a script), its wants a request and the person's yes kept
     for the grants and not the code; an ask that lets the person give a package more than

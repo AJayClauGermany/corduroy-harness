@@ -724,7 +724,8 @@ decision point, which no answer of the person's switches off
 *Direction.* Decide whether the loop declares the other two before 1.0, since gates written
 by third parties will key on the names. For `session/start`, what is left is the request's
 JSON ([D2](#d2-are-the-gate-requests-json-shapes-contract)). Decide whether taking away a
-plugin that guards a point is asked first, as loading one is.
+plugin that guards a point is asked first, as loading one is. The leaning is yes, as a
+point the gates are asked at; what it might break has not been thought through.
 
 ### D4. Is name order, first strictest, the final rule?
 
@@ -1208,8 +1209,11 @@ before the project's.
 
 *Direction.* Decide the installed layout (beside the binary, a data directory, embedded),
 and with it where the account-level place is on each platform and what the agent file's
-strings call it, beside `{workspace}`, `{data}` and `{home}`. Decide whether a promoted
-package's grants go with it to every workspace, or are asked for in each.
+strings call it, beside `{workspace}`, `{data}` and `{home}`. Decide what a promoted
+package is granted in a workspace it has not been used in. The leaning is that grants
+belong to a workspace and are asked for in each, since the same package may be given a
+whole tree in one and a single folder in another; what is not settled is whether it brings
+any default with it, or starts from nothing each time.
 
 ### H7. Are the agent file's older names final?
 

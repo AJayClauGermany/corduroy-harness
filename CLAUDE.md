@@ -193,7 +193,7 @@ as design guidance, not noise.
   to another without the file saying so.
 - **The agent file's keys and kinds are ours.** Do not add one because a dependency accepts
   it. oi-kit's names for providers beyond the five promised kinds are shorthand, outside
-  the promise.
+  the promise, and one whose definition reads the environment is not to be offered.
 - **What an add-on wants is a request.** A manifest grants nothing, a person's yes is kept
   for the grants and not the code, and only the person's own answer gives an add-on more
   than its loader holds.
