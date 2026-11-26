@@ -268,7 +268,7 @@ pub fn ending(status: &Status) -> Option<String> {
         Status::Finished { .. } | Status::Yielded => None,
         Status::Stopped => Some("stopped".to_owned()),
         Status::TurnLimitReached => Some("stopped: the turn limit was reached".to_owned()),
-        Status::Failed { reason } => Some(format!("the run failed: {reason}")),
+        Status::Failed { reason } => Some(format!("the run failed: {}", plain(reason))),
         Status::Waiting { asks, waits } if asks.is_empty() => {
             let signals: Vec<&str> = waits.iter().map(|wait| wait.signal.as_str()).collect();
             Some(format!("waiting for {}", signals.join(", ")))
@@ -279,6 +279,40 @@ pub fn ending(status: &Status) -> Option<String> {
         )),
         other => Some(other.to_string()),
     }
+}
+
+/// `reason`, why a run failed, as a person reads it.
+///
+/// A service's own answer often arrives quoted whole, as JSON
+/// (`… API error: {"message": "…", "code": "…"}`); its message and its code are put in its
+/// place. Anything else is left as it is, and the log keeps the reason as it came.
+#[must_use]
+pub fn plain(reason: &str) -> String {
+    let quoted = reason
+        .find('{')
+        .zip(reason.rfind('}'))
+        .and_then(|(from, to)| Some((reason.get(..from)?, reason.get(from..=to)?)))
+        .and_then(|(before, json)| Some((before, serde_json::from_str::<Value>(json).ok()?)));
+    let Some((before, answer)) = quoted else {
+        return reason.to_owned();
+    };
+    // The answer itself, or the `error` it wraps one in.
+    let said = answer.get("error").unwrap_or(&answer);
+    let Some(message) = said.get("message").and_then(Value::as_str) else {
+        return reason.to_owned();
+    };
+    let code = ["code", "type"]
+        .iter()
+        .find_map(|key| said.get(key).and_then(Value::as_str))
+        .map(|code| format!(" ({code})"))
+        .unwrap_or_default();
+    let before = before.trim_end().trim_end_matches(':');
+    let lead = if before.is_empty() {
+        String::new()
+    } else {
+        format!("{before}: ")
+    };
+    format!("{lead}{}{code}", message.trim())
 }
 
 #[cfg(test)]
@@ -341,6 +375,39 @@ mod tests {
         );
         let declined = shown(Source::Agent, "usage", r#"{"stop":"refused"}"#).unwrap();
         assert!(declined.contains("declined"), "{declined}");
+    }
+
+    #[test]
+    fn a_service_answer_quoted_as_json_is_said_as_its_message_and_code() {
+        let limit = "Request failed: Responses API error: {\"message\":\"The ChatGPT user has \
+                     reached their Subscription Sharing usage limit.\",\"type\":\
+                     \"invalid_request_error\",\"param\":null,\"code\":\
+                     \"subscription_sharing_usage_limit_exceeded\"}";
+        assert_eq!(
+            plain(limit),
+            "Request failed: Responses API error: The ChatGPT user has reached their \
+             Subscription Sharing usage limit. (subscription_sharing_usage_limit_exceeded)"
+        );
+        // An answer that wraps its error, with a type and no code.
+        let wrapped =
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#;
+        assert_eq!(plain(wrapped), "Overloaded (overloaded_error)");
+        // What quotes no answer, or one with no message, stays as it came.
+        for reason in [
+            "Server error (500) at http://127.0.0.1:1/v1: overloaded",
+            "bad input {\"detail\": 3}",
+            "a brace { left open",
+            "",
+        ] {
+            assert_eq!(plain(reason), reason);
+        }
+        let failed = Status::Failed {
+            reason: wrapped.to_owned(),
+        };
+        assert_eq!(
+            ending(&failed).as_deref(),
+            Some("the run failed: Overloaded (overloaded_error)")
+        );
     }
 
     #[test]

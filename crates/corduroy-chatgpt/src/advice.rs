@@ -23,7 +23,10 @@ pub fn advice(failure: &str) -> Option<String> {
     let said = if has("subscription_sharing_usage_limit_exceeded") {
         format!(
             "Your ChatGPT plan's usage limit was reached, for this tool or for the plan. \
-             Manage usage: {USAGE_URL}"
+             Nothing is retried and nothing else is charged: the run can be asked again once \
+             the limit resets. See and manage usage: {USAGE_URL}. To go on before then, ask a \
+             provider that has a key of its own (`--provider <name>` for one in the agent \
+             file)."
         )
     } else if has("subscription_sharing_user_not_eligible") {
         "Your account, its workspace or its policy does not allow paying with the ChatGPT \
@@ -72,6 +75,19 @@ mod tests {
         )
         .unwrap();
         assert!(limit.contains(USAGE_URL), "{limit}");
+        // What OpenAI answers word for word, as the command is handed it.
+        let answered = advice(
+            "Request failed: Responses API error: {\"message\":\"The ChatGPT user has reached \
+             their Subscription Sharing usage limit. Ask the user to try again after their \
+             usage limit resets or use an API key instead.\",\"type\":\
+             \"invalid_request_error\",\"param\":null,\"code\":\
+             \"subscription_sharing_usage_limit_exceeded\"}",
+        );
+        assert_eq!(answered.as_deref(), Some(limit.as_str()));
+        assert!(
+            limit.contains("resets") && limit.contains("--provider"),
+            "{limit}"
+        );
         let ineligible = advice("403 subscription_sharing_user_not_eligible").unwrap();
         assert!(ineligible.contains("will not change"), "{ineligible}");
         assert!(!ineligible.contains(SIGN_IN));

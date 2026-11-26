@@ -199,6 +199,7 @@ one.
 | `  [<session>] …` | a line from a sub-agent's session |
 | `no corduroy.toml here: this is the default agent, …` | before a run, when there is no agent file: the model is one Ollama serves on this machine, no key is read, and `corduroy init` writes an agent for another |
 | `Using ChatGPT plan. Manage usage: <address>` | before a run, when the model's provider is paid by a [ChatGPT sign-in](agent-file.md#secretsname): whose account the run is on, and where to see and limit what it uses |
+| `the run failed: …` | the run ended as failed, with why. Where the service's own answer came quoted as JSON, its message and its code are shown in its place; the log has the reason whole |
 | a line after `the run failed: …` | when such a run fails for a reason that is the plan's (its usage limit, a sign-in no longer accepted, something a plan does not pay for): what you can do about it. Where OpenAI's reason carries no code, the line is a guess and says "if" |
 
 **Ctrl-C** while a run goes asks it to stop: the running tool is told, calls not yet begun do
