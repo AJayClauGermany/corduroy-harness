@@ -2008,6 +2008,14 @@ keychain gets by itself: the entry fails there until it says so. Only `init`, wh
 person runs and which says what it did, writes the environment or the file for such a
 machine.
 
+The agent used when there is no agent file reads nothing from the environment. It used to
+ask Anthropic or OpenAI if their variable was set, which was a key read with no file saying
+so, and could not have gone on once keys were in the keychain: there is no variable left to
+tell whose model is wanted. So the built-in default asks a model served on the machine,
+which needs no key, says which agent it is before a run, and says `corduroy init` when the
+run fails. Looking at the environment to choose a vendor is `init`'s, which the person
+runs.
+
 Three things were settled by use. The command that puts a value in is `corduroy secrets
 set`: `login` was offered for it as well and felt wrong for a key, since signing in is what
 one does to a subscription, so `login` and `logout` are for what is signed in to and say so
@@ -2342,13 +2350,14 @@ the step it waits on is done.
     (`corduroy login`, `corduroy-chatgpt`), kept in the keychain or, where its entry says
     so, in the person's own directory; the keychain as what a `[secrets.*]` entry gets by
     saying nothing, with the environment only where it names a variable; `corduroy doctor`,
-    which tries each credential, kernel and model. *Decided, not built:* the handle an
+    which tries each credential, kernel and model; the agent with no file reading no key
+    (it asks a model served on the machine, says so, and points to `init`). *Decided, not built:* the handle an
     extension drives through gaining an answer to an ask and a stop; provider kinds as
     kinds of the `Standard`, five of them promised and the
     library's other names marked as outside the promise; `api_key_env` going from a
-    provider entry and `bearer_token_env` from an MCP entry, nothing read from the
-    environment unasked (the agent with no file still names no secret, so its provider
-    reads its own variable), and a missing key an
+    provider entry and `bearer_token_env` from an MCP entry, so that no agent file reads
+    the environment without naming the variable (an `anthropic` or `openai` provider that
+    names no secret still reads its own), and a missing key an
     error that names the line to add; oi-kit's shorthand that reads variables no longer
     offered; the
     folder store as the default once its proof has passed; a package (a folder with a

@@ -179,6 +179,10 @@ pub(super) fn doctor(agent: &Agent, places: &Places, standard: &Standard, out: &
         say(out, &format!("all {} parts tried are working", tried.all));
         ExitCode::SUCCESS
     } else {
+        // The default agent's model is one this machine may not serve.
+        if places.file.is_none() {
+            say(out, super::INIT);
+        }
         let are = if tried.failed == 1 { "is" } else { "are" };
         say(
             out,

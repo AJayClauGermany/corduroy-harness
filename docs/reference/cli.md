@@ -33,7 +33,7 @@ already ends in `--`). Source:
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `--workspace <dir>` | the current directory | Where the agent works. `{workspace}` in the agent file, and where `.corduroy/` is kept. |
-| `--agent <file>` | `<workspace>/corduroy.toml`, else the default agent | The [agent file](agent-file.md) to read. |
+| `--agent <file>` | `<workspace>/corduroy.toml`, else the default agent | The [agent file](agent-file.md) to read. With none, the default agent asks a local Ollama and reads no key: see [`init`](#commands). |
 | `--session <name>` | `main` | The session to run in. It is started if the log does not have it. |
 | `--model <name>` | the file's `model` | Ask this model instead. |
 | `--provider <name>` | the file's `provider` | Ask this provider instead; it must be one of the file's `[providers.*]`. |
@@ -141,8 +141,13 @@ a ChatGPT plan's is followed by what to do about it, as after a run.
 
 `init` writes where a key comes from, never the key. It prints the command that puts it
 there (`corduroy secrets set anthropic`, or `corduroy login chatgpt`) and, when the vendor's
-variable is set where you ran it, a line that copies it in. The agent used when there is no
-agent file is unchanged: it names no secret, so its provider reads its own variable.
+variable is set where you ran it, a line that copies it in.
+
+The agent used when there is no agent file is the same one for Ollama: it asks a model
+served on this machine (`qwen3`), names no secret and reads no key, whatever the environment
+holds. A key in a variable is used only by an agent file that says so, and `init` is what
+writes one. A run of that agent begins by saying which agent it is, and one that fails (no
+Ollama here, or no such model) says to run `corduroy init`.
 
 **`secrets`** List every credential the agent names and how it stands, without reading one
 out: each `[secrets.<name>]` entry with its kind and what uses it, then each provider that
@@ -192,6 +197,7 @@ one.
 | `  ! plugin <name> failed/stopped: reason` | an add-on could not start, or trapped too often |
 | `  ↻ picking up a run that was cut short` | a restart |
 | `  [<session>] …` | a line from a sub-agent's session |
+| `no corduroy.toml here: this is the default agent, …` | before a run, when there is no agent file: the model is one Ollama serves on this machine, no key is read, and `corduroy init` writes an agent for another |
 | `Using ChatGPT plan. Manage usage: <address>` | before a run, when the model's provider is paid by a [ChatGPT sign-in](agent-file.md#secretsname): whose account the run is on, and where to see and limit what it uses |
 | a line after `the run failed: …` | when such a run fails for a reason that is the plan's (its usage limit, a sign-in no longer accepted, something a plan does not pay for): what you can do about it. Where OpenAI's reason carries no code, the line is a guess and says "if" |
 
@@ -241,6 +247,6 @@ every add-on's `fs-read` and `fs-write`, whatever its grants say.
 
 | Variable | Used for |
 | --- | --- |
-| `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` | the keys of providers that name no `secret`, as the agent with no file does, and `init`'s choice of model |
+| `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` | `init`'s choice of model, and the key of an `anthropic` or `openai` provider in an agent file that names no `secret` for it. Never read without an agent file. |
 | `CORDUROY_PLUGIN_PATH` | more directories to find add-ons in, separated as `PATH` is, searched before the `plugins` directory beside the program |
 | whatever `api_key_env`, `[secrets.*] env` and `bearer_token_env` name | keys and secrets the agent file refers to |

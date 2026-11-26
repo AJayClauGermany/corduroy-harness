@@ -334,25 +334,24 @@ async fn run(
         harness.start_session(session.clone(), None)?;
     }
     let paid = paid_by(&agent.file, standard);
-    if let (Some(line), [] | ["run" | "continue", ..]) = (
-        paid.as_ref().and_then(|paid| paid.using()),
-        command.as_slice(),
-    ) {
-        say(out, &line);
+    let unfiled = places.file.is_none();
+    if let [] | ["run" | "continue", ..] = command.as_slice() {
+        announce(&agent.file, unfiled, paid.as_deref(), out);
     }
     let paid = paid.as_deref();
+    let shown = Shown { out, paid, unfiled };
     match command.as_slice() {
-        [] => chat(harness, session, input, &Shown { out, paid }).await,
+        [] => chat(harness, session, input, &shown).await,
         ["run", words @ ..] if !words.is_empty() => {
             let _shown = terminal::watch(harness, &session, out);
             let prompt = words.join(" ");
             let outcome = terminal::prompt(harness, &session, &prompt, input, out).await?;
-            Ok(finish(&outcome.status, &Shown { out, paid }))
+            Ok(finish(&outcome.status, &shown))
         }
         ["continue"] => {
             let _shown = terminal::watch(harness, &session, out);
             let outcome = terminal::resume(harness, &session, input, out).await?;
-            Ok(finish(&outcome.status, &Shown { out, paid }))
+            Ok(finish(&outcome.status, &shown))
         }
         ["stop"] => {
             let stopped = harness.stop(&session)?;
@@ -471,10 +470,37 @@ fn paid_by(file: &AgentFile, standard: &Standard) -> Option<Arc<dyn SignIn>> {
     standard.sign_in(&kind).cloned()
 }
 
-/// Where a run's end is said, and what its model is paid through, if that is signed in to.
+/// Say what a person should know before a run: which agent this is, if no file says, and
+/// whose account its model is on, if it is paid by a sign-in.
+fn announce(file: &AgentFile, unfiled: bool, paid: Option<&dyn SignIn>, out: &Out) {
+    if unfiled {
+        say(out, &default_agent(file));
+    }
+    if let Some(line) = paid.and_then(SignIn::using) {
+        say(out, &line);
+    }
+}
+
+/// What is said before a run of the agent used when there is no agent file: what it asks,
+/// and the command that writes an agent for something else.
+fn default_agent(file: &AgentFile) -> String {
+    format!(
+        "no {AGENT_FILE} here: this is the default agent, which asks Ollama on this machine \
+         for `{}` and reads no key. {INIT}",
+        file.model
+    )
+}
+
+/// What writes an agent file, for whoever met the default agent and wanted another.
+const INIT: &str = "`corduroy init` writes an agent for Anthropic, OpenAI, a ChatGPT plan or \
+                    Ollama, to edit";
+
+/// Where a run's end is said, what its model is paid through, if that is signed in to, and
+/// whether the agent is the default one, used for want of an agent file.
 struct Shown<'a> {
     out: &'a Out,
     paid: Option<&'a dyn SignIn>,
+    unfiled: bool,
 }
 
 impl Shown<'_> {
@@ -488,6 +514,10 @@ impl Shown<'_> {
             && let Some(advice) = paid.advise(reason)
         {
             say(self.out, &advice);
+        }
+        // The default agent's model is one this machine may not serve.
+        if let (Status::Failed { .. }, true) = (status, self.unfiled) {
+            say(self.out, INIT);
         }
     }
 }
@@ -669,6 +699,37 @@ mod tests {
         let read = options(args.into_iter().map(str::to_owned)).unwrap();
         assert_eq!(read.session.as_deref(), Some("side"));
         assert_eq!(read.command, ["run", "say", "--", "hi"]);
+    }
+
+    #[test]
+    fn a_failed_run_of_the_default_agent_says_what_writes_another() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let out: Out = Arc::<Mutex<Vec<u8>>>::clone(&written);
+        let failed = Status::Failed {
+            reason: "connection refused".to_owned(),
+        };
+        let said = |unfiled: bool, status: &Status| {
+            written.lock().unwrap().clear();
+            Shown {
+                out: &out,
+                paid: None,
+                unfiled,
+            }
+            .end(status);
+            String::from_utf8(written.lock().unwrap().clone()).unwrap()
+        };
+        // Only the agent no file describes, and only when its run failed.
+        assert!(said(true, &failed).ends_with(&format!("{INIT}\n")));
+        assert!(!said(false, &failed).contains("corduroy init"));
+        assert!(!said(true, &Status::Stopped).contains("corduroy init"));
+
+        let file = AgentFile::parse(&AgentFile::default_text()).unwrap();
+        let line = default_agent(&file);
+        assert!(
+            line.starts_with("no corduroy.toml here: this is the default agent"),
+            "{line}"
+        );
+        assert!(line.contains("for `qwen3` and reads no key") && line.contains("corduroy init"));
     }
 
     #[test]

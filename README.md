@@ -82,22 +82,23 @@ cargo plugins                                   # build the add-ons (WebAssembly
 ```
 
 ```bash
-export ANTHROPIC_API_KEY=...                    # or OPENAI_API_KEY; without either, a local Ollama
+cargo corduroy --workspace ~/some/project init anthropic   # or openai, chatgpt, ollama
 ```
 
 ```bash
-cargo corduroy init                             # optional: an agent file, its key kept in your keychain
+cargo corduroy --workspace ~/some/project secrets set anthropic   # the key, typed without showing
 ```
 
 ```bash
 cargo corduroy --workspace ~/some/project      # talk to the agent; /help for commands
 ```
 
-Without an agent file it runs the default agent: the Pi tools on a shell in the workspace,
-skills, and an approval gate that asks before anything that writes. `cargo corduroy init`
-writes that agent to `corduroy.toml` so you can change it: the providers, the kernels, each
-add-on and exactly what it is granted, with each key read from your operating system's
-keychain (`corduroy secrets set <name>` puts it there) where the machine has one.
+`init` writes the agent to `corduroy.toml` so you can change it: the providers, the kernels,
+each add-on and exactly what it is granted, with each key read from your operating system's
+keychain where the machine has one. It is the Pi tools on a shell in the workspace, skills,
+and an approval gate that asks before anything that writes. Without an agent file the same
+agent runs on a model served on this machine by Ollama: no key is read from the environment
+unless a file says so.
 `corduroy run <prompt>` runs one prompt; `corduroy
 check` says what the agent has without calling a model; `corduroy doctor` tries it for real
 (each key, each kernel, one short question to each model); `corduroy log` prints the event

@@ -10,7 +10,10 @@
 //! model = "claude-sonnet-5-5"
 //!
 //! [providers.anthropic]
-//! kind = "anthropic"                     # reads ANTHROPIC_API_KEY
+//! kind = "anthropic"
+//! secret = "anthropic"                   # its key: [secrets.anthropic], in the keychain
+//!
+//! [secrets.anthropic]
 //!
 //! [kernels.shell]
 //! kind = "shell"                         # a persistent shell in the workspace
@@ -415,18 +418,18 @@ impl AgentFile {
         Ok(())
     }
 
-    /// The default agent for a workspace with no agent file: the model from the environment
-    /// (`ANTHROPIC_API_KEY`, then `OPENAI_API_KEY`, else a local Ollama), the Pi toolset on a
-    /// shell in the workspace (PowerShell on Windows, told to the model, `sh` elsewhere), the
-    /// approval and inspect gates, the Goose-baseline plugins (skills, hints, todo, memory,
-    /// recall, summarize, compact, subagents) and `review`. With both keys set, `review` asks
-    /// the other vendor's model, from a second provider named `reviewer`.
+    /// The default agent for a workspace with no agent file: a model served on this machine
+    /// by Ollama, which needs no key, the Pi toolset on a shell in the workspace (PowerShell
+    /// on Windows, told to the model, `sh` elsewhere), the approval and inspect gates, the
+    /// Goose-baseline plugins (skills, hints, todo, memory, recall, summarize, compact,
+    /// subagents) and `review`.
     ///
-    /// It says nothing of where a key comes from, so each provider reads its own variable.
-    /// The agent `corduroy init` writes says ([`Starter::text`]).
+    /// It reads nothing from the environment: no key is looked for, and none decides whose
+    /// model is asked. An agent for a vendor that takes a key is what `corduroy init` writes
+    /// ([`Starter::from_environment`]), with where the key comes from written in it.
     #[must_use]
     pub fn default_text() -> String {
-        Starter::from_environment(None, Keys::Unsaid).text()
+        Starter::local().text()
     }
 }
 
@@ -494,9 +497,6 @@ impl Vendor {
 /// Where the default agent's keys come from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Keys {
-    /// The file does not say: each provider reads its own variable. What an agent with no
-    /// file does.
-    Unsaid,
     /// The system's keychain: a `[secrets.<name>]` entry of `kind = "keychain"` for each.
     Keychain,
     /// The environment, written down: a `[secrets.<name>]` entry with `env` for each.
@@ -516,6 +516,17 @@ pub struct Starter {
 }
 
 impl Starter {
+    /// The default agent with a model served on this machine by Ollama: no key, so nothing
+    /// to say about where one comes from. What an agent with no file is.
+    #[must_use]
+    pub const fn local() -> Self {
+        Self {
+            vendor: Vendor::Ollama,
+            reviewer: None,
+            keys: Keys::Keychain,
+        }
+    }
+
     /// The default agent for `vendor`, or for the vendor whose key the environment holds
     /// (Anthropic's, then `OpenAI`'s, else a local Ollama), with its keys from `keys`. With
     /// both keys in the environment, the vendor not asked reviews.
@@ -555,18 +566,14 @@ impl Starter {
     /// The vendors whose secrets the agent names, the loop's first.
     #[must_use]
     pub fn secrets(self) -> Vec<Vendor> {
-        let said = |vendor: &Vendor| {
-            vendor.secret().is_some() && (self.keys != Keys::Unsaid || *vendor == Vendor::ChatGpt)
-        };
         [Some(self.vendor), self.reviewer]
             .into_iter()
             .flatten()
-            .filter(said)
+            .filter(|vendor| vendor.secret().is_some())
             .collect()
     }
 
-    /// The line of a provider's entry that names `vendor`'s secret, if the file says where
-    /// keys come from.
+    /// The line of a provider's entry that names `vendor`'s secret, if it has one.
     fn credential(self, vendor: Vendor) -> String {
         match vendor.secret() {
             Some(secret) if self.secrets().contains(&vendor) => {
@@ -1155,7 +1162,7 @@ mod tests {
 
     /// The model the default agent's `review` asks, and the providers it has.
     fn reviewing(anthropic: bool, openai: bool) -> (String, String, Vec<String>) {
-        let starter = Starter::choose(None, anthropic, openai, Keys::Unsaid);
+        let starter = Starter::choose(None, anthropic, openai, Keys::Keychain);
         let file = AgentFile::parse(&starter.text()).unwrap();
         let review = file.plugins.iter().find(|p| p.name == "review").unwrap();
         let model = review.config.as_ref().unwrap()["model"]
@@ -1220,11 +1227,13 @@ mod tests {
         let entry = |name: &str, kind: &str, config: &str| {
             (name.to_owned(), kind.to_owned(), config.to_owned())
         };
-        // An agent with no file says nothing, as before: each provider reads its variable.
-        let unsaid = Starter::choose(None, true, true, Keys::Unsaid);
-        let file = AgentFile::parse(&unsaid.text()).unwrap();
+        // An agent with no file asks a model served here: no key, no secret, and nothing
+        // read from the environment to decide either.
+        let file = AgentFile::parse(&AgentFile::default_text()).unwrap();
         assert!(file.secrets.is_empty());
-        assert_eq!(file.providers["main"].spec.secret, None);
+        assert_eq!(file.providers.len(), 1);
+        assert_eq!(file.providers["main"].spec.kind, "ollama");
+        assert_eq!(file.providers["main"].spec.key_variable(), None);
 
         // In the keychain: an entry for each vendor, named by its provider.
         let kept = Starter::choose(None, true, true, Keys::Keychain);
@@ -1257,7 +1266,6 @@ mod tests {
         // A ChatGPT plan is a sign-in whatever else is said: kept in the keychain, which
         // needs nothing written, or in a file where keys are not kept in the keychain.
         for (keys, config) in [
-            (Keys::Unsaid, r#"{"keep":"file"}"#),
             (Keys::Environment, r#"{"keep":"file"}"#),
             (Keys::Keychain, "{}"),
         ] {

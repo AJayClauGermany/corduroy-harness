@@ -193,7 +193,9 @@ as design guidance, not noise.
   `Secrets` and never looks one up in the environment by itself; `api_key_env` and
   `bearer_token_env` are to give way to naming a secret. Never fall back from one source
   to another without the file saying so: a keychain that is not there is an error, never a
-  file or a variable in its place.
+  file or a variable in its place. The agent used when there is no agent file reads no key
+  and no variable (it asks a local model); only `init`, which the person runs, looks at the
+  environment to choose.
 - **The safer source is the one that needs nothing written.** A `[secrets.*]` entry that
   says nothing is kept in the keychain, and a sign-in is kept there; the environment
   (`env`) and a file (`keep = "file"`) are what an entry has to say. Give a new kind of

@@ -131,6 +131,11 @@ model = "qwen3"
 kind = "ollama"           # http://localhost:11434 unless base_url says otherwise
 ```
 
+This is also what `corduroy` asks when a workspace has no agent file: the default agent
+reads no key, so a model served on this machine is the one it can ask. It says so before a
+run. For any other model, `corduroy init anthropic` (or `openai`, `chatgpt`) writes the
+agent file.
+
 ## Any OpenAI- or Anthropic-compatible endpoint
 
 ```toml

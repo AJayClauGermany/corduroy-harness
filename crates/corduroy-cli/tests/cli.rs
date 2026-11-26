@@ -643,3 +643,44 @@ fn the_shell_sees_the_variables_the_agent_file_lists_and_not_the_providers_key()
     );
     assert!(!log.contains("s3cret-key"), "{log}");
 }
+
+#[test]
+fn without_an_agent_file_no_key_is_read_and_the_agent_says_what_it_is() {
+    let workspace = scratch("cli-no-agent-file");
+    // Keys in the environment, which used to choose whose model is asked.
+    let env = [
+        ("ANTHROPIC_API_KEY", "sk-ant-unused"),
+        ("OPENAI_API_KEY", "sk-unused"),
+    ];
+
+    let check = corduroy_with(&workspace, &["check"], "", &env).unwrap();
+    let said = text(&check.stdout);
+    assert!(check.status.success(), "{said}\n{}", text(&check.stderr));
+    assert!(said.contains("model     qwen3 from main"), "{said}");
+    assert!(said.contains("providers main\n"), "{said}");
+
+    // Nothing to keep, and nothing read from the environment for a provider.
+    let secrets = corduroy_with(&workspace, &["secrets"], "", &env).unwrap();
+    assert_eq!(
+        text(&secrets.stdout),
+        "this agent names no secret and needs no key\n"
+    );
+
+    // Talking to it says which agent it is, before anything is asked of a model.
+    let chat = corduroy_with(&workspace, &[], "/exit\n", &env).unwrap();
+    let said = text(&chat.stdout);
+    assert!(
+        said.starts_with(
+            "no corduroy.toml here: this is the default agent, which asks Ollama on this machine \
+             for `qwen3` and reads no key. `corduroy init` writes an agent"
+        ),
+        "{said}"
+    );
+    // The keys are in nothing it wrote.
+    let log = text(
+        &corduroy_with(&workspace, &["log"], "", &env)
+            .unwrap()
+            .stdout,
+    );
+    assert!(!log.contains("sk-ant-unused") && !said.contains("sk-ant-unused"));
+}

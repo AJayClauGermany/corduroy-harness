@@ -3,7 +3,9 @@
 An agent file is a TOML file describing everything one agent can do: the model it asks, the
 providers, kernels, secrets, MCP servers and extensions it has, and the add-ons it loads with
 what each is granted. `corduroy` reads `corduroy.toml` in the workspace, or the file given
-with `--agent`; with neither, it uses the default agent, which `corduroy init` writes out.
+with `--agent`; with neither, it uses the default agent on a model served on this machine
+by Ollama, which needs no key. `corduroy init` writes that agent out for the vendor you
+name, with where its key comes from.
 
 Unknown keys are errors, so a misspelt grant is never silently ignored. Keys are only ever
 added to this format, never renamed (see [What is stable](../design.md#what-is-stable)).
