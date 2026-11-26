@@ -12,6 +12,8 @@
 //! corduroy [options] log             print the event log, or with --session one session's part
 //! corduroy [options] report [N]      what the session's last run (or last N) did, with timings
 //! corduroy init                      write the default agent file to edit
+//! corduroy [options] login [name]    sign in for a secret of the agent that needs it (a ChatGPT plan)
+//! corduroy [options] logout [name]   sign out again: revoke and forget what was kept
 //!
 //! options: --agent <file>  --workspace <dir>  --session <name>  --model <name>  --provider <name>
 //! ```
@@ -29,16 +31,17 @@ use std::sync::{Arc, Mutex};
 use corduroy_harness::core::{Event, Query, SessionId};
 use corduroy_harness::{Harness, MAIN, Status};
 
-use corduroy_std::Standard;
+use corduroy_std::{SignIn, Standard};
 
 use crate::agent::{AGENT_FILE, Agent, AgentFile, Places, assemble_from};
-use crate::extension::Extensions;
+use crate::extension::{Asked, Extensions};
 use crate::report::{below, report, stamp};
 use crate::terminal::{self, Out, say};
 
 const USAGE: &str = "usage: corduroy [--agent FILE] [--workspace DIR] [--session NAME] \
                      [--model NAME] [--provider NAME] [--version] [run PROMPT | continue | stop | check | sessions | \
-                     sessions remove NAME | log | report [N] | init]";
+                     sessions remove NAME | log | report [N] | init | login [SECRET] | \
+                     logout [SECRET]]";
 
 /// `corduroy` and its version, with the commit it was built from when the build said
 /// (`CORDUROY_COMMIT`, set by the release workflow).
@@ -179,6 +182,33 @@ fn load(
     Ok(agent)
 }
 
+/// How a command ended: the process's exit code, or what went wrong.
+type Done = Result<ExitCode, Box<dyn Error>>;
+
+/// Carry out `command` if it is one that does not put the agent together: `init`, signing
+/// in or out, and maintenance of the log. Nothing else is written by these.
+fn between_runs(
+    command: &[&str],
+    options: &Options,
+    workspace: &Path,
+    standard: &Standard,
+    out: &Out,
+) -> Option<Done> {
+    let described = || agent_file(options, workspace.to_owned());
+    match command {
+        ["init", ..] => Some(init(workspace, out)),
+        [action @ ("login" | "logout"), named @ ..] => Some(described().and_then(|described| {
+            let named = named.first().copied();
+            sign(*action == "login", named, &described, standard, out)
+        })),
+        ["sessions", "remove", name] => Some(described().and_then(|Described { file, places }| {
+            let log = file.log_path(&places);
+            remove(&log, &SessionId::new(*name), standard, out)
+        })),
+        _ => None,
+    }
+}
+
 async fn run(options: Options, standard: &Standard, out: &Out) -> Result<ExitCode, Box<dyn Error>> {
     let workspace = match &options.workspace {
         Some(dir) => dir.clone(),
@@ -186,14 +216,8 @@ async fn run(options: Options, standard: &Standard, out: &Out) -> Result<ExitCod
     }
     .canonicalize()?;
     let command: Vec<&str> = options.command.iter().map(String::as_str).collect();
-    if command.first() == Some(&"init") {
-        return init(&workspace, out);
-    }
-    if let ["sessions", "remove", name] = command.as_slice() {
-        // Maintenance between runs: the agent is not put together, so nothing else is written.
-        let Described { file, places } = agent_file(&options, workspace)?;
-        let log = file.log_path(&places);
-        return remove(&log, &SessionId::new(*name), standard, out);
+    if let Some(done) = between_runs(&command, &options, &workspace, standard, out) {
+        return done;
     }
     let agent = load(&options, workspace, standard, out)?;
     let harness = &agent.harness;
@@ -202,18 +226,26 @@ async fn run(options: Options, standard: &Standard, out: &Out) -> Result<ExitCod
         harness.start_session(session.clone(), None)?;
     }
     let mut input = io::BufReader::new(io::stdin());
+    let paid = paid_by(&agent.file, standard);
+    if let (Some(line), [] | ["run" | "continue", ..]) = (
+        paid.as_ref().and_then(|paid| paid.using()),
+        command.as_slice(),
+    ) {
+        say(out, &line);
+    }
+    let paid = paid.as_deref();
     match command.as_slice() {
-        [] => chat(harness, session, &mut input, out).await,
+        [] => chat(harness, session, &mut input, &Shown { out, paid }).await,
         ["run", words @ ..] if !words.is_empty() => {
             let _shown = terminal::watch(harness, &session, out);
             let prompt = words.join(" ");
             let outcome = terminal::prompt(harness, &session, &prompt, &mut input, out).await?;
-            Ok(finish(&outcome.status, out))
+            Ok(finish(&outcome.status, &Shown { out, paid }))
         }
         ["continue"] => {
             let _shown = terminal::watch(harness, &session, out);
             let outcome = terminal::resume(harness, &session, &mut input, out).await?;
-            Ok(finish(&outcome.status, out))
+            Ok(finish(&outcome.status, &Shown { out, paid }))
         }
         ["stop"] => {
             let stopped = harness.stop(&session)?;
@@ -233,6 +265,59 @@ async fn run(options: Options, standard: &Standard, out: &Out) -> Result<ExitCod
         ["report", count] => print_report(&agent, &session, count, out),
         _ => Err(USAGE.into()),
     }
+}
+
+/// Sign in for (or, if not `inward`, out of) what a secret of the agent file stands for: the
+/// one `named`, or the only one whose kind is signed in to.
+fn sign(
+    inward: bool,
+    named: Option<&str>,
+    described: &Described,
+    standard: &Standard,
+    out: &Out,
+) -> Result<ExitCode, Box<dyn Error>> {
+    let Described { file, places } = described;
+    let needing: Vec<&str> = file
+        .secrets
+        .iter()
+        .filter(|(_, secret)| standard.sign_in(&secret.extension()).is_some())
+        .map(|(name, _)| name.as_str())
+        .collect();
+    let name = match (named, needing.as_slice()) {
+        (Some(name), _) if needing.contains(&name) => name,
+        (None, [only]) => *only,
+        (_, []) => {
+            return Err(
+                "this agent has no secret that is signed in to. For a ChatGPT plan, \
+                        add:\n\n[secrets.chatgpt]\nkind = \"chatgpt\"\n\nand name it as a \
+                        provider's `secret`"
+                    .into(),
+            );
+        }
+        (_, several) => {
+            return Err(format!("say which secret, one of: {}", several.join(", ")).into());
+        }
+    };
+    let found = file
+        .secrets
+        .get(name)
+        .and_then(|secret| Some((secret, standard.sign_in(&secret.extension())?)));
+    let Some((secret, sign_in)) = found else {
+        return Err(format!("`{name}` is no secret that is signed in to").into());
+    };
+    let config = places.expand_json(serde_json::to_value(&secret.config)?);
+    let asked = Asked {
+        name,
+        config: &config,
+        places,
+    };
+    let mut tell = |line: &str| say(out, line);
+    if inward {
+        sign_in.sign_in(&asked, &mut tell)?;
+    } else {
+        sign_in.sign_out(&asked, &mut tell)?;
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Print the sessions in the log, each with the session it was started from.
@@ -324,10 +409,36 @@ fn remove(
     Ok(ExitCode::SUCCESS)
 }
 
-fn finish(status: &Status, out: &Out) -> ExitCode {
-    if let Some(line) = terminal::ending(status) {
-        say(out, &line);
+/// How the secret of the provider the loop asks is signed in to, if its kind is.
+fn paid_by(file: &AgentFile, standard: &Standard) -> Option<Arc<dyn SignIn>> {
+    let secret = file.providers.get(&file.provider)?.spec.secret.as_ref()?;
+    let kind = file.secrets.get(secret)?.extension();
+    standard.sign_in(&kind).cloned()
+}
+
+/// Where a run's end is said, and what its model is paid through, if that is signed in to.
+struct Shown<'a> {
+    out: &'a Out,
+    paid: Option<&'a dyn SignIn>,
+}
+
+impl Shown<'_> {
+    /// Say how a run ended, if there is something to say, and what the person can do about
+    /// a failure that is the account's.
+    fn end(&self, status: &Status) {
+        if let Some(line) = terminal::ending(status) {
+            say(self.out, &line);
+        }
+        if let (Status::Failed { reason }, Some(paid)) = (status, self.paid)
+            && let Some(advice) = paid.advise(reason)
+        {
+            say(self.out, &advice);
+        }
     }
+}
+
+fn finish(status: &Status, shown: &Shown<'_>) -> ExitCode {
+    shown.end(status);
     match status {
         Status::Finished { .. } | Status::Yielded => ExitCode::SUCCESS,
         // As a program interrupted by Ctrl-C does.
@@ -446,8 +557,9 @@ async fn chat(
     harness: &Harness,
     mut session: SessionId,
     input: &mut (dyn BufRead + Send),
-    out: &Out,
+    ends: &Shown<'_>,
 ) -> Result<ExitCode, Box<dyn Error>> {
+    let out = ends.out;
     say(
         out,
         "corduroy: type a prompt, /help for commands, /exit or ctrl-d to leave",
@@ -455,8 +567,8 @@ async fn chat(
     let mut shown = terminal::watch(harness, &session, out);
     let outcome = terminal::resume(harness, &session, input, out).await?;
     let started = !outcome.session.conversation().is_empty();
-    if let Some(line) = terminal::ending(&outcome.status).filter(|_| started) {
-        say(out, &line);
+    if started {
+        ends.end(&outcome.status);
     }
     loop {
         say_prompt(out);
@@ -478,9 +590,7 @@ async fn chat(
             }
             Typed::Prompt(prompt) => {
                 let outcome = terminal::prompt(harness, &session, prompt, input, out).await?;
-                if let Some(line) = terminal::ending(&outcome.status) {
-                    say(out, &line);
-                }
+                ends.end(&outcome.status);
             }
         }
     }

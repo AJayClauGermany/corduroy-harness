@@ -16,6 +16,55 @@ kind = "anthropic"        # reads ANTHROPIC_API_KEY; "openai" reads OPENAI_API_K
 
 To read the key from another variable, add `api_key_env = "MY_KEY"`.
 
+## Name a secret instead
+
+A provider can take its key from a `[secrets.<name>]` entry. The value is then read for
+every request, not once at the start, so a key that is replaced while the agent runs is the
+one sent:
+
+```toml
+[providers.main]
+kind = "openai"
+secret = "openai-key"
+
+[secrets.openai-key]
+env = "MY_OPENAI_KEY"
+```
+
+## A ChatGPT plan instead of an API key
+
+OpenAI lets a tool use your ChatGPT plan for its requests, once you sign in and allow it.
+The provider is the ordinary `openai` one; its secret is a sign-in:
+
+```toml
+provider = "main"
+model = "gpt-6-luna"      # a model your plan has
+
+[providers.main]
+kind = "openai"
+secret = "chatgpt"
+
+[secrets.chatgpt]
+kind = "chatgpt"
+```
+
+Sign in once, in the browser:
+
+```bash
+corduroy login
+```
+
+After that the agent runs as with a key. The token is renewed as it runs out; `corduroy
+logout` revokes the sign-in. Usage counts against your plan, alongside every other tool you
+use it from; see and limit it at <https://chatgpt.com/settings/usage>. A request the plan
+does not cover fails the run with OpenAI's reason, followed by what you can do about it
+(the usage page, or `corduroy login` again): nothing falls back to another way of paying. Do not set `max_tokens` on this provider: a plan-paid request is refused a limit.
+
+On a machine with no browser, sign in on one that has, then copy
+`~/.config/corduroy/chatgpt/chatgpt.json` over a secure channel to the same place there.
+
+`examples/chatgpt-plan/corduroy.toml` is the default agent set up this way.
+
 ## Ollama
 
 ```toml

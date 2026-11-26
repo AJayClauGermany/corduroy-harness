@@ -1,6 +1,7 @@
 //! oi-kit's providers as the harness's: converting messages, tools and usage at the
 //! boundary, so that nothing past it depends on oi-kit's shapes.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -18,9 +19,11 @@ use oi_kit_provider_types::canonical::maybe_get_canonical_model;
 use oi_kit_provider_types::conversation::message::{
     Message as OiKitMessage, MessageContent, ToolRequest,
 };
+use oi_kit_provider_types::formats::openai::is_openai_responses_model;
 use oi_kit_provider_types::model::ModelConfig;
 use oi_kit_provider_types::retry::retry_operation;
 use oi_kit_provider_types::thinking::ThinkingEffort;
+use oi_kit_providers::openai::OPEN_AI_DEFAULT_BASE_PATH;
 use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock, JsonObject, Tool};
 use serde_json::Value;
 
@@ -32,6 +35,10 @@ pub(crate) struct Settings {
     /// oi-kit's id for the provider, under which its model catalog lists the provider's
     /// models.
     pub(crate) provider: String,
+    /// For a provider speaking `OpenAI`'s protocol, the path its requests go to, as oi-kit
+    /// derives it from the base URL. It decides, with the model, which of the two APIs a
+    /// request is for (see [`Settings::responses`]).
+    pub(crate) openai_path: Option<String>,
     pub(crate) max_tokens: Option<u32>,
     pub(crate) temperature: Option<f32>,
     pub(crate) thinking: Option<Thinking>,
@@ -66,6 +73,53 @@ impl Settings {
     }
 }
 
+impl Settings {
+    /// Whether a request for `model` goes to the Responses API, by oi-kit's own rule: a path
+    /// that names an API decides, and the standard chat-completions path leaves it to the
+    /// model's name.
+    fn responses(&self, model: &str) -> bool {
+        let Some(path) = &self.openai_path else {
+            return false;
+        };
+        let path = path.trim_matches('/').to_ascii_lowercase();
+        if path != OPEN_AI_DEFAULT_BASE_PATH {
+            if path.ends_with("responses") || path.contains("/responses") {
+                return true;
+            }
+            if path.contains("chat/completions") {
+                return false;
+            }
+        }
+        is_openai_responses_model(model)
+    }
+
+    /// The configuration and the system prompt oi-kit is given to ask `model`.
+    ///
+    /// A request to the Responses API is not asked the way oi-kit would by default, which
+    /// is a `system` message at the head of the input and always a `max_output_tokens`: an
+    /// account paying through a `ChatGPT` plan is refused a request holding either. The
+    /// system prompt goes as `instructions`, the API's own field for it, and a limit only
+    /// where the provider's entry states one; without one the model's own limit applies,
+    /// which is what the default asked for.
+    fn asking<'system>(&self, model: &str, system: &'system str) -> (ModelConfig, &'system str) {
+        let config = self.model_config(model);
+        if !self.responses(model) {
+            return (config, system);
+        }
+        let mut config = config.with_max_tokens(
+            self.max_tokens
+                .and_then(|tokens| i32::try_from(tokens).ok()),
+        );
+        if !system.is_empty() {
+            config = config.with_merged_request_params(HashMap::from([(
+                "instructions".to_owned(),
+                Value::String(system.to_owned()),
+            )]));
+        }
+        (config, "")
+    }
+}
+
 /// The most `model` of `provider` may write in one answer, as oi-kit's model catalog has it.
 fn catalog_max_tokens(provider: &str, model: &str) -> Option<i32> {
     let limit = maybe_get_canonical_model(provider, model)?.limit;
@@ -91,7 +145,7 @@ impl Adapted {
 #[async_trait]
 impl Provider for Adapted {
     async fn complete(&self, request: &ModelRequest) -> Result<ModelReply, ProviderError> {
-        let config = self.settings.model_config(&request.model);
+        let (config, system) = self.settings.asking(&request.model, &request.system);
         let messages: Vec<OiKitMessage> = request.messages.iter().map(to_oi_kit).collect();
         let tools = request
             .tools
@@ -102,7 +156,7 @@ impl Provider for Adapted {
         // Rate limits, server errors and dropped connections are tried again, as the
         // provider's own policy says.
         let (message, usage) = retry_operation(&provider.retry_config(), || {
-            provider.complete(&config, &request.system, &messages, &tools)
+            provider.complete(&config, system, &messages, &tools)
         })
         .await
         .map_err(|error| ProviderError::new(error.to_string()))?;
@@ -346,6 +400,7 @@ mod tests {
     fn settings(provider: &str) -> Settings {
         Settings {
             provider: provider.to_owned(),
+            openai_path: None,
             max_tokens: None,
             temperature: None,
             thinking: None,
@@ -361,6 +416,48 @@ mod tests {
 
         let unknown = settings("openai_compatible").model_config("local");
         assert_eq!(unknown.max_output_tokens(), 4096);
+    }
+
+    fn openai(path: &str) -> Settings {
+        Settings {
+            openai_path: Some(path.to_owned()),
+            ..settings("openai")
+        }
+    }
+
+    #[test]
+    fn the_path_and_then_the_model_say_which_api_a_request_is_for() {
+        let standard = openai("v1/chat/completions");
+        assert!(standard.responses("gpt-6-luna"));
+        assert!(standard.responses("gpt-5.6-sol"));
+        assert!(!standard.responses("gpt-4o"));
+        assert!(openai("v1/responses").responses("local"));
+        assert!(!openai("chat/completions").responses("gpt-6-luna"));
+        assert!(!openai("api/v4/chat/completions").responses("gpt-6-luna"));
+        // Another protocol has no Responses API, whatever the model is called.
+        assert!(!settings("anthropic").responses("gpt-6-luna"));
+    }
+
+    #[test]
+    fn a_responses_request_takes_the_system_prompt_as_instructions_and_no_default_limit() {
+        let (config, system) = openai("v1/chat/completions").asking("gpt-6-luna", "Be brief.");
+        assert_eq!(system, "");
+        assert_eq!(config.request_params.unwrap()["instructions"], "Be brief.");
+        assert_eq!(config.max_tokens, None);
+
+        let stated = Settings {
+            max_tokens: Some(1000),
+            ..openai("v1/chat/completions")
+        };
+        let (config, _) = stated.asking("gpt-6-luna", "");
+        assert_eq!(config.max_tokens, Some(1000));
+        assert!(config.request_params.is_none());
+
+        // A chat-completions request is asked as before.
+        let (config, system) = openai("v1/chat/completions").asking("gpt-4o", "Be brief.");
+        assert_eq!(system, "Be brief.");
+        assert!(config.request_params.is_none());
+        assert!(config.max_tokens.is_some());
     }
 
     #[test]

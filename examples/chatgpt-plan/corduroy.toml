@@ -1,0 +1,95 @@
+# The default agent with its model paid for by a ChatGPT plan, not an API key.
+#
+#   cargo corduroy --agent examples/chatgpt-plan/corduroy.toml login
+#   cargo corduroy --agent examples/chatgpt-plan/corduroy.toml --workspace DIR run "..."
+#
+# `login` opens the browser once ("Continue with ChatGPT"); the sign-in is kept in your own
+# configuration directory, outside every workspace, and renewed as it runs out. `logout`
+# revokes it. Usage counts against your plan: https://chatgpt.com/settings/usage
+#
+# Everything but the provider is `examples/local-model/corduroy.toml`.
+
+system = """
+You are a careful coding agent working in {workspace}. Use the tools to do the task: read \
+before you change anything, keep changes small, check your work, then say briefly what you did."""
+provider = "chatgpt"
+model = "gpt-6-luna"   # a model your plan has; --model asks another
+max_turns = 20
+
+[providers.chatgpt]
+kind = "openai"
+secret = "chatgpt"      # the sign-in's token of the moment, with every request
+
+[secrets.chatgpt]
+kind = "chatgpt"        # a sign-in with ChatGPT; `corduroy login` makes it
+
+[kernels.shell]
+kind = "shell"
+
+[[plugins]]
+name = "pi-tools"
+path = "pi_tools.wasm"
+config = { kernel = "shell" }
+[plugins.grants]
+fs-read = ["{workspace}", "{workspace}/*"]
+fs-write = { allow = ["{workspace}", "{workspace}/*"], deny = ["{workspace}/.git/*"] }
+kernel = "shell"
+
+[[plugins]]
+name = "skills"
+path = "skills.wasm"
+config = { dir = "{data}/skills" }
+[plugins.grants]
+fs-read = ["{data}/skills", "{data}/skills/*"]
+fs-write = ["{data}/skills", "{data}/skills/*"]
+events = "skills/*"
+
+# `auto` lets every tool through, so a run needs nobody at the terminal; the workspace grants
+# above still bound what the tools can touch. Use `smart` to be asked before changes.
+[[plugins]]
+name = "approval"
+path = "approval.wasm"
+config = { mode = "auto" }
+
+[[plugins]]
+name = "inspect"
+path = "inspect.wasm"
+
+[[plugins]]
+name = "hints"
+path = "hints.wasm"
+config = { files = ["{workspace}/AGENTS.md", "{workspace}/.goosehints", "{workspace}/CLAUDE.md"] }
+grants = { fs-read = ["{workspace}/AGENTS.md", "{workspace}/.goosehints", "{workspace}/CLAUDE.md"] }
+
+[[plugins]]
+name = "todo"
+path = "todo.wasm"
+grants = { state = "*", session = "*" }
+
+[[plugins]]
+name = "memory"
+path = "memory.wasm"
+config = { dir = "{data}/memory" }
+grants = { fs-read = ["{data}/memory", "{data}/memory/*"], fs-write = ["{data}/memory", "{data}/memory/*"] }
+
+[[plugins]]
+name = "recall"
+path = "recall.wasm"
+grants = { log-read = ["*:message", "*:session/start"] }
+
+[[plugins]]
+name = "summarize"
+path = "summarize.wasm"
+config = { model = "chatgpt/gpt-6-luna" }   # an add-on names a model as <provider>/<model>
+grants = { fs-read = ["{workspace}", "{workspace}/*"], llm = "chatgpt/gpt-6-luna" }
+
+[[plugins]]
+name = "subagents"
+path = "subagents.wasm"
+grants = { service = "sessions" }
+
+[[plugins]]
+name = "compact"
+path = "compact.wasm"
+config = { model = "chatgpt/gpt-6-luna" }
+grants = { llm = "chatgpt/gpt-6-luna" }

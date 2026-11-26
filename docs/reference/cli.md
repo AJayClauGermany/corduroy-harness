@@ -12,6 +12,8 @@ corduroy [options] sessions remove <name>
 corduroy [options] log             print the event log, or with --session one session's part
 corduroy [options] report [N]      what the session's last run (or last N) did, with timings
 corduroy init                      write the default agent file to edit
+corduroy [options] login [name]    sign in for a secret that needs it (a ChatGPT plan)
+corduroy [options] logout [name]   sign out again
 corduroy --version                 print the version (and commit) of this build
 ```
 
@@ -107,6 +109,8 @@ provider, `reviewer`, so the `review` add-on asks OpenAI's model about Anthropic
 | `  ! plugin <name> failed/stopped: reason` | an add-on could not start, or trapped too often |
 | `  ↻ picking up a run that was cut short` | a restart |
 | `  [<session>] …` | a line from a sub-agent's session |
+| `Using ChatGPT plan. Manage usage: <address>` | before a run, when the model's provider is paid by a [ChatGPT sign-in](agent-file.md#secretsname): whose account the run is on, and where to see and limit what it uses |
+| a line after `the run failed: …` | when such a run fails for a reason that is the plan's (its usage limit, a sign-in no longer accepted, something a plan does not pay for): what you can do about it. Where OpenAI's reason carries no code, the line is a guess and says "if" |
 
 **Ctrl-C** while a run goes asks it to stop: the running tool is told, calls not yet begun do
 not run, and the run ends as stopped. A second Ctrl-C leaves at once, and the run is
@@ -120,6 +124,18 @@ unfinished until `continue` or `stop`.
 | 1 | the run failed, reached the turn limit, or is waiting; `check` found a plugin that did not start; any error |
 | 130 | the run was stopped (as after Ctrl-C) |
 
+**`login [name]`** Sign in for a secret of the agent file whose kind is signed in to: a
+[`kind = "chatgpt"`](agent-file.md#secretsname) secret, which is a ChatGPT plan. It opens
+the browser at OpenAI's sign-in ("Continue with ChatGPT"), prints the address in case it
+does not open, and waits up to five minutes for you to come back to it; the answer arrives
+on `127.0.0.1` (port 1455, or another if that one is taken). The first sign-in registers
+this tool for your account; later ones reuse that registration. What is kept is in your own
+configuration directory (see [Files](#files)), so every workspace whose agent names a secret
+of the same name shares the sign-in. `name` says which secret, where the file has several.
+The agent is not put together for this.
+
+**`logout [name]`** Revoke that sign-in with OpenAI and remove what was kept.
+
 ## Files
 
 | Path | What |
@@ -128,9 +144,10 @@ unfinished until `continue` or `stop`.
 | `<workspace>/.corduroy/log.jsonl` | the event log (the agent file's `log` moves it) |
 | `<workspace>/.corduroy/cache/` | compiled add-ons, so a second start is fast |
 | `<workspace>/.corduroy/skills/`, `memory/` | what the default agent's `skills` and `memory` add-ons keep |
+| `~/.config/corduroy/` (`$XDG_CONFIG_HOME/corduroy`; on Windows `%APPDATA%\corduroy`) | what is yours whatever you work on: `chatgpt/<secret>.json`, a ChatGPT sign-in (readable by you alone), and `host-id`, a random name for this computer that the sign-in sends |
 
-The agent file, the log and the cache are out of reach of every add-on's `fs-read` and
-`fs-write`, whatever its grants say.
+The agent file, the log, the cache and your own configuration directory are out of reach of
+every add-on's `fs-read` and `fs-write`, whatever its grants say.
 
 ## Environment
 
