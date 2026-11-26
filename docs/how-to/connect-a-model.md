@@ -16,9 +16,57 @@ kind = "anthropic"        # reads ANTHROPIC_API_KEY; "openai" reads OPENAI_API_K
 
 To read the key from another variable, add `api_key_env = "MY_KEY"`.
 
-## Name a secret instead
+## Keep the key in your keychain
 
-A provider can take its key from a `[secrets.<name>]` entry. The value is then read for
+A key in an environment variable is plain text that every program you start can read. Your
+operating system's keychain keeps it encrypted behind your login. The provider names a
+secret, and the secret says it is kept there:
+
+```toml
+[providers.main]
+kind = "anthropic"
+secret = "anthropic"
+
+[secrets.anthropic]
+kind = "keychain"         # may be left out: the keychain is where a secret is kept
+```
+
+Put the key in once. It is not shown as you type or paste it:
+
+```bash
+corduroy secrets set anthropic
+```
+
+Or copy it from the variable it is in now, and then take the variable out of your shell's
+start-up file:
+
+```bash
+printenv ANTHROPIC_API_KEY | corduroy secrets set anthropic
+```
+
+`corduroy init` writes an agent this way wherever the machine has a keychain, and tells you
+this command. Then see that it works:
+
+```bash
+corduroy secrets          # is each key there?
+```
+
+```bash
+corduroy doctor           # does the model answer with it?
+```
+
+The item is yours, not the workspace's: every agent file of yours with a
+`[secrets.anthropic]` of this kind reads it. `corduroy secrets remove anthropic` takes it
+out. On a machine without a keychain (a server, a container) there is nothing to fall back
+to: use `env` there, below.
+
+On macOS the copy of `corduroy` that put an item in the Keychain reads it without being
+asked. Another copy (a build you made again after changing the code) may be asked whether
+it may use the item; "Always Allow" then holds for that copy.
+
+## Name a secret read from the environment
+
+A provider can take its key from any `[secrets.<name>]` entry. The value is then read for
 every request, not once at the start, so a key that is replaced while the agent runs is the
 one sent:
 
@@ -45,10 +93,10 @@ kind = "openai"
 secret = "chatgpt"
 
 [secrets.chatgpt]
-kind = "chatgpt"
+kind = "chatgpt"          # the sign-in is kept in your keychain
 ```
 
-Sign in once, in the browser:
+`corduroy init chatgpt` writes the whole agent this way. Sign in once, in the browser:
 
 ```bash
 corduroy login
@@ -60,8 +108,16 @@ use it from; see and limit it at <https://chatgpt.com/settings/usage>. A request
 does not cover fails the run with OpenAI's reason, followed by what you can do about it
 (the usage page, or `corduroy login` again): nothing falls back to another way of paying. Do not set `max_tokens` on this provider: a plan-paid request is refused a limit.
 
-On a machine with no browser, sign in on one that has, then copy
-`~/.config/corduroy/chatgpt/chatgpt.json` over a secure channel to the same place there.
+The tokens are in your keychain and no file holds them. `corduroy secrets` says who is
+signed in, where the sign-in is kept and how long its token is good for. If you signed in
+with an earlier build, the sign-in is still in `~/.config/corduroy/chatgpt/chatgpt.json`:
+run `corduroy login` once more, and it is moved into the keychain without the browser.
+
+On a machine without a keychain (a server, a container) the sign-in has to be kept in a
+file, and the entry has to say so: add `keep = "file"`. It is then in
+`~/.config/corduroy/chatgpt/chatgpt.json`, readable by you alone. For a machine with no
+browser either, sign in on one that has, with `keep = "file"`, then copy that file over a
+secure channel to the same place there.
 
 `examples/chatgpt-plan/corduroy.toml` is the default agent set up this way.
 
@@ -74,6 +130,11 @@ model = "qwen3"
 [providers.main]
 kind = "ollama"           # http://localhost:11434 unless base_url says otherwise
 ```
+
+This is also what `corduroy` asks when a workspace has no agent file: the default agent
+reads no key, so a model served on this machine is the one it can ask. It says so before a
+run. For any other model, `corduroy init anthropic` (or `openai`, `chatgpt`) writes the
+agent file.
 
 ## Any OpenAI- or Anthropic-compatible endpoint
 

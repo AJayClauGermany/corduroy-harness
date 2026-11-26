@@ -1,5 +1,20 @@
 # Report a problem
 
+## First, is it the agent or what it stands on?
+
+```sh
+corduroy doctor
+```
+
+`doctor` tries each part the agent stands on and says which does not work: whether every
+key and sign-in can be had (without reading one out), whether each kernel runs a command,
+and whether each model the agent names answers one short question. A missing key, a spent
+sign-in or a model that is refused shows here in seconds, with what to do, before any run
+is spent on it. Its output holds no secret and is safe to paste. `corduroy secrets` alone is
+the part about keys.
+
+## Then, what a run did
+
 When a run does something you did not expect, the log already has what happened and when.
 `corduroy report` puts the useful part of it in one piece to hand over, so nothing has to be
 copied out of the terminal.
@@ -42,4 +57,4 @@ send it.
 - The log itself, `<workspace>/.corduroy/log.jsonl`, is plain text, one commit per line, and
   is the complete record. [Events](../reference/events.md) says how to read it.
 - `corduroy check` alone tells whether the agent can be put together at all, and which
-  add-on did not start.
+  add-on did not start, without asking a model or a kernel anything.

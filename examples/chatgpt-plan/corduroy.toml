@@ -3,9 +3,12 @@
 #   cargo corduroy --agent examples/chatgpt-plan/corduroy.toml login
 #   cargo corduroy --agent examples/chatgpt-plan/corduroy.toml --workspace DIR run "..."
 #
-# `login` opens the browser once ("Continue with ChatGPT"); the sign-in is kept in your own
-# configuration directory, outside every workspace, and renewed as it runs out. `logout`
-# revokes it. Usage counts against your plan: https://chatgpt.com/settings/usage
+# `login` opens the browser once ("Continue with ChatGPT"); the sign-in is kept in your
+# keychain, outside every workspace, and renewed as it runs out. `logout` revokes it. Usage
+# counts against your plan: https://chatgpt.com/settings/usage
+#
+# On a machine without a keychain, add `keep = "file"` under [secrets.chatgpt]: the sign-in
+# is then kept in a file in your own configuration directory.
 #
 # Everything but the provider is `examples/local-model/corduroy.toml`.
 

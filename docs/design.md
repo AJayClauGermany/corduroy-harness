@@ -580,10 +580,11 @@ and whatever holds the host's authority was compiled in by whoever built the bin
 
 - **Turning on an extension the command already has is configuration.** The shipped
   command has the providers and the kinds `shell-kernel`, `powershell-kernel`, `mcp`,
-  `env-secret` and `http-client`; the agent file picks which are loaded (`[providers.*]`,
+  `env-secret`, `keychain-secret`, `chatgpt-secret` and `http-client`; the agent file picks which are loaded (`[providers.*]`,
   `[kernels.*]`, `[mcp.*]`, `[secrets.*]`, `[extensions.<name>]`). Every entry but a
   provider is built from a kind of the command's `Standard`, so a command of one's own can
-  swap any of them (secrets from a keychain, a sandboxed kernel) without touching the rest;
+  swap any of them (secrets from a vault of its own, a sandboxed kernel) without touching
+  the rest;
   provider kinds are to join them ([How people meet it](#how-people-meet-it)). A new *kind* of
   extension is Rust in a command of one's own (see [In the `corduroy`
   command](#in-the-corduroy-command) below). Native code is never loaded at run time.
@@ -1910,9 +1911,10 @@ is supported are still open (A11), as is whether a review from outside is a cond
 
 Five things are decided here: what a person reaches the agent through, what the standard set
 holds at 1.0, where a credential comes from, which parts of a provider's entry are ours, and
-what an add-on is as something kept and passed on. All of it is *planned*. The code is as
-[Three tiers](#three-tiers-core-extensions-add-ons) and the [reference](README.md#reference)
-pages describe it, and [Order of work](#order-of-work) lists what changes.
+what an add-on is as something kept and passed on. Most of it is *planned*; the keychain is
+built. The code is as [Three tiers](#three-tiers-core-extensions-add-ons) and the
+[reference](README.md#reference) pages describe it, and [Order of work](#order-of-work)
+lists what is built and what changes.
 
 **The terminal is the front end of 1.0.** The command ships no server and speaks no
 protocol, so no wire format freezes with 1.0. Driving the harness from another program
@@ -1988,6 +1990,44 @@ person's own login. It costs one step, once, and that step is accepted.
 - *No file of variables.* A `.env` file is not a source. A password manager's secrets
   service, or a tool that describes secrets by a schema, is a kind that can be added after
   1.0, since kinds are added and none is renamed.
+
+As built (`corduroy-keychain`, and the `keychain-secret` kind of the standard set): the
+keychain is a part of the `Standard` like the log's store, so a command of one's own swaps
+it and the tests hand in one that lives in memory. An item is kept under the service
+`corduroy` and the entry's name, so it is the person's and shared by their agents, as a
+sign-in is. It is read when first needed and kept for the rest of that run of the command,
+since a keychain may ask the person each time it is read. A ChatGPT sign-in is kept there
+too; the Windows Credential Manager takes 2560 bytes in an item, less than a sign-in's
+tokens, so a long value is kept as numbered pieces there.
+
+The keychain is what an entry gets by saying nothing, and the less safe source is the one
+that has to be written. A `[secrets.<name>]` entry with no `kind` is kept in the keychain;
+it is read from the environment only by naming the variable (`env`). A sign-in is kept in
+the keychain unless its entry says `keep = "file"`. Neither is what a machine without a
+keychain gets by itself: the entry fails there until it says so. Only `init`, which the
+person runs and which says what it did, writes the environment or the file for such a
+machine.
+
+The agent used when there is no agent file reads nothing from the environment. It used to
+ask Anthropic or OpenAI if their variable was set, which was a key read with no file saying
+so, and could not have gone on once keys were in the keychain: there is no variable left to
+tell whose model is wanted. So the built-in default asks a model served on the machine,
+which needs no key, says which agent it is before a run, and says `corduroy init` when the
+run fails. Looking at the environment to choose a vendor is `init`'s, which the person
+runs.
+
+Three things were settled by use. The command that puts a value in is `corduroy secrets
+set`: `login` was offered for it as well and felt wrong for a key, since signing in is what
+one does to a subscription, so `login` and `logout` are for what is signed in to and say so
+when asked about a key. `init`'s default held up on a machine with a keychain: what it
+prints was enough to get from a key in a variable to a model that answers. And the command
+that tries an agent for real is `doctor`, beside `check`, which only says what the agent
+has: commands are named as far apart in meaning as they can be, so that no two are taken
+for each other. If `check` turns out to be where others look for it, an alias or a hint
+there can be added; none is assumed now. The other names in use (the kind `keychain`,
+`keep`, `secret` on an MCP entry) are not final: they are the ones
+[H7](open-questions.md#h7-are-the-agent-files-older-names-final) is to confirm, and
+[Trials](trials.md) lists what is still to try.
 
 **A provider's entry is ours.** The agent file is a stable contract, and `[providers.*]`
 followed whatever the provider library accepts. What is promised is a named list.
@@ -2299,15 +2339,25 @@ the step it waits on is done.
     read.
 17. How [people meet it](#how-people-meet-it). *Built:* `secret` on a provider entry, its
     value taken from `Secrets` for every request (beside `api_key_env`, which has not gone
-    yet); a `[secrets.*]` entry picking its kind with `kind`, and the first kind beside the
-    environment's, `chatgpt`: a ChatGPT plan signed in to through the browser
-    (`corduroy login`, `corduroy-chatgpt`), kept in the person's own directory and not the
-    keychain, which is not built. *Decided, not built:* the handle an
-    extension drives through gaining an answer to an ask and a stop; a keychain kind for
-    secrets on macOS, Windows and Linux, a command that puts a value into it, and `init`
-    preferring it; provider kinds as kinds of the `Standard`, five of them promised and the
+    yet), and on an MCP entry, as its bearer token (beside `bearer_token_env`); a
+    `[secrets.*]` entry picking its kind with `kind`; the keychain kind for macOS, Windows
+    and Linux (`corduroy-keychain`), a part of the `Standard` that can be swapped, with no
+    fallback where a machine has none; the command that puts a value into it without
+    showing it (`corduroy secrets set`; `login` stays for what is signed in to), and the one
+    that lists how every secret stands;
+    `init` writing keychain entries where the machine has a keychain and environment entries
+    where it has none; the `chatgpt` kind: a ChatGPT plan signed in to through the browser
+    (`corduroy login`, `corduroy-chatgpt`), kept in the keychain or, where its entry says
+    so, in the person's own directory; the keychain as what a `[secrets.*]` entry gets by
+    saying nothing, with the environment only where it names a variable; `corduroy doctor`,
+    which tries each credential, kernel and model; the agent with no file reading no key
+    (it asks a model served on the machine, says so, and points to `init`). *Decided, not built:* the handle an
+    extension drives through gaining an answer to an ask and a stop; provider kinds as
+    kinds of the `Standard`, five of them promised and the
     library's other names marked as outside the promise; `api_key_env` going from a
-    provider entry, nothing read from the environment unasked, and a missing key an
+    provider entry and `bearer_token_env` from an MCP entry, so that no agent file reads
+    the environment without naming the variable (an `anthropic` or `openai` provider that
+    names no secret still reads its own), and a missing key an
     error that names the line to add; oi-kit's shorthand that reads variables no longer
     offered; the
     folder store as the default once its proof has passed; a package (a folder with a

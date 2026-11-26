@@ -26,8 +26,17 @@ of the environment `corduroy` runs in, so a token it needs is listed, not inheri
 ```toml
 [mcp.docs]
 url = "https://mcp.example.com/mcp"
-bearer_token_env = "DOCS_MCP_TOKEN"   # the environment variable holding the token
+secret = "docs-mcp"                   # sent as the bearer token
+
+[secrets.docs-mcp]
+kind = "keychain"                     # put there with: corduroy secrets set docs-mcp
 ```
+
+The token is whatever the `[secrets.<name>]` entry says: kept in your keychain, as here, or
+read from a variable (`env = "DOCS_MCP_TOKEN"`). `bearer_token_env = "DOCS_MCP_TOKEN"` on the
+server's own entry still names a variable directly; give one or the other. The token is read
+when the server is connected to, so a server whose token is missing does not start, and
+`corduroy check` says why.
 
 ## Give it time
 

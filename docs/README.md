@@ -34,7 +34,8 @@ Using the `corduroy` command:
 - [Install a ready-made build](how-to/install-a-build.md): the command and its add-ons for
   Linux, macOS or Windows, without Rust.
 - [Connect a model](how-to/connect-a-model.md): Anthropic, OpenAI, Ollama, any compatible
-  endpoint, or a small model on your own machine.
+  endpoint, a ChatGPT plan, or a small model on your own machine, with its key kept in your
+  keychain.
 - [Have a second model review the work](how-to/review-with-a-second-model.md): Claude writes,
   GPT reviews, or the other way round.
 - [Grant an add-on what it needs](how-to/grant-capabilities.md), and find out why one did not
@@ -43,8 +44,9 @@ Using the `corduroy` command:
   deny lists, unattended runs.
 - [Stop, resume and recover runs](how-to/recover-runs.md): Ctrl-C, `continue`, `stop`,
   sessions.
-- [Report a problem](how-to/report-a-problem.md): `corduroy report`, what a run did and how
-  long each part took, in one piece to hand over.
+- [Report a problem](how-to/report-a-problem.md): `corduroy doctor`, which tries the agent
+  part by part, and `corduroy report`, what a run did and how long each part took, in one
+  piece to hand over.
 - [Add an MCP server](how-to/add-an-mcp-server.md).
 - [Give an add-on a secret](how-to/use-secrets-and-http.md) and let it make HTTP requests.
 
@@ -91,3 +93,5 @@ Working on corduroy itself:
 - [Open questions before 1.0](open-questions.md): every decision still to make before the
   core is frozen. Questions and directions only; a decided one moves to the page its answer
   belongs on.
+- [Trials](trials.md): the open questions that can be tried both ways today, with the
+  commands for each way and a line for what you found.

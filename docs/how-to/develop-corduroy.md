@@ -37,6 +37,21 @@ For the JavaScript and Python plugins and their tests, Node.js 20+ and Python 3.
 Tests never need a network or a model: they drive the loop with `ScriptedProvider`. A test
 that does not end is killed after 15 seconds.
 
+Nor do they touch your keychain. The command's tests run it in the test's own process with a
+keychain in memory (`corduroy_std::keychain::Memory`, handed to `Standard::with_keychain`).
+One test, in `corduroy-keychain`, uses the system's own, and only where
+`CORDUROY_REQUIRE_KEYCHAIN` is set, as it is in CI on Linux, macOS and Windows: it keeps a
+throwaway item (`corduroy-test-<pid>`), reads it back and removes it, and fails if there is
+no keychain. To run it against yours:
+
+```bash
+CORDUROY_REQUIRE_KEYCHAIN=1 cargo nextest run -p corduroy-keychain
+```
+
+On Linux, CI has no desktop session, so it gives the test a D-Bus session and a keyring made
+for it (`dbus-run-session`, `gnome-keyring-daemon --unlock`). That recipe is for a machine
+nobody uses: on your own, the line above uses the keyring you are logged in to.
+
 ## Check
 
 ```bash

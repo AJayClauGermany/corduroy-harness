@@ -7,8 +7,11 @@
 //!
 //! [`Standard`]: crate::Standard
 
+use std::sync::Arc;
+
 use corduroy_chatgpt::sign_in::{Front, open_in_browser};
-use corduroy_chatgpt::{ChatGpt, USAGE_URL, advice};
+use corduroy_chatgpt::{ChatGpt, Record, USAGE_URL, advice};
+use corduroy_keychain::Keychain;
 
 use crate::extension::{Asked, chatgpt_in};
 
@@ -43,33 +46,77 @@ pub trait SignIn: Send + Sync {
 }
 
 /// Sign in with `ChatGPT`, through the person's browser.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ChatGptSignIn;
+///
+/// The sign-in is kept in the keychain this was made with, or, where its entry says
+/// `keep = "file"`, in a file of the person's own.
+#[derive(Clone)]
+pub struct ChatGptSignIn {
+    keychain: Arc<dyn Keychain>,
+}
+
+impl std::fmt::Debug for ChatGptSignIn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChatGptSignIn")
+            .field("keychain", &self.keychain.name())
+            .finish()
+    }
+}
+
+impl ChatGptSignIn {
+    /// Signing in, with `keychain` for the entries that keep their sign-in in one.
+    #[must_use]
+    pub const fn new(keychain: Arc<dyn Keychain>) -> Self {
+        Self { keychain }
+    }
+}
+
+/// Say whose sign-in `record` is, and whether their plan pays.
+fn signed_in(record: &Record, say: &mut dyn FnMut(&str)) -> Result<(), String> {
+    let who = record.email.as_deref().unwrap_or("your account");
+    say(&format!("Signed in to ChatGPT as {who}."));
+    if record.plan() {
+        say("You're using your ChatGPT plan: eligible usage here uses it.");
+        say(&format!("Manage usage: {USAGE_URL}"));
+        Ok(())
+    } else {
+        Err(
+            "the use of your ChatGPT plan was not allowed, so no request can be paid by \
+             it: sign in again and allow it"
+                .to_owned(),
+        )
+    }
+}
 
 impl SignIn for ChatGptSignIn {
     fn sign_in(&self, asked: &Asked<'_>, say: &mut dyn FnMut(&str)) -> Result<(), String> {
-        let chatgpt: ChatGpt = chatgpt_in(asked)?;
+        let chatgpt: ChatGpt = chatgpt_in(asked, &self.keychain)?;
+        // A sign-in made while it was kept in a file is moved, not made again.
+        if chatgpt.store().adopt()?
+            && let Some(record) = chatgpt.store().load()?
+        {
+            say(&format!(
+                "Moved the sign-in from {} into {}.",
+                chatgpt.store().file().display(),
+                chatgpt.store().place()
+            ));
+            return signed_in(&record, say);
+        }
         let record = chatgpt.sign_in(&mut Front {
             open: &open_in_browser,
             say,
         })?;
-        let who = record.email.as_deref().unwrap_or("your account");
-        say(&format!("Signed in to ChatGPT as {who}."));
-        if record.plan() {
-            say("You're using your ChatGPT plan: eligible usage here uses it.");
-            say(&format!("Manage usage: {USAGE_URL}"));
-            Ok(())
-        } else {
-            Err(
-                "the use of your ChatGPT plan was not allowed, so no request can be paid by \
-                 it: sign in again and allow it"
-                    .to_owned(),
-            )
-        }
+        say(&format!(
+            "The sign-in is kept in {}.",
+            chatgpt.store().place()
+        ));
+        signed_in(&record, say)
     }
 
     fn sign_out(&self, asked: &Asked<'_>, say: &mut dyn FnMut(&str)) -> Result<(), String> {
-        if chatgpt_in(asked)?.sign_out()? {
+        let chatgpt = chatgpt_in(asked, &self.keychain)?;
+        // A sign-in still in the file it was first kept in is the one to revoke.
+        chatgpt.store().adopt()?;
+        if chatgpt.sign_out()? {
             say("Signed out of ChatGPT: the sign-in was revoked and its tokens removed.");
         } else {
             say("Nobody was signed in to ChatGPT.");

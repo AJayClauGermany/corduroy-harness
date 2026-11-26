@@ -15,10 +15,12 @@
 //!
 //! The agent file's other native entries are built the same way. `[kernels.<name>]` with
 //! `kind = "shell"` asks for the kind `shell-kernel` ([`kernel_kind`]), `[mcp.<name>]` for the
-//! kind [`MCP`] and `[secrets.<name>]` for the kind [`ENV_SECRET`], or `<kind>-secret` where
-//! the entry gives a `kind` ([`secret_kind`]), each with the entry's keys as its configuration. So a command built for another system can bring a kernel, an MCP
-//! client or a source of secrets of its own, under a kind of its own or under the standard
-//! kind's name.
+//! kind [`MCP`] and `[secrets.<name>]` for the kind [`KEYCHAIN_SECRET`], or [`ENV_SECRET`]
+//! where the entry names a variable, or `<kind>-secret` where it gives a `kind`
+//! ([`secret_kind`]: [`CHATGPT_SECRET`]), each
+//! with the entry's keys as its configuration. So a command built for another system can
+//! bring a kernel, an MCP client or a source of secrets of its own, under a kind of its own
+//! or under the standard kind's name.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -26,8 +28,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use corduroy_chatgpt::{ChatGpt, Store, chatgpt_secret};
+use corduroy_chatgpt::{ChatGpt, Store, Vault, chatgpt_secret};
 use corduroy_harness::core::{Plugin, SECRETS, Secret, Secrets, Spawn, plugin_fn};
+use corduroy_keychain::{Keychain, Os, keychain_secret};
 use corduroy_mcp::{Transport, mcp_server};
 use corduroy_shell::{ShellKernel, shell_kernel_of};
 use serde_json::Value;
@@ -37,12 +40,17 @@ use crate::places::Places;
 /// The extension kind a `[mcp.<name>]` entry is built from.
 pub const MCP: &str = "mcp";
 
-/// The extension kind a `[secrets.<name>]` entry is built from, unless it gives a `kind`.
+/// The extension kind of a secret read from the environment: what a `[secrets.<name>]` entry
+/// that names a variable (`env`) is built from.
 pub const ENV_SECRET: &str = "env-secret";
 
 /// The extension kind of a secret that is a `ChatGPT` sign-in: what a `[secrets.<name>]`
 /// entry with `kind = "chatgpt"` is built from.
 pub const CHATGPT_SECRET: &str = "chatgpt-secret";
+
+/// The extension kind of a secret kept in the system's keychain: what a `[secrets.<name>]`
+/// entry is built from when it says `kind = "keychain"`, or says nothing at all.
+pub const KEYCHAIN_SECRET: &str = "keychain-secret";
 
 /// The extension kind a `[secrets.<name>]` entry of `kind` is built from: `<kind>-secret`.
 #[must_use]
@@ -160,7 +168,8 @@ fn shell_kernel_in(asked: &Asked<'_>, shell: ShellKernel) -> Built {
 }
 
 /// The MCP server `[mcp.<name>]` describes: a `command` started through a kernel (`shell` by
-/// default), or a `url`.
+/// default), or a `url`, with the `secret` or the variable (`bearer_token_env`) its bearer
+/// token comes from.
 fn mcp_server_in(asked: &Asked<'_>) -> Built {
     asked.only(&[
         "command",
@@ -168,9 +177,17 @@ fn mcp_server_in(asked: &Asked<'_>) -> Built {
         "env",
         "kernel",
         "url",
+        "secret",
         "bearer_token_env",
         "timeout_seconds",
     ])?;
+    let secret = asked.text("secret");
+    if secret.is_some() && asked.text("url").is_none() {
+        return Err("`secret` is the bearer token of a server at a `url`".to_owned());
+    }
+    if secret.is_some() && asked.text("bearer_token_env").is_some() {
+        return Err("names both a `secret` and a `bearer_token_env`: give one".to_owned());
+    }
     let transport = match (asked.text("command"), asked.text("url")) {
         (Some(command), None) => Transport::Stdio {
             kernel: asked.text("kernel").unwrap_or("shell").to_owned(),
@@ -195,6 +212,10 @@ fn mcp_server_in(asked: &Asked<'_>) -> Built {
         _ => return Err("needs a `command` or a `url`, not both".to_owned()),
     };
     let server = mcp_server(asked.name, transport);
+    let server = match secret {
+        Some(secret) => server.with_secret(secret),
+        None => server,
+    };
     Ok(Box::new(match asked.config.get("timeout_seconds") {
         None => server,
         Some(seconds) => server.with_timeout(Duration::from_secs(
@@ -208,8 +229,7 @@ fn mcp_server_in(asked: &Asked<'_>) -> Built {
 /// The secret `[secrets.<name>]` describes, read from the environment variable `env` each
 /// time a plugin's request needs it.
 fn env_secret_in(asked: &Asked<'_>) -> Built {
-    asked.only(&["env"])?;
-    let variable = asked.text("env").ok_or("`env` is required")?.to_owned();
+    let variable = env_variable(asked)?.to_owned();
     let name = asked.name.to_owned();
     Ok(Box::new(plugin_fn(
         format!("secret-{name}"),
@@ -226,24 +246,92 @@ fn env_secret_in(asked: &Asked<'_>) -> Built {
     )))
 }
 
-/// The `ChatGPT` sign-in `[secrets.<name>]` names: the one kept under the entry's name in
-/// the person's own directory, so that every agent of theirs that names it shares it.
+/// The variable a `[secrets.<name>]` entry of the kind [`ENV_SECRET`] reads.
 ///
 /// # Errors
 ///
-/// If the entry has a setting (the kind takes none), its name cannot name a file, or there
-/// is no directory of the person's own.
-pub fn chatgpt_in(asked: &Asked<'_>) -> Result<ChatGpt, String> {
-    asked.only(&[])?;
+/// If the entry has another setting, or no `env`.
+pub fn env_variable<'a>(asked: &'a Asked<'_>) -> Result<&'a str, String> {
+    asked.only(&["env"])?;
+    asked
+        .text("env")
+        .ok_or_else(|| "`env` is required".to_owned())
+}
+
+/// The entry's name, if it can name what a person keeps: a sign-in's file, an item of a
+/// keychain. `what` says which, for the error.
+fn plain_name<'a>(asked: &Asked<'a>, what: &str) -> Result<&'a str, String> {
     let plain = |character: char| character.is_ascii_alphanumeric() || "-_".contains(character);
     if asked.name.is_empty() || !asked.name.chars().all(plain) {
-        return Err(
-            "a ChatGPT sign-in is kept under its entry's name, which may hold only letters, \
-             digits, `-` and `_`"
-                .to_owned(),
-        );
+        return Err(format!(
+            "{what} is kept under its entry's name, which may hold only letters, digits, `-` \
+             and `_`"
+        ));
     }
-    Ok(ChatGpt::new(Store::named(&Places::person()?, asked.name)))
+    Ok(asked.name)
+}
+
+/// The name of the item a `[secrets.<name>]` entry of the kind [`KEYCHAIN_SECRET`] is kept
+/// as: the entry's own, so that every agent of a person's that names it shares the value.
+///
+/// # Errors
+///
+/// If the entry has a setting (the kind takes none), or its name cannot name an item.
+pub fn keychain_item<'a>(asked: &Asked<'a>) -> Result<&'a str, String> {
+    asked.only(&[])?;
+    plain_name(asked, "a secret in the keychain")
+}
+
+/// A `ChatGPT` sign-in as one item of a keychain. No entry's name holds a `.`, so the
+/// item is never one a `[secrets.<name>]` entry of the kind [`KEYCHAIN_SECRET`] reads.
+struct SignInItem {
+    keychain: Arc<dyn Keychain>,
+    item: String,
+}
+
+impl Vault for SignInItem {
+    fn name(&self) -> String {
+        self.keychain.name()
+    }
+
+    fn load(&self) -> Result<Option<String>, String> {
+        self.keychain.get(&self.item)
+    }
+
+    fn save(&self, text: &str) -> Result<(), String> {
+        self.keychain.set(&self.item, text)
+    }
+
+    fn remove(&self) -> Result<bool, String> {
+        self.keychain.remove(&self.item)
+    }
+}
+
+/// The `ChatGPT` sign-in `[secrets.<name>]` names.
+///
+/// It is the one kept under the entry's name, so that every agent of the person's that
+/// names it shares it. It is kept in `keychain`, as the item `chatgpt-sign-in.<name>`,
+/// unless the entry says `keep = "file"`: then in a file in the person's own directory.
+/// The file is the choice to write down, and never what a machine without a keychain gets
+/// by itself.
+///
+/// # Errors
+///
+/// If the entry has another setting, `keep` is neither, its name cannot name a file, or
+/// there is no directory of the person's own.
+pub fn chatgpt_in(asked: &Asked<'_>, keychain: &Arc<dyn Keychain>) -> Result<ChatGpt, String> {
+    asked.only(&["keep"])?;
+    let name = plain_name(asked, "a ChatGPT sign-in")?;
+    let store = Store::named(&Places::person()?, name);
+    let store = match asked.config.get("keep").map(Value::as_str) {
+        None | Some(Some("keychain")) => store.kept_in(Arc::new(SignInItem {
+            keychain: Arc::clone(keychain),
+            item: format!("chatgpt-sign-in.{name}"),
+        })),
+        Some(Some("file")) => store,
+        Some(_) => return Err("`keep` is \"keychain\" or \"file\"".to_owned()),
+    };
+    Ok(ChatGpt::new(store))
 }
 
 /// The plugin of an extension, or what is wrong with its entry.
@@ -278,12 +366,13 @@ impl Extensions {
     /// | `shell-kernel` | `dir` (default `{workspace}`), `program` (default `sh`; any POSIX shell, such as `bash`, Git for Windows' included), `env` (variables to set), `pass` (variables of the command's own environment to hand through) | a persistent shell as the kernel named like the entry, starting from an empty environment; what `[kernels.<name>]` with `kind = "shell"` builds |
     /// | `powershell-kernel` | `dir` (default `{workspace}`), `program` (default `powershell` on Windows, `pwsh` elsewhere), `env`, `pass` | a persistent PowerShell as the kernel named like the entry; what `[kernels.<name>]` with `kind = "powershell"` builds |
     /// | `http-client` | none | the client the `http` capability sends through, for `http` and `https` |
-    /// | `mcp` | `command` (with `args`, `env` and `kernel`, `shell` by default) or `url` (with `bearer_token_env`), and `timeout_seconds` | the tools of one MCP server, as `<name>__<tool>`; what `[mcp.<name>]` builds |
+    /// | `mcp` | `command` (with `args`, `env` and `kernel`, `shell` by default) or `url` (with `secret` or `bearer_token_env`), and `timeout_seconds` | the tools of one MCP server, as `<name>__<tool>`; what `[mcp.<name>]` builds |
     /// | `env-secret` | `env` | the secret named like the entry, read from that environment variable when it is used; what `[secrets.<name>]` builds |
-    /// | `chatgpt-secret` | none | the secret named like the entry: the access token of a `ChatGPT` sign-in (`corduroy login`), renewed as it runs out; what `[secrets.<name>]` with `kind = "chatgpt"` builds |
+    /// | `keychain-secret` | none | the secret named like the entry, read from the system's keychain (the macOS Keychain, the Windows Credential Manager, the Secret Service) when it is first used; what `[secrets.<name>]` with `kind = "keychain"` builds |
+    /// | `chatgpt-secret` | `keep` (`keychain`, the default, or `file`) | the secret named like the entry: the access token of a `ChatGPT` sign-in (`corduroy login`), renewed as it runs out; what `[secrets.<name>]` with `kind = "chatgpt"` builds |
     #[must_use]
     pub fn builtin() -> Self {
-        Self::none()
+        let kinds = Self::none()
             .kind(kernel_kind("shell"), |asked| {
                 let shell = asked
                     .text("program")
@@ -300,14 +389,30 @@ impl Extensions {
                 asked.only(&[])?;
                 Ok(Box::new(corduroy_http::http_client()))
             })
-            .kind(MCP, mcp_server_in)
-            .kind(ENV_SECRET, env_secret_in)
-            .kind(CHATGPT_SECRET, |asked| {
-                Ok(Box::new(chatgpt_secret(
-                    asked.name.to_owned(),
-                    chatgpt_in(asked)?,
-                )))
-            })
+            .kind(MCP, mcp_server_in);
+        let system: Arc<dyn Keychain> = Arc::new(Os::new());
+        kinds.kind(ENV_SECRET, env_secret_in).keeping_in(&system)
+    }
+
+    /// With the kinds that keep something in a keychain reading `keychain`:
+    /// [`KEYCHAIN_SECRET`], and [`CHATGPT_SECRET`] for an entry that does not say `keep = "file"`.
+    #[must_use]
+    pub fn keeping_in(self, keychain: &Arc<dyn Keychain>) -> Self {
+        let (items, sign_ins) = (Arc::clone(keychain), Arc::clone(keychain));
+        self.kind(KEYCHAIN_SECRET, move |asked| {
+            let item = keychain_item(asked)?;
+            Ok(Box::new(keychain_secret(
+                asked.name.to_owned(),
+                Arc::clone(&items),
+                item.to_owned(),
+            )))
+        })
+        .kind(CHATGPT_SECRET, move |asked| {
+            Ok(Box::new(chatgpt_secret(
+                asked.name.to_owned(),
+                chatgpt_in(asked, &sign_ins)?,
+            )))
+        })
     }
 
     /// Add the kind `name`, built by `build`. A kind of that name already there is replaced.

@@ -7,16 +7,29 @@ secret's name, never its value, and leaves response bodies out.
 ## 1. Declare the secret
 
 ```toml
-[secrets.github]
-env = "GITHUB_AUTH"       # read from this environment variable when a request needs it
+[secrets.github]          # kept in your keychain; nothing more to write
 ```
 
-The value is written into the header exactly as it is, so put the whole header value in the
-variable:
+Put the value in once. It is written into the header exactly as it is, so give the whole
+header value (`Bearer ghp_...`); it is not shown as you type or paste it:
+
+```bash
+corduroy secrets set github
+```
+
+Where there is no keychain (a server, a container), or the value is already in a variable
+there, name the variable and it is read from the environment when a request needs it:
+
+```toml
+[secrets.github]
+env = "GITHUB_AUTH"
+```
 
 ```bash
 export GITHUB_AUTH="Bearer ghp_..."
 ```
+
+The add-on cannot tell the difference: it gets the same handle either way.
 
 ## 2. Use it from the add-on
 

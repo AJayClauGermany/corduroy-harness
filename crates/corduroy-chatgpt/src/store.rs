@@ -1,9 +1,11 @@
-//! Where a sign-in's tokens are kept: a file of the person's own, outside every workspace.
+//! Where a sign-in's tokens are kept: a file of the person's own, outside every workspace,
+//! or a [`Vault`] such as the system's keychain.
 
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -96,11 +98,53 @@ impl Record {
     }
 }
 
-/// The file one sign-in is kept in, and the host's ID beside it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Somewhere other than a file that keeps one sign-in, as text: the system's keychain.
+///
+/// What it is handed holds the tokens. It keeps them for the person alone, and puts them
+/// in no error.
+pub trait Vault: Send + Sync {
+    /// What it is, as a person would call it: `the macOS Keychain`.
+    fn name(&self) -> String;
+
+    /// What is kept, if anything is.
+    ///
+    /// # Errors
+    ///
+    /// If it cannot be reached or refuses.
+    fn load(&self) -> Result<Option<String>, String>;
+
+    /// Keep `text`, in place of what was kept.
+    ///
+    /// # Errors
+    ///
+    /// If it cannot be reached or refuses.
+    fn save(&self, text: &str) -> Result<(), String>;
+
+    /// Forget what is kept. Returns whether there was something.
+    ///
+    /// # Errors
+    ///
+    /// If it cannot be reached or refuses.
+    fn remove(&self) -> Result<bool, String>;
+}
+
+/// Where one sign-in is kept: a file, or a [`Vault`]. The host's ID, which is no secret, and
+/// the lock a renewal takes are files either way.
+#[derive(Clone)]
 pub struct Store {
     file: PathBuf,
     host: PathBuf,
+    vault: Option<Arc<dyn Vault>>,
+}
+
+impl fmt::Debug for Store {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Store")
+            .field("file", &self.file)
+            .field("host", &self.host)
+            .field("vault", &self.vault.as_ref().map(|vault| vault.name()))
+            .finish()
+    }
 }
 
 impl Store {
@@ -110,7 +154,47 @@ impl Store {
         Self {
             file: file.into(),
             host: host.into(),
+            vault: None,
         }
+    }
+
+    /// Keeping the sign-in in `vault` and not in the file. The file still names the lock
+    /// beside it, and is where a sign-in kept before is [taken over](Self::adopt) from.
+    #[must_use]
+    pub fn kept_in(mut self, vault: Arc<dyn Vault>) -> Self {
+        self.vault = Some(vault);
+        self
+    }
+
+    /// Where the sign-in is kept, as a person would call it: the vault's name, or the file.
+    #[must_use]
+    pub fn place(&self) -> String {
+        self.vault
+            .as_ref()
+            .map_or_else(|| self.file.display().to_string(), |vault| vault.name())
+    }
+
+    /// Move a sign-in kept in the file into the vault, if this store keeps in one and has
+    /// nothing there yet: what a person who signed in before the vault was chosen has.
+    /// Returns whether there was one to move.
+    ///
+    /// # Errors
+    ///
+    /// If either cannot be read, or the vault does not take it. The file is removed only
+    /// once the vault has it.
+    pub fn adopt(&self) -> Result<bool, String> {
+        let Some(vault) = &self.vault else {
+            return Ok(false);
+        };
+        if vault.load()?.is_some() {
+            return Ok(false);
+        }
+        let Some(record) = self.read_file()? else {
+            return Ok(false);
+        };
+        self.save(&record)?;
+        self.remove_file()?;
+        Ok(true)
     }
 
     /// The store of the sign-in called `name` under `dir`, the person's own directory for
@@ -123,7 +207,7 @@ impl Store {
         )
     }
 
-    /// The file the tokens are in.
+    /// The file the tokens are in, unless a vault keeps them.
     #[must_use]
     pub fn file(&self) -> &Path {
         &self.file
@@ -133,29 +217,60 @@ impl Store {
         format!("{what} {}: {error}", self.file.display())
     }
 
+    /// The sign-in `text` holds. What is wrong with it is said without the text.
+    fn parsed(&self, text: &str) -> Result<Record, String> {
+        serde_json::from_str(text).map_err(|error| {
+            // Where, and of what kind: never the line's own text, which holds the tokens.
+            format!(
+                "no sign-in is in {}: {:?} at line {}",
+                self.place(),
+                error.classify(),
+                error.line()
+            )
+        })
+    }
+
+    fn read_file(&self) -> Result<Option<Record>, String> {
+        match fs::read_to_string(&self.file) {
+            Ok(text) => self.parsed(&text).map(Some),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(self.failed("cannot read", &error)),
+        }
+    }
+
+    fn remove_file(&self) -> Result<bool, String> {
+        match fs::remove_file(&self.file) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(self.failed("cannot remove", &error)),
+        }
+    }
+
     /// The sign-in kept here, if there is one.
     ///
     /// # Errors
     ///
-    /// If the file is there and cannot be read, or is not a sign-in.
+    /// If what is kept cannot be read, or is not a sign-in.
     pub fn load(&self) -> Result<Option<Record>, String> {
-        let text = match fs::read_to_string(&self.file) {
-            Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(self.failed("cannot read", &error)),
-        };
-        serde_json::from_str(&text)
-            .map(Some)
-            .map_err(|error| self.failed("no sign-in is in", &error))
+        match &self.vault {
+            Some(vault) => vault.load()?.map(|text| self.parsed(&text)).transpose(),
+            None => self.read_file(),
+        }
     }
 
-    /// Keep `record`, in place of what was here. The file is written whole beside the old
+    /// Keep `record`, in place of what was here. A file is written whole beside the old
     /// one and moved over it, and is the person's alone to read.
     ///
     /// # Errors
     ///
-    /// If the file cannot be written.
+    /// If it cannot be written.
     pub fn save(&self, record: &Record) -> Result<(), String> {
+        if let Some(vault) = &self.vault {
+            // One line: a keychain's own tools show a value better so.
+            let text = serde_json::to_string(record)
+                .map_err(|error| format!("cannot keep the sign-in: {error}"))?;
+            return vault.save(&text);
+        }
         let text = serde_json::to_string_pretty(record)
             .map_err(|error| self.failed("cannot write", &error))?;
         write_private(&self.file, &text).map_err(|error| self.failed("cannot write", &error))
@@ -165,13 +280,11 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// If the file is there and cannot be removed.
+    /// If it is there and cannot be removed.
     pub fn remove(&self) -> Result<bool, String> {
-        match fs::remove_file(&self.file) {
-            Ok(()) => Ok(true),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(error) => Err(self.failed("cannot remove", &error)),
-        }
+        self.vault
+            .as_ref()
+            .map_or_else(|| self.remove_file(), |vault| vault.remove())
     }
 
     /// This host's ID: made once, kept, and the same at every sign-in from here. It names
@@ -276,6 +389,89 @@ mod tests {
         }
         assert!(store.remove().unwrap());
         assert!(!store.remove().unwrap());
+    }
+
+    /// A vault that keeps its text in memory.
+    #[derive(Default)]
+    struct Pocket(std::sync::Mutex<Option<String>>);
+
+    impl Pocket {
+        fn held(&self) -> Option<String> {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    impl Vault for Pocket {
+        fn name(&self) -> String {
+            "a pocket".to_owned()
+        }
+
+        fn load(&self) -> Result<Option<String>, String> {
+            Ok(self.held())
+        }
+
+        fn save(&self, text: &str) -> Result<(), String> {
+            *self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(text.to_owned());
+            Ok(())
+        }
+
+        fn remove(&self) -> Result<bool, String> {
+            Ok(self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+                .is_some())
+        }
+    }
+
+    #[test]
+    fn a_sign_in_kept_in_a_vault_leaves_no_file_and_takes_over_one_kept_before() {
+        let dir = scratch("chatgpt-vault");
+        let in_file = Store::named(&dir, "plan");
+        let pocket = Arc::new(Pocket::default());
+        let store = in_file.clone().kept_in(Arc::<Pocket>::clone(&pocket));
+        assert_eq!(store.place(), "a pocket");
+
+        // Nothing anywhere: nothing to take over.
+        assert!(!store.adopt().unwrap());
+        // A sign-in made while it was kept in a file moves, and the file goes.
+        in_file.save(&record(100)).unwrap();
+        assert_eq!(store.load().unwrap(), None);
+        assert!(store.adopt().unwrap());
+        assert_eq!(store.load().unwrap(), Some(record(100)));
+        assert!(!in_file.file().exists());
+        assert!(!store.adopt().unwrap());
+
+        // Saved again, it is the vault that changes, and the file stays away.
+        store.save(&record(200)).unwrap();
+        assert_eq!(store.load().unwrap(), Some(record(200)));
+        assert!(!in_file.file().exists());
+        // What is in the vault takes precedence over a file that turns up later.
+        in_file.save(&record(300)).unwrap();
+        assert!(!store.adopt().unwrap());
+        assert_eq!(store.load().unwrap(), Some(record(200)));
+
+        assert!(store.remove().unwrap());
+        assert_eq!(pocket.held(), None);
+        assert!(!store.remove().unwrap());
+    }
+
+    #[test]
+    fn what_is_kept_but_is_no_sign_in_is_said_without_repeating_it() {
+        let dir = scratch("chatgpt-vault-bad");
+        let pocket = Arc::new(Pocket::default());
+        pocket.save("{\"access_token\": \"s3cret\"").unwrap();
+        let store = Store::named(&dir, "plan").kept_in(pocket);
+        let error = store.load().unwrap_err();
+        assert!(error.starts_with("no sign-in is in a pocket: "), "{error}");
+        assert!(!error.contains("s3cret"), "{error}");
     }
 
     #[test]

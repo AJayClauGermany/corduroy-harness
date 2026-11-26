@@ -11,7 +11,9 @@
 //!   kernel ([`Kernels::spawn`]), never directly: what a kernel does to the code it runs (a
 //!   container, a sandbox) it does to the MCP servers it starts, so the choice of kernel stays
 //!   the one decision about running code.
-//! * **Over streamable HTTP**, at a URL, optionally with a bearer token.
+//! * **Over streamable HTTP**, at a URL, optionally with a bearer token: one handed over, or
+//!   the secret a name stands for in the [`Secrets`] registry
+//!   ([`McpPlugin::with_secret`]), revealed when the server is connected to.
 //!
 //! The client runs on a thread of its own with its own async runtime, because a plugin is
 //! applied, and a tool called, from synchronous code that may itself be inside the loop's
@@ -39,8 +41,8 @@ use std::time::Duration;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use corduroy_core::{
-    Content, Context, KERNELS, Kernels, Plugin, PluginError, Process, Spawn, TOOLS, Tool,
-    ToolError, ToolOutput, ToolSpec, Tools,
+    Content, Context, KERNELS, Kernels, Plugin, PluginError, Process, SECRETS, Secrets, Spawn,
+    TOOLS, Tool, ToolError, ToolOutput, ToolSpec, Tools,
 };
 use rmcp::ServiceExt as _;
 use rmcp::model::{CallToolRequestParams, CallToolResult, JsonObject};
@@ -81,6 +83,9 @@ pub struct McpPlugin {
     /// The server's name, which its tools are prefixed with.
     server: String,
     transport: Transport,
+    /// The secret sent as the bearer token of a server over HTTP, in place of the
+    /// transport's own.
+    secret: Option<String>,
     timeout: Duration,
 }
 
@@ -103,6 +108,7 @@ pub fn mcp_server(name: impl Into<String>, transport: Transport) -> McpPlugin {
         name: format!("mcp-{server}"),
         server,
         transport,
+        secret: None,
         timeout: DEFAULT_TIMEOUT,
     }
 }
@@ -112,6 +118,15 @@ impl McpPlugin {
     #[must_use]
     pub const fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Send the secret registered as `secret` as the bearer token of a server over HTTP, in
+    /// place of the transport's own. It is revealed once, when the server is connected to,
+    /// so the secret has to be registered before this plugin is loaded.
+    #[must_use]
+    pub fn with_secret(mut self, secret: impl Into<String>) -> Self {
+        self.secret = Some(secret.into());
         self
     }
 }
@@ -124,6 +139,9 @@ impl Plugin for McpPlugin {
     fn inject(&self) -> Vec<String> {
         match self.transport {
             Transport::Stdio { .. } => vec![TOOLS.to_owned(), KERNELS.to_owned()],
+            Transport::Http { .. } if self.secret.is_some() => {
+                vec![TOOLS.to_owned(), SECRETS.to_owned()]
+            }
             Transport::Http { .. } => vec![TOOLS.to_owned()],
         }
     }
@@ -137,10 +155,23 @@ impl Plugin for McpPlugin {
                 })?;
                 Connection::Process(process)
             }
-            Transport::Http { url, bearer_token } => Connection::Http {
-                url: url.clone(),
-                bearer_token: bearer_token.clone(),
-            },
+            Transport::Http { url, bearer_token } => {
+                let bearer_token = match &self.secret {
+                    Some(secret) => Some(ctx.service::<Secrets>(SECRETS)?.reveal(secret).map_err(
+                        |why| {
+                            let server = &self.server;
+                            PluginError::new(format!(
+                                "MCP server `{server}`: secret `{secret}`: {why}"
+                            ))
+                        },
+                    )?),
+                    None => bearer_token.clone(),
+                };
+                Connection::Http {
+                    url: url.clone(),
+                    bearer_token,
+                }
+            }
         };
         let (client, tools) = Client::start(connection, self.timeout)
             .map_err(|error| PluginError::new(format!("MCP server `{}`: {error}", self.server)))?;

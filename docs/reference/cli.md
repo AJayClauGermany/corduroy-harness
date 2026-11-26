@@ -11,7 +11,14 @@ corduroy [options] sessions remove <name>
                                    take a session, and those it started, out of the log
 corduroy [options] log             print the event log, or with --session one session's part
 corduroy [options] report [N]      what the session's last run (or last N) did, with timings
-corduroy init                      write the default agent file to edit
+corduroy [options] doctor          try the agent for real: its secrets, kernels and models
+corduroy init [vendor] [--secrets keychain|env]
+                                   write the default agent file to edit
+corduroy [options] secrets         list the agent's secrets and how each stands
+corduroy [options] secrets set [name]
+                                   put a secret's value in the keychain, typed without showing
+corduroy [options] secrets remove [name]
+                                   take it out again
 corduroy [options] login [name]    sign in for a secret that needs it (a ChatGPT plan)
 corduroy [options] logout [name]   sign out again
 corduroy --version                 print the version (and commit) of this build
@@ -26,7 +33,7 @@ already ends in `--`). Source:
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `--workspace <dir>` | the current directory | Where the agent works. `{workspace}` in the agent file, and where `.corduroy/` is kept. |
-| `--agent <file>` | `<workspace>/corduroy.toml`, else the default agent | The [agent file](agent-file.md) to read. |
+| `--agent <file>` | `<workspace>/corduroy.toml`, else the default agent | The [agent file](agent-file.md) to read. With none, the default agent asks a local Ollama and reads no key: see [`init`](#commands). |
 | `--session <name>` | `main` | The session to run in. It is started if the log does not have it. |
 | `--model <name>` | the file's `model` | Ask this model instead. |
 | `--provider <name>` | the file's `provider` | Ask this provider instead; it must be one of the file's `[providers.*]`. |
@@ -85,15 +92,96 @@ session's last run, or its last `N`: the version, what `check` prints, and for e
   began and the time since the event before. Payloads are cut at 1000 characters; the log
   has them whole.
 
+Under the run's first lines, `used` adds up what its model requests took: how many answered,
+and the tokens in and out over all of them, the sessions it started included.
+
 Nothing is asked of a model, and the keys are not in it: the log never holds a secret's
 value. It does hold what you typed and what the tools returned, so read it before you send
 it. `corduroy report > report.txt` keeps it as a file. Model requests are timed in runs
 made by a build that records `model/request`; older runs show the rest.
 
-**`init`** Write the default agent to `<workspace>/corduroy.toml`. Refuses if the file
-exists. The model is chosen from the environment: Anthropic if `ANTHROPIC_API_KEY` is set,
-else OpenAI if `OPENAI_API_KEY` is set, else a local Ollama. With both keys set, it also writes a second
-provider, `reviewer`, so the `review` add-on asks OpenAI's model about Anthropic's work.
+**`doctor`** Try the agent for real, part by part, and say what works. The two are kept
+apart on purpose: `check` says what the agent *has*, and asks nothing of the outside;
+`doctor` says whether it *works*. Beyond loading the agent, `doctor`
+
+- sees whether each credential can be had, as `secrets` does;
+- runs one command (`echo`) in each kernel;
+- asks each model the agent names one short question, with how long the answer took and the
+  tokens it used: the loop's model, and every model an enabled add-on's `llm` grant names
+  outright (so a `reviewer` is tried too).
+
+```text
+✓ agent    /home/you/project/corduroy.toml: everything it lists started
+✓ secret   anthropic (keychain, for provider main): in the macOS Keychain
+✓ kernel   shell: ran a command in 9 ms
+✗ model    main/claude-sonnet-5-5: the model failed: … Status: 401 Unauthorized. …
+1 of the 4 parts tried is not working
+```
+
+It exits non-zero if anything failed. The questions cost a few tokens each; nothing of them
+is a run, so the log gains only the `process/start` every command writes. A failure that is
+a ChatGPT plan's is followed by what to do about it, as after a run.
+
+**`init [vendor] [--secrets keychain|env]`** Write the default agent to
+`<workspace>/corduroy.toml`, and say what to do next. Refuses if the file exists.
+
+- *Whose model.* `vendor` is `anthropic`, `openai`, `chatgpt` (OpenAI's models, paid by a
+  [ChatGPT plan](../how-to/connect-a-model.md#a-chatgpt-plan-instead-of-an-api-key)) or
+  `ollama`. Left out, it is chosen from the environment: Anthropic if `ANTHROPIC_API_KEY` is
+  set, else OpenAI if `OPENAI_API_KEY` is set, else a local Ollama. With both keys set, it
+  also writes a second provider, `reviewer`, so the `review` add-on asks the other vendor's
+  model.
+- *Where its keys come from.* Each provider names a `[secrets.<name>]` entry (`anthropic`,
+  `openai`, `chatgpt`). The entry is of `kind = "keychain"` where this machine has a
+  keychain, and reads the environment variable (`env = "ANTHROPIC_API_KEY"`) where it has
+  none: a server nobody is logged in to, a container. `--secrets keychain` or `--secrets env`
+  says which; the keychain asked for on a machine without one is refused, and nothing is
+  written in its place. A ChatGPT sign-in is kept in the keychain, or without one in a file
+  of your own, which the entry then says (`keep = "file"`).
+
+`init` writes where a key comes from, never the key. It prints the command that puts it
+there (`corduroy secrets set anthropic`, or `corduroy login chatgpt`) and, when the vendor's
+variable is set where you ran it, a line that copies it in.
+
+The agent used when there is no agent file is the same one for Ollama: it asks a model
+served on this machine (`qwen3`), names no secret and reads no key, whatever the environment
+holds. A key in a variable is used only by an agent file that says so, and `init` is what
+writes one. A run of that agent begins by saying which agent it is, and one that fails (no
+Ollama here, or no such model) says to run `corduroy init`.
+
+**`secrets`** List every credential the agent names and how it stands, without reading one
+out: each `[secrets.<name>]` entry with its kind and what uses it, then each provider that
+names no secret and reads a variable of the environment.
+
+```text
+✓ anthropic (keychain, for provider main): in the macOS Keychain
+✓ chatgpt (chatgpt, for provider plan): signed in as you@example.com, kept in the macOS Keychain; its token is good for 52 more minutes
+✗ github (env, for MCP server github): $GITHUB_TOKEN is not set
+✓ provider reviewer (no secret named): reads $OPENAI_API_KEY from the environment, which is set
+```
+
+It exits non-zero if one cannot be had, and each such line says what to do. The agent is
+not put together for this. On macOS, a copy of `corduroy` other than the one that put an
+item there may be asked before it is let to look, as it is before it uses it.
+
+**`secrets set [name]`** Put the value of a [keychain](agent-file.md#secretsname) secret (one
+of `kind = "keychain"`, or that says nothing of where it comes from) into the system's
+keychain. It asks for the value and does not show it as you type
+or paste; the spaces and line end around it are dropped. With the value piped in, it reads
+one line and asks nothing, which is how a key is moved out of the environment:
+
+```bash
+printenv ANTHROPIC_API_KEY | corduroy secrets set anthropic
+```
+
+The value goes from you to the keychain: it is in no agent file, no log, and nothing the
+command prints. `name` may be left out where the file has one such secret. A secret of
+another kind is refused, with where its value goes instead. The keychain is your own, not
+the workspace's: every agent of yours that names a secret alike reads the same item
+(service `corduroy`, account the secret's name).
+
+**`secrets remove [name]`** Take that value out of the keychain, and say whether there was
+one.
 
 ## What is shown while a run goes
 
@@ -109,6 +197,7 @@ provider, `reviewer`, so the `review` add-on asks OpenAI's model about Anthropic
 | `  ! plugin <name> failed/stopped: reason` | an add-on could not start, or trapped too often |
 | `  ↻ picking up a run that was cut short` | a restart |
 | `  [<session>] …` | a line from a sub-agent's session |
+| `no corduroy.toml here: this is the default agent, …` | before a run, when there is no agent file: the model is one Ollama serves on this machine, no key is read, and `corduroy init` writes an agent for another |
 | `Using ChatGPT plan. Manage usage: <address>` | before a run, when the model's provider is paid by a [ChatGPT sign-in](agent-file.md#secretsname): whose account the run is on, and where to see and limit what it uses |
 | a line after `the run failed: …` | when such a run fails for a reason that is the plan's (its usage limit, a sign-in no longer accepted, something a plan does not pay for): what you can do about it. Where OpenAI's reason carries no code, the line is a guess and says "if" |
 
@@ -125,14 +214,18 @@ unfinished until `continue` or `stop`.
 | 130 | the run was stopped (as after Ctrl-C) |
 
 **`login [name]`** Sign in for a secret of the agent file whose kind is signed in to: a
-[`kind = "chatgpt"`](agent-file.md#secretsname) secret, which is a ChatGPT plan. It opens
+[`kind = "chatgpt"`](agent-file.md#secretsname) secret, which is a ChatGPT plan. A key is
+not signed in to: for a `kind = "keychain"` secret, `login` says to use `secrets set`. It
+opens
 the browser at OpenAI's sign-in ("Continue with ChatGPT"), prints the address in case it
 does not open, and waits up to five minutes for you to come back to it; the answer arrives
 on `127.0.0.1` (port 1455, or another if that one is taken). The first sign-in registers
-this tool for your account; later ones reuse that registration. What is kept is in your own
-configuration directory (see [Files](#files)), so every workspace whose agent names a secret
-of the same name shares the sign-in. `name` says which secret, where the file has several.
-The agent is not put together for this.
+this tool for your account; later ones reuse that registration. What is kept is in your
+keychain, or, where the entry says `keep = "file"`, in your own configuration directory
+(see [Files](#files)), so every workspace whose agent names a secret of the same name shares
+the sign-in. A sign-in still in the file an earlier build kept it in is moved into the
+keychain, without the browser. `name` says which secret, where the file has
+several. The agent is not put together for this.
 
 **`logout [name]`** Revoke that sign-in with OpenAI and remove what was kept.
 
@@ -144,7 +237,8 @@ The agent is not put together for this.
 | `<workspace>/.corduroy/log.jsonl` | the event log (the agent file's `log` moves it) |
 | `<workspace>/.corduroy/cache/` | compiled add-ons, so a second start is fast |
 | `<workspace>/.corduroy/skills/`, `memory/` | what the default agent's `skills` and `memory` add-ons keep |
-| `~/.config/corduroy/` (`$XDG_CONFIG_HOME/corduroy`; on Windows `%APPDATA%\corduroy`) | what is yours whatever you work on: `chatgpt/<secret>.json`, a ChatGPT sign-in (readable by you alone), and `host-id`, a random name for this computer that the sign-in sends |
+| `~/.config/corduroy/` (`$XDG_CONFIG_HOME/corduroy`; on Windows `%APPDATA%\corduroy`) | what is yours whatever you work on: `chatgpt/<secret>.json`, a ChatGPT sign-in (readable by you alone) where its entry says `keep = "file"`, and `host-id`, a random name for this computer that the sign-in sends |
+| your keychain, service `corduroy` | the values of `kind = "keychain"` secrets, each under its secret's name, and the ChatGPT sign-ins kept there, as `chatgpt-sign-in.<secret>`: in the macOS Keychain (Keychain Access shows them), the Windows Credential Manager (as `<name>.corduroy`) or the Secret Service on Linux (`secret-tool search service corduroy`) |
 
 The agent file, the log, the cache and your own configuration directory are out of reach of
 every add-on's `fs-read` and `fs-write`, whatever its grants say.
@@ -153,6 +247,6 @@ every add-on's `fs-read` and `fs-write`, whatever its grants say.
 
 | Variable | Used for |
 | --- | --- |
-| `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` | the default providers' keys, and `init`'s choice of model |
+| `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` | `init`'s choice of model, and the key of an `anthropic` or `openai` provider in an agent file that names no `secret` for it. Never read without an agent file. |
 | `CORDUROY_PLUGIN_PATH` | more directories to find add-ons in, separated as `PATH` is, searched before the `plugins` directory beside the program |
 | whatever `api_key_env`, `[secrets.*] env` and `bearer_token_env` name | keys and secrets the agent file refers to |

@@ -56,6 +56,12 @@ jobs:
         env:
           CORDUROY_REQUIRE_GUESTS: "1"
           CORDUROY_REQUIRE_POWERSHELL: "1"
+      # The keychain against a real Secret Service: a D-Bus session and a keyring of its own,
+      # unlocked. Fail rather than pass without one.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gnome-keyring
+      - run: dbus-run-session -- bash -c 'echo -n test | gnome-keyring-daemon --unlock --components=secrets && sleep 1 && cargo nextest run -p corduroy-keychain --profile ci'
+        env:
+          CORDUROY_REQUIRE_KEYCHAIN: "1"
       - run: cargo test --manifest-path plugins/Cargo.toml
       # nextest does not run doctests.
       - run: cargo test --doc --all-features
@@ -74,9 +80,27 @@ jobs:
         with:
           tool: nextest
       - run: cargo build -p corduroy-cli
-      - run: cargo clippy -p corduroy-core -p corduroy-jsonl -p corduroy-shell -p corduroy-std --all-targets -- -D warnings
-      # The core, the event log's file, and the PowerShell kernel; the POSIX shell's tests need
-      # a POSIX system.
-      - run: cargo nextest run -p corduroy-core -p corduroy-jsonl -p corduroy-shell --profile ci -E "package(corduroy-core) or package(corduroy-jsonl) or test(/powershell/)"
+      - run: cargo clippy -p corduroy-core -p corduroy-jsonl -p corduroy-shell -p corduroy-keychain -p corduroy-std --all-targets -- -D warnings
+      # The core, the event log's file, the PowerShell kernel and the keychain (the
+      # Credential Manager, which must be there); the POSIX shell's tests need a POSIX system.
+      - run: cargo nextest run -p corduroy-core -p corduroy-jsonl -p corduroy-shell -p corduroy-keychain --profile ci -E "package(corduroy-core) or package(corduroy-jsonl) or package(corduroy-keychain) or test(/powershell/)"
         env:
           CORDUROY_REQUIRE_POWERSHELL: "1"
+          CORDUROY_REQUIRE_KEYCHAIN: "1"
+
+  macos:
+    # The keychain on macOS: the login Keychain, which must be there.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      - run: cargo clippy -p corduroy-keychain --all-targets -- -D warnings
+      - run: cargo nextest run -p corduroy-keychain --profile ci
+        env:
+          CORDUROY_REQUIRE_KEYCHAIN: "1"

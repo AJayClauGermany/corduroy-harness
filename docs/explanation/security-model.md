@@ -50,6 +50,10 @@ gate asking you first. If you switch `approval` to `auto`, `bash` is unconfined.
   writes the value into an HTTP request and records only the secret's name. Response bodies
   are not recorded, since they may echo it. The HTTP client follows no redirects, since the
   grant was checked against one host.
+- **A key can be kept out of the environment and off the disk.** A `kind = "keychain"` secret
+  is in the operating system's keychain, encrypted behind your login, and goes from you to
+  the keychain without passing through an agent file, the agent or the log. A machine
+  without a keychain says so: nothing is kept anywhere else in its place.
 - **Decisions are made before, and logged.** A gate's verdict is stored before the tool can
   start. Gates fail closed: one that traps, or a point nobody declared, denies.
 - **Runaway plugins are bounded.** Fuel per call, memory per instance, a limit on event
@@ -63,10 +67,18 @@ gate asking you first. If you switch `approval` to `auto`, `bash` is unconfined.
 - **The shell reads what you can read.** It starts from an empty environment, so a
   provider's API key in the environment `corduroy` runs in is not there for `bash` to print
   (a kernel gets a few plain variables such as `PATH` and `HOME`, and what its `env` and
-  `pass` keys list). A key kept in a file you can read is still within its reach.
+  `pass` keys list). A key kept in a file you can read is still within its reach, and so
+  is one in a keychain that hands an unlocked item to any program of yours without asking,
+  as the Secret Service on Linux does. The macOS Keychain asks before it gives an item to a
+  program other than the one that put it there.
 - **A workspace's `corduroy.toml` is used as soon as you run `corduroy` there.** It grants
   capabilities, names kernels and starts MCP servers. Read the file of a repository someone
   else wrote before you do.
+- **A secret goes wherever the agent file sends it.** The keychain, like a sign-in, is yours
+  and shared by every agent file that names a secret alike. A file someone else wrote can
+  name your `anthropic` secret and a provider whose `base_url` is theirs, and the key is sent
+  there. A secret does not yet say which hosts it may go to (decided, not built), so this is
+  one more reason to read such a file first.
 - **Extensions are not checked.** An extension kind you compile in can do anything.
 - **The model's own message is logged before any gate sees it.** If the model writes a
   secret into a tool call, a denial does not keep it out of the log.
