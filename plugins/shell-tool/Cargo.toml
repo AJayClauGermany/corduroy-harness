@@ -1,0 +1,16 @@
+[package]
+name = "shell-tool"
+description = "The `bash` tool's contract, shared by the add-ons that offer it: its input, its result, and the call into a kernel."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+corduroy-guest = { workspace = true }
+serde = { workspace = true }

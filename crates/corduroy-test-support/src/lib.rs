@@ -62,7 +62,7 @@ fn modified(path: &Path) -> Option<SystemTime> {
 /// # Panics
 ///
 /// Panics with instructions if the plugin has not been built, or was built before its
-/// crate, the guest crate or the WIT world last changed.
+/// crate, a crate of `plugins/` it builds on or the WIT world last changed.
 #[must_use]
 pub fn plugin(name: &str) -> PathBuf {
     let root = root();
@@ -75,9 +75,15 @@ pub fn plugin(name: &str) -> PathBuf {
         built.is_some(),
         "plugin `{name}` is not built: run `cargo plugins` first"
     );
-    // The plugin's own crate, the guest crate every plugin builds on, and the world.
+    // The plugin's own crate, the guest crate every plugin builds on, and the world; and
+    // `bash`'s contract for the plugins that build on that too.
     let plugins = root.join("plugins");
-    let sources = [plugins.join(name), plugins.join("guest"), root.join("wit")]
+    let mut sources = vec![plugins.join(name), plugins.join("guest"), root.join("wit")];
+    let manifest = fs::read_to_string(plugins.join(name).join("Cargo.toml")).unwrap_or_default();
+    if manifest.contains("shell-tool") {
+        sources.push(plugins.join("shell-tool"));
+    }
+    let sources = sources
         .iter()
         .map(|path| newest(path))
         .max()
