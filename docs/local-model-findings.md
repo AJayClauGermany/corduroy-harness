@@ -163,6 +163,28 @@ Seen in `program_from_spec` (3 of 3), and once each in `add_feature` and
 *Would help:* a higher limit in the local-model example (the default agent's 50), and a
 budget in time or tokens beside it (G20), which is what actually runs out on a CPU.
 
+## Where to start on each
+
+Where the code was read while looking into a finding. These are starting points, not
+diagnoses: nothing was changed or tried there.
+
+| Finding | Look at | First thing to settle |
+| --- | --- | --- |
+| 1. The session is dead after an overflow | `compactable` in `src/session.rs` (what may be cut, and `input_tokens`, which a failed request does not update), `src/compact.rs`, `due` in `plugins/compact/src/lib.rs` | Whether a failed request should count as over the limit, and whether the cut may fall inside a turn (G14) |
+| 1. Results larger than the context | `MAX_LINES` and `MAX_BYTES` in `plugins/pi-tools/src/lib.rs`; `context_tokens` reaches only `compact` today | Whose job the bound is: each tool's, or the loop's for a whole step (B25) |
+| 2. The timeout | `timeout_seconds` is handed to oi-kit as it is (`crates/corduroy-providers/src/lib.rs`) | What oi-kit bounds with it while streaming; then whether the bound is ours to keep |
+| 2. No `max_tokens` | `with_default_max_tokens` and `catalog_max_tokens` in `crates/corduroy-providers/src/adapter.rs` | Whether the reference or the code is wrong about 4096 for an unknown model |
+| 2. Thinking without end | `thinking` in the agent file; `examples/local-model/corduroy.toml` sets none | Whether llama.cpp's server honours it for this model: one run of `expression_evaluator` says |
+| 3. A denial that says what would be right | the message in `crates/corduroy-core/src/capability.rs` ("does not cover") | How much of a grant a model may be told |
+| 3. A question that follows a refusal | `plugins/approval`, and what a `gate/decision` carries | Whether this is `approval`'s to notice or the terminal's to show (G6) |
+| 4. Paths | the `path` schemas in `specs()` in `plugins/pi-tools/src/lib.rs` and in `plugins/search`; `workspace()` in `crates/corduroy-cli/tests/local_model.rs` | Cheap to try: a description, then `--only write,edit,long_chain,crash_continue` a few times each way |
+| 5. The turn limit | `max_turns = 20` in `examples/local-model/corduroy.toml` | What else should bound a run (G20) |
+| Exit code 1 for three endings | `crates/corduroy-cli/src/command.rs` | The codes are a contract once another program reads them; decide before changing |
+| A waiting call's result | `tool/wait` and `signal` in `src/session.rs` | Whether the `signal` gains the call's id, or a `tool/result` follows it |
+
+The bench is the check for each: change one thing, run the tasks that showed the finding
+several times, and compare with the table below.
+
 ## What the model itself gets wrong
 
 Not the harness's to fix, but worth knowing before blaming it.
@@ -204,7 +226,10 @@ One thing bit the bench itself: with `SSL_CERT_FILE` naming a file the agent's u
 not read, `corduroy` refused to start (`No CA certificates were loaded`) although its only
 provider was `http://127.0.0.1`.
 
-Calling the other way, corduroy driving another harness, was not tried here.
+Not tried here: corduroy driving another harness; the `page` front end; `web_fetch`,
+`review`, `plugin-manager` and add-ons in JavaScript or Python; two processes on one log at
+once ([C18](open-questions.md#c18-how-many-processes-may-use-one-log)); any model but this
+one, so nothing here separates what is this model's from what any small model would do.
 
 ## What is not recorded, and was missed
 
