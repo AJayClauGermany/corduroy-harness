@@ -44,7 +44,7 @@ Ordered by how much they cost a small model. Each names the tasks that show it.
 Seen in `many_reads` (3 of 3), and once each in `log_pipeline`, `makefile_tabs`,
 `rename_across_files`, `honest_missing` and `compaction`: 8 of 279 trials.
 
-- A turn in progress is never compacted ([G14](open-questions.md#g14-can-a-long-turn-be-compacted)),
+- A turn in progress is never compacted (G14, since decided: [Keeping within what the model holds](design.md#keeping-within-what-the-model-holds)),
   so `compact` cannot help a run that reads its way past the limit. The run ends as
   `failed: Context length exceeded`.
 - **The session cannot be used afterwards.** The oversized messages stay in the
@@ -57,7 +57,7 @@ Seen in `many_reads` (3 of 3), and once each in `log_pipeline`, `makefile_tabs`,
   fitted; a web server's log at 50 KB was 33 000 and did not. One `cat` of a compiled
   binary (`makefile_tabs`) did the same. The agent file states the model's
   `context_tokens`, but only `compact` reads it
-  ([B25](open-questions.md#b25-whose-job-is-a-tools-input-and-the-size-of-its-result)).
+  (B25, since decided in the same place).
 - Eight `read` calls in one message (the model does call tools in parallel, and it works)
   made a 26 000-token request in a single step. Nothing looks at the size of a step's
   results before they are sent.

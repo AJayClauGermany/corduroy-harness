@@ -469,13 +469,16 @@ shape has nowhere to record which shape a log holds.
 *Direction.* Decide before the log freezes, since the answer is a field on `state/set` or a
 convention inside the value.
 
-### B25. Whose job is a tool's input, and the size of its result?
+### B25. Whose job is a tool's input?
 
-Neither the core nor the loop checks a call's input against the tool's schema, or bounds
-what a result adds to the conversation. Each tool does, or does not.
+Neither the core nor the loop checks a call's input against the tool's schema. Each tool
+does, or does not. The size of a result is decided
+([Keeping within what the model holds](design.md#keeping-within-what-the-model-holds)): the
+tool says it, and the harness holds each call and each step to a share of the model's
+context.
 
-*Direction.* Say it is the tool's, or give the loop a bound: one runaway result can use up
-a session's context.
+*Direction.* Say it is the tool's, or have the loop refuse an input that does not fit the
+schema before the gates are asked.
 
 ### B26. How are tool names kept apart?
 
@@ -793,13 +796,14 @@ the engine checks types, so an add-on already built would stop loading
 
 ### E2. Can what a guest returns grow?
 
-`tool-spec` and `plugin-info` are fixed records, though the core's `ToolSpec` was made
-growable. `content` is text or an image. None of them gains a field or a case within 1.x
-([How the plugin world grows](design.md#how-the-plugin-world-grows)), so whatever is to
-grow has to be given its place before 1.0.
+`tool-spec` and `plugin-info` can: each ends in a list of named values
+([How the plugin world grows](design.md#how-the-plugin-world-grows)). `content` is still
+text or an image, and gains no case within 1.x, so whatever is to grow there has to be
+given its place before 1.0.
 
-*Direction.* An open tail on both records (a list of named values), and a general typed
-block (`mime-type`, `data`) beside `image`.
+*Direction.* A general typed block (`mime-type`, `data`) beside `image`. Say whether the
+core's `ToolSpec` keeps the named values it does not know, so that a gate or another
+plugin can read what a tool said that this host has no word for.
 
 ### E5. Can a header mix text and a secret?
 
@@ -1101,14 +1105,6 @@ there is one an add-on can use too.
 carry images both ways; nothing puts one into a user's message.
 
 *Direction.* A way to run a `Message`, and a decision on how the command accepts a file.
-
-### G14. Can a long turn be compacted?
-
-Only what came before the current turn can be summarised (`src/session.rs:1109`). One long
-run from one prompt never compacts.
-
-*Direction.* Decide whether the cut may fall inside a turn, which constrains what a
-`compaction` event may hide.
 
 ### G15. Does the harness bound a tool call?
 

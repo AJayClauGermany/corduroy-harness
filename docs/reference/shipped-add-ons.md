@@ -20,7 +20,11 @@ from Goose.
 | `bash` | `command`, `timeout` (seconds): run in the kernel, whose working directory and variables persist | |
 | `tree` | `path` (`.`), `depth`: a directory's layout through `fs-read` alone; skips `.git`, `node_modules`, `target`, `.corduroy`, `.venv` | yes |
 
-Output is capped at 2000 lines or 50 KB. A binary file read with `read`, or printed by a
+Output is capped at 2000 lines or 50 KB, and `read`, `bash` and `tree` say so to the harness
+as a result of 16 384 tokens at most (counted as three bytes to a token): for a model that
+holds little the harness cuts a result to an eighth of its context, the start of a file or
+a tree and the end of a command's output, and the result says how much is shown
+([Design](../design.md#keeping-within-what-the-model-holds)). A binary file read with `read`, or printed by a
 command in `bash`, is not returned: the result names its kind and size instead. A `path`
 is relative to the working directory. Config: `kernel`, the kernel `bash` runs in (`shell`).
 Grants: `fs-read`, `fs-write`, `kernel`.
@@ -39,7 +43,8 @@ command it asks about.
 `grep` answers as `path:line:text`, with `--` between runs of context. Both pass over `.git`,
 `node_modules`, `target`, `.corduroy` and `.venv`; `grep` also passes over files that are
 not text or that the grant does not reach, and the agent file in the working directory. A
-result is capped at 50 KB and 20 000 files.
+result is capped at 50 KB and 20 000 files, and at less for a model that holds little, as
+`read` is: the first matches are the ones kept.
 
 Config: `max_bytes`, the most text one `grep` reads (16 MB). A call into an add-on is
 metered, so a search stops there and says so; the model narrows it. Grants: `fs-read`.
@@ -174,7 +179,16 @@ reviewer to look for). Grants: `kernel`, `fs-read`, `llm`.
 
 Auto-compaction: provides the `compaction` service the harness asks before each step. When a
 request passes `max_tokens` input tokens, or the conversation passes `max_messages`, the
-start of it is summarised; the messages stay in the log, hidden from the model.
+start of it is summarised; the messages stay in the log, hidden from the model. The
+harness chooses where to cut: where the turn began, or, while a turn is under way, before
+its last step, so one long run is summarised as it goes. A session whose last run ended
+because its request was more than the model holds is summarised before its next request
+whatever the counts say. What is sent to the summariser is held to half of what the
+session's model holds (the start and more of the end of the transcript), so the request to
+summarise is not itself too much.
+
+The count compared with `max_tokens` is what the next request is expected to take: what
+the last one took and was answered with, and an estimate of what was added since.
 
 Config: `model` (required, as `<provider>/<model>`), `max_tokens` (three quarters of what the
 session's model holds, as its [description](agent-file.md#providersnamemodelsmodel) says;

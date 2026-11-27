@@ -39,12 +39,12 @@ Source: the table in [`src/session.rs`](../../src/session.rs).
 | `gate/decision` | host | `{"point", "id", "tool", "verdict", "reason", "gate", "caller"}`, caused by its `tool/call` |
 | `gate/answer` | user | `{"id", "tool", "allow", "reason"}`: a person's answer to a gate that asked; with `"via"`, the plugin it was given through (the page), where it was not typed at the terminal |
 | `tool/start` | host | `{"id", "tool"}`: the tool is about to run |
-| `tool/result` | environment | `{"id", "tool", "ok", "output"}`, plus `"content"` when the result is not one block of text |
+| `tool/result` | environment | `{"id", "tool", "ok", "output"}`, plus `"content"` when the result is not one block of text. What the tool returned, whole: the `message` that carries it to the model holds it cut where it was more than the call or the step [may add](../design.md#keeping-within-what-the-model-holds) |
 | `tool/wait` | host | `{"id", "tool", "signal"}`: the call's result comes with that signal |
 | `signal` | environment | `{"name", "payload"}`: what a waiting call waited for |
 | `model/request` | host | `{"provider", "model", "messages", "tools"}`: the model is about to be asked, with that many messages and tools. Its own commit, so its time is when the request went out; the model's `message` (or the `turn/end` of a request that failed) is when the answer came |
 | `usage` | agent | `{"model", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens", "stop"}`, each count only if the provider gave it; `stop` is why the model stopped (`finished`, `limit`: cut off at the most it may write, `tool_calls` or `refused`), if the provider said |
-| `compaction` | host | `{"summary", "keep_from", "by"}`: the messages before `keep_from` are summarised |
+| `compaction` | host | `{"summary", "keep_from", "by"}`: the messages before `keep_from` are summarised. `keep_from` is a message a step begins with: the person's, where the turn began, or the model's, inside a turn |
 | `run/restart` | host | `{"attempt"}`: an unfinished run was picked up again |
 | `run/stop` | user | `{}`: a person asked the run to stop; `{"via"}` where they asked through a plugin (the page) |
 | `turn/end` | host | `{"status"}`: `finished`, `cut-off` (the model answered, and the answer stopped at the most it may write, so it is not whole), `turn-limit`, `time-limit`, `output-limit` (the model was still working when the run reached its [`max_turns`, `max_seconds` or `max_output_tokens`](agent-file.md#top-level-keys)), `failed` (with `"reason"`, and `"kind"` where the model gave no answer: `context-overflow`, `rate-limit`, `auth`, `timeout`, `unreachable` or `other`; a reader takes a kind it does not know as `other`), `stopped` or `yielded`. A reader takes a status it does not know as a run that is over without an answer |

@@ -390,6 +390,9 @@
           s.waiting = 0;
           if (payload.status === 'failed') problem(event, 'run failed', oneLine(payload.reason || 'no reason given', 400));
           if (payload.status === 'turn-limit') problem(event, 'turn limit', 'the run reached the most turns it may take');
+          if (payload.status === 'time-limit') problem(event, 'time limit', 'the run reached the longest it may take');
+          if (payload.status === 'output-limit') problem(event, 'output limit', 'the model wrote the most a run may have it write');
+          if (payload.status === 'cut-off') problem(event, 'cut off', 'the answer stopped at the most the model may write at once');
           break;
         }
         case 'capability/denied':
@@ -418,6 +421,9 @@
     finished: ['finished', 'good'],
     failed: ['failed', 'bad'],
     'turn-limit': ['turn limit', 'warn'],
+    'time-limit': ['time limit', 'warn'],
+    'output-limit': ['output limit', 'warn'],
+    'cut-off': ['cut off', 'warn'],
     stopped: ['stopped', 'warn'],
     yielded: ['yielded', ''],
     asking: ['asks you', 'warn'],

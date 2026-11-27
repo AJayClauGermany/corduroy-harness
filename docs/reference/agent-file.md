@@ -69,7 +69,7 @@ it holds. Every key is optional, and what is left out stays as the provider repo
 
 | Key | Type | Meaning |
 | --- | --- | --- |
-| `context_tokens` | integer | How many tokens the model holds at once. [`compact`](shipped-add-ons.md#compact) starts from three quarters of it, and an answer may take a quarter of it where nothing else says how much the model may write (see `max_tokens`). |
+| `context_tokens` | integer | How many tokens the model holds at once. [`compact`](shipped-add-ons.md#compact) starts from three quarters of it, an answer may take a quarter of it where nothing else says how much the model may write (see `max_tokens`), and the harness holds one tool result to an eighth of it and the results of one step to a quarter ([Design](../design.md#keeping-within-what-the-model-holds)). Without it nothing bounds a step's results but each tool's own cap. |
 | `output_tokens` | integer | The most it may write in one answer: the default for the provider's `max_tokens`. |
 | `takes` | list of strings | The kinds of content it takes: `text`, `image`, `audio`, `video`, `pdf`, or another kind by name. A list given here replaces the provider's whole. |
 | `returns` | list of strings | The kinds of content it returns, named the same way. |
