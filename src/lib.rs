@@ -115,7 +115,8 @@ pub use loops::{DEFAULT_LOOP, LOOPS, Loop, Loops, Run, StandardLoop, Step};
 pub use operation::{Next, Operation};
 pub use outside::{FRONTS, Front, Fronts, OUTSIDE, Outside};
 pub use provider::{
-    DEFAULT_PROVIDER, PROVIDERS, Provider, ProviderError, ProviderPlugin, Providers, provider,
+    DEFAULT_PROVIDER, PROVIDERS, Provider, ProviderError, ProviderErrorKind, ProviderPlugin,
+    Providers, provider,
 };
 pub use session::{
     Answer, Ask, COMPACTION, Effect, End, Journal, MAIN, MODEL_REQUEST, PROCESS_START, ProcessInfo,

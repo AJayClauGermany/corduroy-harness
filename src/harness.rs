@@ -1079,7 +1079,7 @@ impl Harness {
                 journal.apply(vec![Effect::from(message), usage])?;
                 Ok(Step::Applied("model".to_owned()))
             }
-            Err(error) => Ok(Step::End(End::Failed(error.to_string()))),
+            Err(error) => Ok(Step::End(End::ModelFailed(error))),
         }
     }
 
@@ -1213,6 +1213,9 @@ fn status_of(journal: &Journal, session: &Session) -> Status {
     match journal.ended() {
         Some(End::TurnLimit) => Status::TurnLimitReached,
         Some(End::Failed(reason)) => Status::Failed { reason },
+        Some(End::ModelFailed(error)) => Status::Failed {
+            reason: error.to_string(),
+        },
         Some(End::Stopped) => Status::Stopped,
         Some(End::Yielded) => Status::Yielded,
         // A run that ended before runs recorded how is read from its conversation.

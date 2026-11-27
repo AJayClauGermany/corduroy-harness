@@ -184,7 +184,7 @@ async fn a_failing_model_ends_the_run_with_the_error_recorded() {
     let ends = harness.events().matching(&Pattern::new("turn/end"));
     assert_eq!(
         ends[0].payload,
-        r#"{"status":"failed","reason":"the script ran out"}"#
+        r#"{"status":"failed","reason":"the script ran out","kind":"other"}"#
     );
 }
 

@@ -52,20 +52,99 @@ pub type Providers = Registry<dyn Provider>;
 pub const DEFAULT_PROVIDER: &str = "default";
 
 /// Why a model gave no answer. The run that asked ends as failed, with this as its reason.
+///
+/// Its [kind](Self::kind) says which sort of failure it was, where the provider can tell,
+/// so that whatever reads it need not go by the wording.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProviderError(String);
+pub struct ProviderError {
+    why: String,
+    kind: ProviderErrorKind,
+}
+
+/// The sort of failure a [`ProviderError`] is. More are added as providers can tell them
+/// apart; one that is not listed, or that the provider could not tell, is
+/// [`Other`](Self::Other).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum ProviderErrorKind {
+    /// The request held more than the model's context does.
+    ContextOverflow,
+    /// The provider refused the request for coming too soon after others.
+    RateLimit,
+    /// The credential was missing or refused.
+    Auth,
+    /// The model did not finish answering in the time it was given.
+    Timeout,
+    /// The provider could not be reached, or the connection was lost.
+    Unreachable,
+    /// Anything else, and whatever the provider could not tell apart.
+    #[default]
+    Other,
+}
+
+impl ProviderErrorKind {
+    /// The kind's name, as a `turn/end` event records it: `context-overflow`, `rate-limit`,
+    /// `auth`, `timeout`, `unreachable` or `other`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::ContextOverflow => "context-overflow",
+            Self::RateLimit => "rate-limit",
+            Self::Auth => "auth",
+            Self::Timeout => "timeout",
+            Self::Unreachable => "unreachable",
+            Self::Other => "other",
+        }
+    }
+
+    /// The kind called `name`. A name this harness does not know, as a later one may
+    /// write, is [`Other`](Self::Other).
+    #[must_use]
+    pub fn named(name: &str) -> Self {
+        match name {
+            "context-overflow" => Self::ContextOverflow,
+            "rate-limit" => Self::RateLimit,
+            "auth" => Self::Auth,
+            "timeout" => Self::Timeout,
+            "unreachable" => Self::Unreachable,
+            _ => Self::Other,
+        }
+    }
+}
+
+impl fmt::Display for ProviderErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
 
 impl ProviderError {
-    /// An error saying `why`.
+    /// An error saying `why`, of no particular [kind](ProviderErrorKind::Other).
     #[must_use]
     pub fn new(why: impl Into<String>) -> Self {
-        Self(why.into())
+        Self {
+            why: why.into(),
+            kind: ProviderErrorKind::Other,
+        }
+    }
+
+    /// The same error, said to be of `kind`.
+    #[must_use]
+    pub const fn of(mut self, kind: ProviderErrorKind) -> Self {
+        self.kind = kind;
+        self
+    }
+
+    /// Which sort of failure this was.
+    #[must_use]
+    pub const fn kind(&self) -> ProviderErrorKind {
+        self.kind
     }
 }
 
 impl fmt::Display for ProviderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.why)
     }
 }
 
