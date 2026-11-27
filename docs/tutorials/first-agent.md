@@ -129,12 +129,14 @@ corduroy check
 ```
 
 ```text
+agent     /home/you/corduroy-tutorial/corduroy.toml
 model     claude-sonnet-5-5 from main
 log       /home/you/corduroy-tutorial/.corduroy/log.jsonl
 providers main
 kernels   shell
 gates     approval, inspect
 points    plugin/load, tool/call
+fronts    none (the terminal alone)
 tool      bash
 tool      delegate
 tool      edit

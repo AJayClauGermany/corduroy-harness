@@ -244,6 +244,17 @@ fn agent_file(options: &Options, workspace: PathBuf) -> Result<Described, Box<dy
         file.model.clone_from(model);
     }
     if let Some(provider) = &options.provider {
+        // Said now, as a provider the file itself names wrongly is, and not by the first
+        // request that finds nobody to ask.
+        if !file.providers.contains_key(provider) {
+            let has: Vec<&str> = file.providers.keys().map(String::as_str).collect();
+            return Err(format!(
+                "`--provider {provider}` names no [providers.{provider}] entry: this agent \
+                 has {}",
+                has.join(", ")
+            )
+            .into());
+        }
         file.provider.clone_from(provider);
     }
     let file_path = file_path.map(|path| path.canonicalize()).transpose()?;
@@ -535,18 +546,32 @@ fn finish(status: &Status, shown: &Shown<'_>) -> ExitCode {
     }
 }
 
-/// What the agent has, a line each: its model, log, registries, tools and the plugins that
-/// did not start.
+/// What the agent has, a line each: the file it was read from, its model, log, registries,
+/// tools and the plugins that did not start.
 fn described(agent: &Agent) -> Vec<String> {
     let harness = &agent.harness;
     let file = &agent.file;
+    // Which file, since a person may keep several and edit the one that is not read.
+    let source = agent.source.as_ref().map_or_else(
+        || format!("the default agent: no {AGENT_FILE} here"),
+        |source| source.display().to_string(),
+    );
+    // What a person reaches it through besides this terminal: a page, if one is turned on.
+    let fronts = harness.fronts().names();
+    let fronts = if fronts.is_empty() {
+        "none (the terminal alone)".to_owned()
+    } else {
+        fronts.join(", ")
+    };
     let mut lines = vec![
+        format!("agent     {source}"),
         format!("model     {} from {}", file.model, file.provider),
         format!("log       {}", agent.log.display()),
         format!("providers {}", harness.providers().names().join(", ")),
         format!("kernels   {}", harness.kernels().names().join(", ")),
         format!("gates     {}", harness.gates().names().join(", ")),
         format!("points    {}", harness.gates().points().join(", ")),
+        format!("fronts    {fronts}"),
     ];
     // What extensions added to the loop, if any did.
     let steps = harness.operations().names();

@@ -658,6 +658,32 @@ fn check_says_what_the_agent_has_and_a_plugin_cannot_read_the_agent_file() {
     assert!(check.status.success(), "{report}\n{}", text(&check.stderr));
     assert!(report.contains("tool      read (read-only)"), "{report}");
     assert!(report.contains("gates     approval"), "{report}");
+    // Which file it read, since a person may keep several, and that no page is turned on.
+    let read = format!("agent     {}", agent.display());
+    assert!(report.starts_with(&read), "{report}");
+    assert!(
+        report.contains("fronts    none (the terminal alone)"),
+        "{report}"
+    );
+    // A provider asked for by a name the file does not have is refused at once.
+    let unknown = corduroy(&workspace, &["--provider", "elsewhere", "check"], "").unwrap();
+    assert!(!unknown.status.success());
+    let refused = text(&unknown.stderr);
+    assert!(
+        refused.contains("`--provider elsewhere` names no [providers.elsewhere] entry")
+            && refused.contains("this agent has fake"),
+        "{refused}"
+    );
+    // With the page turned on, `check` says so, and serves nothing to say it.
+    let with_page = format!(
+        "{}\n[extensions.page]\nkind = \"page\"\n",
+        agent_file(address, &plugins)
+    );
+    fs::write(&agent, with_page).unwrap();
+    let report = text(&corduroy(&workspace, &["check"], "").unwrap().stdout);
+    assert!(report.contains("fronts    page"), "{report}");
+    assert!(!report.contains("http://"), "{report}");
+    fs::write(&agent, agent_file(address, &plugins)).unwrap();
 
     // `read` only reads, so smart mode lets it run; the host still refuses the agent file.
     let output = corduroy(&workspace, &["run", "read", "your", "grants"], "").unwrap();

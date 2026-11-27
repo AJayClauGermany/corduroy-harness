@@ -199,9 +199,9 @@ one is there when it does not.
 | What it has and used | what wrote the log, the plugins started (and those that did not, with why), the models asked with their tokens, the tools called with how often they failed |
 | Every event | the log as `corduroy log` prints it, filtered as you type |
 
-It only shows. While a gate's question waits, a bar over every view says which session
-waits, about what, and where to answer: in the terminal, or on the page the `page`
-extension serves. A page that takes an answer listens on a socket, and so is an extension
+It only shows, and says so along its foot, with how to turn on the page that answers.
+While a gate's question waits, a bar over every view says which session waits, about what,
+and where to answer: in the terminal, or on the page the `page` extension serves. A page that takes an answer listens on a socket, and so is an extension
 ([How people meet it](../design.md#how-people-meet-it)).
 
 - **It holds a copy of the log**, a payload over 256 KB cut short. Whatever can read `dir`

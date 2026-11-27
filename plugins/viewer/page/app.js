@@ -541,8 +541,22 @@
   /** Show the composer for the session `s`, as far as it can be said something or stopped. */
   function drawComposer(s) {
     const box = document.getElementById('composer');
+    if (!SERVED) {
+      // Opened as the files the viewer add-on writes: say so where a prompt would be typed.
+      box.hidden = !s;
+      if (!state.copy) {
+        state.copy = true;
+        fill(box, h('div', { class: 'note quiet copy' },
+          h('b', null, 'This is the read-only copy of the log.'),
+          ' It follows a run, and cannot answer a gate, take a prompt or stop a run. For that, turn on the page: add ',
+          h('code', null, '[extensions.page]'), ' with ', h('code', null, 'kind = "page"'),
+          ' to the agent file that ', h('code', null, 'corduroy check'), ' names, start ',
+          h('code', null, 'corduroy'), ', and open the address it then prints.'));
+      }
+      return;
+    }
     // A sub-agent is spoken to by the agent that started it.
-    box.hidden = !SERVED || !s || Boolean(s.parent);
+    box.hidden = !s || Boolean(s.parent);
     if (box.hidden) return;
     const parts = composer();
     if (parts.session !== s.id) parts.trouble = '';
@@ -566,7 +580,7 @@
   /** What a question is answered with: here if the page is served, else where to go. */
   function answering(key, session, call) {
     if (!SERVED) {
-      return [h('span', null, 'Answer in the terminal where corduroy runs, or with ', h('code', null, 'corduroy continue'), '.')];
+      return [h('span', null, 'This copy cannot answer. Answer in the terminal where corduroy runs, or with ', h('code', null, 'corduroy continue'), '.')];
     }
     return [
       h('button', { class: 'allow', onclick: () => answer(key, session, call.id, true) }, 'Allow'),

@@ -51,6 +51,22 @@ it and send with Enter is a prompt, as if typed at the terminal, where it shows 
   Its run can still be answered and stopped there.
 - A sub-agent's session has no box: it is spoken to by the agent that started it.
 
+## The page has nothing to click
+
+Three things leave a page that only shows.
+
+- **It is the copy, not the page.** `.corduroy/viewer/index.html`, opened as a file, is the
+  read-only copy the `viewer` add-on writes; it says so along its foot. The page that
+  answers has an address beginning `http://127.0.0.1:`, which `corduroy` prints when it
+  starts. Open that one.
+- **The page is turned on in another agent file.** `corduroy` printed no address. With
+  more than one agent file about (one for each model, say), the two lines went into the
+  one that is not read. `corduroy check` says which file is read, on its `agent` line, and
+  `fronts    page` once the page is on in it.
+- **`corduroy run "…"` is running it.** It runs one prompt and leaves, so its page answers
+  gates and stops the run and takes no prompt. Start `corduroy` with no command for a
+  conversation.
+
 ## Find what went wrong
 
 **Problems**, in the list on the left, gathers what failed across every session: runs,

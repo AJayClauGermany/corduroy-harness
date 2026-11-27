@@ -36,7 +36,7 @@ already ends in `--`). Source:
 | `--agent <file>` | `<workspace>/corduroy.toml`, else the default agent | The [agent file](agent-file.md) to read. With none, the default agent asks a local Ollama and reads no key: see [`init`](#commands). |
 | `--session <name>` | `main` | The session to run in. It is started if the log does not have it. |
 | `--model <name>` | the file's `model` | Ask this model instead. |
-| `--provider <name>` | the file's `provider` | Ask this provider instead; it must be one of the file's `[providers.*]`. |
+| `--provider <name>` | the file's `provider` | Ask this provider instead; it must be one of the file's `[providers.*]`, and a name that is not is refused with those it has. Give `--model` with it: each provider has its own names for its models. |
 | `-h`, `--help` | | Print the usage line. |
 | `-V`, `--version` | | Print the version, and the commit a [ready-made build](../how-to/install-a-build.md) was made from. |
 
@@ -62,9 +62,17 @@ answer to a gate, which is asked again.
 
 **`stop`** End the session's unfinished run without finishing it. Says whether there was one.
 
-**`check`** Load the agent, every plugin included, and print its model, log, providers,
-kernels, gates, decision points, extra loop steps and tools, without calling a model. Lists
-plugins that did not start, and exits non-zero if any did not.
+**`check`** Load the agent, every plugin included, and print the agent file it read, its
+model, log, providers, kernels, gates, decision points, front ends, extra loop steps and
+tools, without calling a model. Lists plugins that did not start, and exits non-zero if any
+did not.
+
+- `agent` is the file that was read, or says that there is none and this is the default
+  agent. With more than one agent file about, this is the line that says which one a
+  change has to go in.
+- `fronts` is what you reach the agent through besides the terminal: `page` where the
+  [`page`](agent-file.md#extensionsname) extension is turned on, `none` where it is not.
+  `check` serves nothing; the page opens when a run is about to go.
 
 **`sessions`** List the sessions in the log, each with the session it was started from.
 
@@ -89,8 +97,8 @@ session's last run, or its last `N`: the version, what `check` prints, and for e
   model, how many messages and tools, then the tokens and why it stopped, or the failure),
   every tool call, and every question a gate put to a person;
 - every event stored while it went, with the time it was stored, the time since the run
-  began and the time since the event before. Payloads are cut at 1000 characters; the log
-  has them whole.
+  began and the time since the event before. Payloads are cut at 1000 characters, and a
+  model's thinking is shown without the signature it carries; the log has them whole.
 
 Under the run's first lines, `used` adds up what its model requests took: how many answered,
 and the tokens in and out over all of them, the sessions it started included.

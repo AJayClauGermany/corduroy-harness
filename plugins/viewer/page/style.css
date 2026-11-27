@@ -176,6 +176,9 @@ main { flex: 1; min-width: 0; overflow-y: auto; padding: 18px 22px 60px; }
 .composer button[hidden] { display: none; }
 .composer .note { margin-top: 5px; min-height: 1.3em; font-size: 12.5px; }
 .composer .note.trouble { color: var(--bad); }
+.composer .note.copy { max-width: 980px; margin-top: 0; font-size: 13px; }
+.composer .note.copy b { color: var(--ink); }
+.composer code { font-family: var(--mono); font-size: 12.5px; color: var(--ink); }
 main > * { max-width: 980px; }
 main.wide > * { max-width: none; }
 h1 { margin: 0 0 2px; font-size: 19px; font-weight: 620; }

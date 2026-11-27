@@ -865,6 +865,8 @@ pub struct Agent {
     pub harness: Harness,
     /// What it was put together from.
     pub file: AgentFile,
+    /// The agent file that was read, if it came from one and is not the default agent.
+    pub source: Option<PathBuf>,
     /// Where the event log is.
     pub log: PathBuf,
     /// Plugins that did not start.
@@ -953,6 +955,7 @@ pub fn assemble_from(
     Ok(Agent {
         harness,
         file: file.clone(),
+        source: places.file.clone(),
         log,
         failed,
     })
