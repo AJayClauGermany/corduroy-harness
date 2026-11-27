@@ -154,16 +154,6 @@ than to one project. If it is ours alone, it is an internal boundary with good h
 home that is not one repository; an internal boundary needs neither, and should not carry
 the cost of pretending.
 
-### P13. Is independence from any one model part of the value?
-
-The agents most people use are made by model vendors and move with their models. An
-independent harness is neutral and always a little behind on what one model newly offers.
-The evals here already run against a 1.7-billion-parameter model on a laptop.
-
-*Direction.* Decide whether "works well with any model, small and local ones included" is a
-stated goal. It shapes the default prompts, the tool set, the loop and what counts as a
-regression.
-
 ### P14. How does it reach people?
 
 A new terminal agent asks someone to change a habit. The alternatives are to sit behind
@@ -485,20 +475,23 @@ schema before the gates are asked.
 There is one flat set of names. An MCP server's tools are `<server>__<tool>`; an add-on's
 are bare, and the second to register a name is refused.
 
-Replacing a tool by name works, and is tried: `lean-shell` offers `bash` in `pi-tools`'
-place, and one conversation run against each leaves the same trail
-(`tests/replacement.rs`). What it leaned on is not the harness's. `pi-tools` gives the name
-up through a setting of its own (`tools`), so an add-on without such a setting cannot have
-one tool replaced; the two agree on the contract only because they share its code; and the
-loser of a clash does not start at all, its other tools with it, by the order of the agent
-file.
+How one tool replaces another is decided, and built
+([What an extension can reach](design.md#what-an-extension-can-reach)): where the agent
+file says so, and only by a tool with the same input schema and the same word on being
+repeated. Two things it showed are left. What a tool returns is not compared, because no
+tool declares the shape of its output: `lean-shell` and `pi-tools` agree on the form of
+`bash`'s result only because they share its code. And the loser of a clash that was not
+said to be a replacement does not start at all, its other tools with it, by the order of
+the agent file.
 
-*Direction.* A naming rule before third-party add-ons exist, and a decision on what a clash
-does to the plugin that lost. Decide whether leaving a tool out is each add-on's to offer,
-as now, or something the agent file can say of any add-on (its `tools` grant covers what an
-add-on may call, not what it may offer); whether a replacement says which tool it replaces,
-so that the host can check the schema and the flags agree rather than trust shared code;
-and whether an add-on that lost one name should keep its others.
+*Direction.* A naming rule before third-party add-ons exist, and a decision on whether an
+add-on that lost one name should keep its others. Then whether a tool may declare its
+output's shape. The place for it is there already: a named value in the tail of
+`tool-spec` ([E2](#e2-can-what-a-guest-returns-grow)) and a builder method on the core's
+`ToolSpec`, so it can be added after 1.0. What is not settled is what it would mean: whether
+the harness holds a result to it, and what happens to one that does not fit; whether the
+model is told it; or whether it is only what a replacement is compared by. A tool like
+`bash` or `read` returns free text and would have nothing to declare.
 
 ### B27. Can code in a kernel call back into the agent?
 
@@ -1156,6 +1149,11 @@ The loop sends the session's projection, which only a `compaction` event changes
 old tool results, trimming images, marking cache points and adding reminders are other ways
 to manage a context, and an extension can do none of them without writing to the log.
 
+What the model was shown can be read back: a request names its system prompt and its tool
+declarations by hash, and the log holds each once
+([What the record promises](design.md#what-the-record-promises)). That is the record of it,
+and says nothing on who may change it.
+
 *Direction.* Decide whether shaping the request is a contribution of its own (a step
 between the projection and the provider) or always means a custom `Loop`.
 
@@ -1176,19 +1174,15 @@ clock and has its own count of tokens), and the unit a budget of cost is written
 
 ### G21. Who retries, and who falls back?
 
-Retries are the provider's, and each is recorded with who made it (`model/retry`, `by`):
-see [What the record promises](design.md#what-the-record-promises). A model that still
-fails ends the run as failed; there is no falling back to another model or provider.
+Retries are the provider's, made by one layer and each recorded with who made it
+(`model/retry`, `by`): see
+[What the record promises](design.md#what-the-record-promises). A model that still fails
+ends the run as failed; there is no falling back to another model or provider.
 
-Two things are left. oi-kit's client retries a failed request by itself before the
-provider's adapter hears of it, and the adapter then retries the whole of that, so a
-refused connection is tried sixteen times over about 36 seconds and only the adapter's
-three retries are recorded. And nothing falls back.
-
-*Direction.* Decide whether the adapter's own retries stay on top of the client's, since
-one of the two is enough and only ours can be recorded. Then whether falling back is the
-provider's for good, or the loop's, which now has the error kinds to go by and would say
-`by` its own name.
+*Direction.* Decide whether falling back is the provider's for good, or the loop's, which
+now has the error kinds to go by and would say `by` its own name. The client beneath the
+provider is heard, not told: ask oi-kit for a way to switch its retries off, so that
+hearing a log line is not what one layer of retries rests on.
 
 ### G22. Is the event stream the only way to observe a run?
 

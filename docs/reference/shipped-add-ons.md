@@ -45,8 +45,9 @@ The tool's name, its input and the form of its result (the end of the output, a 
 earlier output was dropped, `[exit status N]`, binary output named by kind and size) are the
 same code as `pi-tools`' (`plugins/shell-tool`), so a gate's rule for `bash`, the log and the
 model's own habits hold whichever add-on answers. A tool's name belongs to one add-on: an
-agent with both loads `pi-tools` with `tools = ["read", "write", "edit", "tree"]`, and the
-second to offer `bash` otherwise does not start
+agent with both lists `lean-shell` after `pi-tools` with `replaces = ["bash"]`, which lets
+it take the name over because its `bash` takes what `pi-tools`' takes; without that the
+second to offer `bash` does not start
 ([Replace a shipped tool](../how-to/replace-a-shipped-tool.md)).
 
 By default the model's script is given to `rtk rewrite`, which answers with the script with

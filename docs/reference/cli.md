@@ -77,6 +77,9 @@ did not.
 - `fronts` is what you reach the agent through besides the terminal: `page` where the
   [`page`](agent-file.md#extensionsname) extension is turned on, `none` where it is not.
   `check` serves nothing; the page opens when a run is about to go.
+- `tool` lists each tool by name, with `(read-only)` for one that only looks and
+  `(replaces another add-on's)` for one an add-on offers in another's place
+  ([`replaces`](agent-file.md#plugins)).
 
 **`sessions`** List the sessions in the log, each with the session it was started from.
 

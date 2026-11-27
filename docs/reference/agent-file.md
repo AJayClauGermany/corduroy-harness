@@ -56,6 +56,17 @@ is what `provider` refers to.
 | `temperature` | float | Sampling temperature. Default: the model's own. |
 | `thinking` | string | `off`, `low`, `medium`, `high` or `max`, for a model that can think before it answers. |
 
+An entry that is wrong (an unknown kind, a missing key) stops the agent from being
+assembled, or leaves a spare provider out. A machine whose certificates cannot be loaded
+does not: the provider is built without its HTTP client, so `corduroy check` and whatever
+else asks no model still work, and the first request fails saying why, naming
+`SSL_CERT_FILE` or `SSL_CERT_DIR` where one is set and nothing could be read from it. That
+holds for a provider at `http://127.0.0.1` too, whose client is set up the same way.
+
+A request that fails in a way worth trying again (a rate limit, a server error, a dropped
+connection) is made again three times at most, each time recorded as
+[`model/retry`](events.md#the-run).
+
 A key the entry does not know is an error. Nothing here lists the models add-ons may ask:
 an add-on names a model as `<name>/<model>` (this entry's name, then the provider's own name
 for the model), and its [`llm` grant](capabilities.md) says which it may ask.
@@ -192,6 +203,7 @@ after every native plugin above.
 | `path` | string | required | The `.wasm` file: absolute, or found on the plugin path (below). |
 | `config` | any TOML value | none | Its configuration, handed to its `activate` as JSON. |
 | `grants` | table | none | Each capability it is granted, with its scope (below). |
+| `replaces` | list of strings | none | The tools it offers in the place of tools an add-on listed before it registered, by name. Without it, the second add-on to offer a name does not start. With it, each tool named takes the name over, and only if it can be taken for the tool it replaces: the same input schema (as JSON, spacing aside) and the same word on whether a call may be made again after a crash. A tool that differs, a name nothing has registered, or a name this add-on does not offer stops the add-on from starting, and says which. What it replaced is called again once this add-on is unloaded. See [Replace a shipped tool](../how-to/replace-a-shipped-tool.md). |
 | `enabled` | boolean | `true` | `false` keeps the entry without loading it. |
 
 **The plugin path.** A relative `path` is looked for, in order, in each directory in

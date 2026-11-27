@@ -379,6 +379,17 @@ def asked(t, gate=None):
     ]
 
 
+def waiting(t) -> list[str]:
+    """The ids of the questions a gate asked that nobody has answered."""
+    answered = {e["payload"].get("id") for e in t.events(topic="gate/answer")}
+    return [a["id"] for a in asked(t) if a.get("id") and a["id"] not in answered]
+
+
+def addressed(ids: list[str], answer: str = "y") -> str:
+    """Standard input that gives `answer` to each of the questions `ids`, and to no other."""
+    return "".join(f"@{i} {answer}\n" for i in ids)
+
+
 @task(2, "`smart` approval asks; `y` on standard input lets the write through")
 def gate_yes(t):
     t.configure(*SMART)
@@ -419,7 +430,14 @@ def gate_unattended(t):
     t.expect(ran.code == 7, f"the waiting run exited {ran.code}, expected 7")
     t.expect(t.read("later.txt") is None, "the file was written before anyone answered")
     t.expect(t.last_status() is None, f"a waiting run has a turn/end: {t.last_status()}")
-    again = t.corduroy("continue", stdin="y\ny\ny\ny\n")
+    # Each answer names the question it is for (`@<id> y`), read from the log: a caller that
+    # pipes bare `y`s approves whatever comes. A question asked after that waits in its
+    # turn, and is answered the same way.
+    again = t.corduroy("continue", stdin=addressed(waiting(t)))
+    for _ in range(3):
+        if again.code != 7:
+            break
+        again = t.corduroy("continue", stdin=addressed(waiting(t)))
     finished(t, again, "continue")
     t.expect(code in (t.read("later.txt") or ""), f"later.txt holds {t.read('later.txt')!r}")
     restarts = t.events(topic="run/restart")

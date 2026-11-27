@@ -145,6 +145,12 @@ as design guidance, not noise.
   plugin by name, so `App` does not apply a second plugin of a name already held, nor one
   named `host`, `agent`, `user` or `environment`. Give native plugins names that cannot
   collide with a plugin's (`kernel-<name>`).
+- **A tool is replaced only where that is said, and checked.** The second plugin to
+  register a tool's name is refused. One stands in for another's only through
+  `Tools::stand_in` (`replaces` on an add-on's entry), which the core allows for a tool
+  with the same input schema and the same word on being repeated, and which is an effect:
+  the replaced tool is called again when the replacement is unloaded. Never take a name
+  over by removing what holds it.
 - **Decision points are declared.** Ask the gates only at a point declared in `Gates`
   (the core's two, or one an extension declared); an undeclared point is denied.
 - **Every registration is an effect.** Plugins set things up only through their `Context`
@@ -174,6 +180,9 @@ as design guidance, not noise.
 - **Protected paths stay out of reach.** `WasmRuntime::protect` paths (the host binary and
   the disk cache from the start) are refused to `fs-read` and `fs-write` before any scope
   check; any new path-taking host function must go through `HostState::path`.
+- **A request is made again by one layer, and each time is recorded.** A provider tells
+  the harness of every retry (`Reports::retry`), its client's included, and does not retry
+  what the layer beneath it already gave up on. Never add a retry that is not told.
 - **The model is a service.** The loop asks the provider registered under its name in
   `Providers` on every request (`provider::Routed`); never hold a provider elsewhere.
   `Harness::new` registers its argument there. Plugins reach models through the core's

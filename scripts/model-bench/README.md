@@ -45,6 +45,24 @@ sudo python3 scripts/model-bench/bench.py --trials 3
 - **Several trials.** A task counts as passing or failing only when it does so every time;
   anything between is reported as its rate.
 
+## Models to try next
+
+One model has been through the list, so nothing yet separates what is that model's from
+what any small model does. The next passes are for other very small models, under about
+two billion parameters, and for ones that do not think before they answer. Candidates, as
+they were named and to be checked before use (the exact names, sizes and whether a build
+for `llama-server` exists): a MiniCPM variant at about one billion parameters and one at
+about two, and a Qwen 3 variant at about 0.9 billion.
+
+Two reasons for staying this small. The sandbox the bench runs in has practical limits,
+and a model of this size stays within them, slow as it is. And a small model shows whether
+the harness makes up for what it lacks: a larger one does more and recovers from more, and
+would hide what the harness leaves a model to work out for itself
+([Design](../../docs/design.md#what-it-is-for)).
+
+To run another model, serve it as an OpenAI-compatible endpoint and pass `--url`; give the
+results another `--out`, so that passes can be laid side by side.
+
 ## Files
 
 | File | What |

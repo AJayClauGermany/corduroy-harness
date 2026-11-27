@@ -47,6 +47,20 @@ The same tokens then go further, and a smaller model can do more, because less i
 it each time. So "the agent extends itself" is a claim of 1.0, and the first thing to be
 demonstrated.
 
+**Any model, small and local ones included.** A working goal, not yet a promise: the
+harness is meant to work well with whatever model it is given, and to make up for what a
+small one lacks instead of leaving it to work things out itself. A larger model can do more
+and recover from more; a small one should not be left behind for want of something the
+harness could have done (a bound on what a tool returns, a limit on an answer, a refusal
+that says what would have worked). It is the other side of growth: the more of the work is
+structure the harness keeps, the less of it has to be thought through each time, and the
+smaller the model that can do it. What it means in practice is that a change is weighed
+against a small model on this machine as well as a large one elsewhere, and
+[`scripts/model-bench`](../scripts/model-bench/README.md) is the regression suite for
+that: tasks done several times against a local model, judged by outcome
+([what the first pass found](local-model-findings.md)). One model has been through it so
+far, so what is that model's and what is any small model's is not yet told apart.
+
 **Which property leads.** Three properties serve that, and the value is in having them
 together:
 
@@ -856,6 +870,19 @@ which files, which hosts, which models, which tools. It is the
 - *The tools offered are the session's `tools` grant.* The model is offered, and may call,
   only the tools that scope reaches. The registry stays one flat set, and a tool is in a
   session by its name.
+- *A tool is replaced only where that is said, and only by one that can be taken for it.*
+  A name belongs to one plugin, and the second to register it is refused. One plugin's
+  tool stands in for another's when whoever loads it says so (`replaces` on an add-on's
+  entry in the agent file; `Tools::stand_in` for an extension): from then on a call of
+  that name is a call of the replacement, which is what an alias is. The core lets it
+  only if the two declare the same input schema (as JSON text, spacing aside) and the same
+  word on whether a call may be made again after a crash, and says which differs when it
+  refuses. What a tool says of itself to the model, whether it only reads and how much of
+  a result it keeps are its own. The tool that was replaced stays registered beneath, and
+  is the one called again when the replacement is unloaded: the replacement is an effect
+  like any registration. What a tool returns is not checked, since no tool declares it
+  ([Open questions](open-questions.md), B26). Built, and tried with `lean-shell` in
+  `pi-tools`' place (`tests/replacement.rs`).
 - *The record is among what a session sees.* `log-read` is narrowed like the rest, so one
   agent of a pair does not read the other's session.
 - *A tool from an extension or an MCP server is offered or not.* It is code the grants do
@@ -1430,8 +1457,35 @@ is byte for byte what was committed (built).
 `tool/result` with the signal that brings it, so a reader has one rule for calls. A model
 request made again after a failed attempt is recorded as `model/retry`, with why, how long
 was waited and who retried: a provider tells the harness, which records it, and never
-writes to the stream itself (`Provider::complete_reporting`; built). What the client
-library beneath a provider retries by itself is not seen, and so not recorded.
+writes to the stream itself (`Provider::complete_reporting`; built).
+
+**A request is made again by one layer.** oi-kit's client makes a refused request again by
+itself, inside the call that sends it, and has no setting that stops it and no way to be
+told of it but a line it logs. The provider listens for that line while it waits for an
+attempt and tells each such retry as the `client`'s, so it is recorded like any other; and
+what the client gave up on is not tried again above it. The provider's own retries are for
+what the client does not retry (an answer that breaks off while it is read, a provider
+whose client retries nothing), and both count against the one limit of the provider's
+policy. An endpoint that keeps refusing is asked four times, not sixteen (built; a test
+counts them). Should the client stop writing that line, nothing is heard and the provider
+retries as if the client made none: the retries are then two layers deep again, and the
+test says so. The right end of this is a client that can be told not to retry, which is
+oi-kit's to offer.
+
+**What a request asked for and what the model was shown.** `model/request` says what the
+provider adds on the way, where the provider says (`Provider::asking`: the limit on the
+answer as the request carries it, the temperature, the thinking, the time one attempt
+has), and what the request is reckoned to take, which is the only size a request that
+fails ever has. It names the system prompt and the tool declarations it carried by hash,
+and each distinct one is recorded once for a log, as `model/shown`, the first time a
+request carries it: in the same log, so there is no second file to keep in step, and of no
+session, so removing a session leaves what other sessions' requests still name. The hash
+is 64-bit FNV-1a, which the loop can compute without the standard library or a dependency;
+it tells one prompt from another and protects nothing. A system prompt holds whatever the
+prompt parts hold, and recording it records nothing the provider was not sent, in a log
+that already holds every message (built). A `tool/result` says how large the result is,
+and where its call had a bound, what the model is shown of it at most and whether it was
+cut; a `capability/denied` names the tool call that was being served (built).
 
 **How it is read.** By session, filtered, in order: the tool calls, the asks and their
 answers, where a run stopped. A reader wants the shape of a run first (search, reproduce,
