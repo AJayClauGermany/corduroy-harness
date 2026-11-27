@@ -1,0 +1,3 @@
+# A log is written with Unix line ends on every system, and its header is rewritten in
+# place by length, so a fixture of one must be checked out as it was written.
+*.jsonl text eol=lf

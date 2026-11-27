@@ -50,6 +50,8 @@ Using the `corduroy` command:
 - [Report a problem](how-to/report-a-problem.md): `corduroy doctor`, which tries the agent
   part by part, and `corduroy report`, what a run did and how long each part took, in one
   piece to hand over.
+- [Replace a shipped tool with your own](how-to/replace-a-shipped-tool.md): `bash` from
+  another add-on, and what a drop-in replacement has to keep.
 - [Add an MCP server](how-to/add-an-mcp-server.md).
 - [Give an add-on a secret](how-to/use-secrets-and-http.md) and let it make HTTP requests.
 

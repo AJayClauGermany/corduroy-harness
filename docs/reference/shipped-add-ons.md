@@ -20,8 +20,50 @@ from Goose.
 | `bash` | `command`, `timeout` (seconds): run in the kernel, whose working directory and variables persist | |
 | `tree` | `path` (`.`), `depth`: a directory's layout through `fs-read` alone; skips `.git`, `node_modules`, `target`, `.corduroy`, `.venv` | yes |
 
-Output is capped at 2000 lines or 50 KB. Config: `kernel`, the kernel `bash` runs in (`shell`).
-Grants: `fs-read`, `fs-write`, `kernel`.
+Output is capped at 2000 lines or 50 KB, and `read`, `bash` and `tree` say so to the harness
+as a result of 16 384 tokens at most (counted as three bytes to a token): for a model that
+holds little the harness cuts a result to an eighth of its context, the start of a file or
+a tree and the end of a command's output, and the result says how much is shown
+([Design](../design.md#keeping-within-what-the-model-holds)). A binary file read with `read`, or printed by a
+command in `bash`, is not returned: the result names its kind and size instead. A `path`
+is relative to the working directory. Config: `kernel`, the kernel `bash` runs in (`shell`);
+`tools`, the ones to offer (all five when absent), which is how one is left to another
+add-on, as `bash` is to [`lean-shell`](#lean-shell). A name in `tools` that is not one of the
+five stops the add-on from starting. Grants: `fs-read`, `fs-write`, `kernel`.
+
+## lean-shell
+
+`bash` in `pi-tools`' place, with each command put through a program that shortens what it
+prints before the model reads it: [`rtk`](https://github.com/rtk-ai/rtk) unless `prefix`
+names another. Off in the default agent; its entry there is commented out.
+
+| Tool | Input | Read-only |
+| --- | --- | --- |
+| `bash` | `command`, `timeout` (seconds): as `pi-tools`' `bash` | |
+
+The tool's name, its input and the form of its result (the end of the output, a line when
+earlier output was dropped, `[exit status N]`, binary output named by kind and size) are the
+same code as `pi-tools`' (`plugins/shell-tool`), so a gate's rule for `bash`, the log and the
+model's own habits hold whichever add-on answers. A tool's name belongs to one add-on: an
+agent with both lists `lean-shell` after `pi-tools` with `replaces = ["bash"]`, which lets
+it take the name over because its `bash` takes what `pi-tools`' takes; without that the
+second to offer `bash` does not start
+([Replace a shipped tool](../how-to/replace-a-shipped-tool.md)).
+
+By default the model's script is given to `rtk rewrite`, which answers with the script with
+`rtk` put in front of the commands it knows, and the answer is run in the shell itself, so
+`cd` and variables carry over and a script `rewrite` has nothing for runs as written. The
+program is found on the kernel's `PATH`. Where it is not installed the call fails and says
+so, and the command is not run another way. The recipe is for a POSIX shell.
+
+| Config | Default | |
+| --- | --- | --- |
+| `kernel` | `shell` | The kernel commands run in |
+| `prefix` | `rtk` | The program, with any arguments it always takes; its first word is what must be installed |
+| `run` | ask `{prefix} rewrite`, run the answer | How a script is run: a template holding `{prefix}`, `{quoted}` (the script as one shell word) or `{command}` (the script as written). `"{prefix} {command}"` puts the program in front of whatever was written, which suits single commands only |
+| `result_tokens` | `4096` | The most one result takes of the model's context, a quarter of `pi-tools`'; the add-on keeps the last 2000 lines within three bytes a token, and says the same to the harness |
+
+Grants: `kernel`.
 
 ## search
 
@@ -32,12 +74,13 @@ command it asks about.
 | Tool | Input | Read-only |
 | --- | --- | --- |
 | `grep` | `pattern` (a regular expression, matched against each line), `path` (a directory, searched all the way down, or one file; `.`), `glob` (only files matching it), `ignore_case`, `context` (lines around each match), `limit` (most matching lines, 100), `files_only` | yes |
-| `find` | `pattern` (on the path: `*.rs` is that name at any depth, `src/**/*.toml`, `*.{ts,tsx}`; `*` stays within one name, `**` crosses directories, `?` is one character), `path` (`.`), `limit` (200) | yes |
+| `find` | `pattern` (on the path: `*.rs` is that name at any depth, `src/**/*.toml`, `*.{ts,tsx}`; `*` stays within one name, `**` crosses directories, `?` is one character; a set of characters such as `[0-9]` is not supported and is refused, saying so), `path` (`.`), `limit` (200) | yes |
 
 `grep` answers as `path:line:text`, with `--` between runs of context. Both pass over `.git`,
 `node_modules`, `target`, `.corduroy` and `.venv`; `grep` also passes over files that are
 not text or that the grant does not reach, and the agent file in the working directory. A
-result is capped at 50 KB and 20 000 files.
+result is capped at 50 KB and 20 000 files, and at less for a model that holds little, as
+`read` is: the first matches are the ones kept.
 
 Config: `max_bytes`, the most text one `grep` reads (16 MB). A call into an add-on is
 metered, so a search stops there and says so; the model narrows it. Grants: `fs-read`.
@@ -172,7 +215,16 @@ reviewer to look for). Grants: `kernel`, `fs-read`, `llm`.
 
 Auto-compaction: provides the `compaction` service the harness asks before each step. When a
 request passes `max_tokens` input tokens, or the conversation passes `max_messages`, the
-start of it is summarised; the messages stay in the log, hidden from the model.
+start of it is summarised; the messages stay in the log, hidden from the model. The
+harness chooses where to cut: where the turn began, or, while a turn is under way, before
+its last step, so one long run is summarised as it goes. A session whose last run ended
+because its request was more than the model holds is summarised before its next request
+whatever the counts say. What is sent to the summariser is held to half of what the
+session's model holds (the start and more of the end of the transcript), so the request to
+summarise is not itself too much.
+
+The count compared with `max_tokens` is what the next request is expected to take: what
+the last one took and was answered with, and an estimate of what was added since.
 
 Config: `model` (required, as `<provider>/<model>`), `max_tokens` (three quarters of what the
 session's model holds, as its [description](agent-file.md#providersnamemodelsmodel) says;

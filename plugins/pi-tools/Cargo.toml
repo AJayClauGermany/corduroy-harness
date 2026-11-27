@@ -16,5 +16,6 @@ workspace = true
 
 [dependencies]
 corduroy-guest = { workspace = true }
+shell-tool = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

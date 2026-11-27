@@ -89,10 +89,13 @@ extern crate alloc;
 #[cfg(any(feature = "std", test))]
 extern crate std;
 
+pub mod bound;
 pub mod children;
 pub mod compact;
 pub mod gates;
 pub mod harness;
+pub mod hearing;
+pub mod live;
 pub mod loops;
 pub mod message;
 pub mod operation;
@@ -111,13 +114,17 @@ pub use corduroy_core::{ModelInfo, ModelReply, ModelRequest, StopReason, Usage};
 pub use corduroy_wasm as wasm;
 pub use gates::GateOperation;
 pub use harness::{Harness, HarnessError, OPERATIONS, Operations, Outcome, Status, Stepped};
+pub use hearing::{CHECKPOINT_TOKENS, Checkpoints};
+pub use live::{Live, Seen, Shown, Watch};
 pub use loops::{DEFAULT_LOOP, LOOPS, Loop, Loops, Run, StandardLoop, Step};
 pub use operation::{Next, Operation};
 pub use outside::{FRONTS, Front, Fronts, OUTSIDE, Outside};
 pub use provider::{
-    DEFAULT_PROVIDER, PROVIDERS, Provider, ProviderError, ProviderPlugin, Providers, provider,
+    Asking, BY_PROVIDER, CallPiece, DEFAULT_PROVIDER, PROVIDERS, Piece, Provider, ProviderError,
+    ProviderErrorKind, ProviderPlugin, Providers, Reports, Retry, pieces_of, provider,
 };
 pub use session::{
-    Answer, Ask, COMPACTION, Effect, End, Journal, MAIN, MODEL_REQUEST, PROCESS_START, ProcessInfo,
-    Removal, SESSION_REMOVED, SIGNAL, Session, SessionInfo, Sessions, Wait, removal,
+    Answer, Ask, COMPACTION, Effect, End, Journal, MAIN, MODEL_PARTIAL, MODEL_PROGRESS,
+    MODEL_REQUEST, MODEL_RETRY, MODEL_SHOWN, PROCESS_START, ProcessInfo, Removal, SESSION_REMOVED,
+    SIGNAL, Session, SessionInfo, Sessions, Wait, removal,
 };

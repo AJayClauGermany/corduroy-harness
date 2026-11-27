@@ -39,6 +39,8 @@ export default definePlugin({
       description: 'List every saved note, oldest first.',
       readOnly: true,
       replaySafe: true,
+      // A long list is cut from its end: the oldest notes are the ones shown.
+      result: { tokens: 4096, keep: 'head' },
       run() {
         return keys()
           .filter((key) => key.startsWith(PREFIX))

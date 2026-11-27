@@ -28,12 +28,14 @@
 use alloc::borrow::ToOwned;
 use alloc::string::String;
 use alloc::string::ToString;
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::error::Error;
 use core::fmt;
 
-use crate::registry::Registry;
+use crate::context::Context;
+use crate::registry::{NotReplaced, Registry};
 
 /// Name of the service under which the host provides the [`Tools`] registry.
 pub const TOOLS: &str = "tools";
@@ -64,6 +66,85 @@ pub struct ToolSpec {
     /// Whether the tool only looks and never changes anything. Gates see this, so an
     /// approval policy can let reads through and ask about writes.
     pub read_only: bool,
+    /// How much of the model's context one result should take at most, and which part of a
+    /// longer one is kept. `None` leaves it to whoever runs the call. See [`ResultBudget`].
+    pub result: Option<ResultBudget>,
+}
+
+/// Which part of a tool's result is kept when it is too long for the model.
+///
+/// More ways may follow, so code that reads one needs an arm for the rest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum Keep {
+    /// The start: right for a file read from its top, or a list in order of interest.
+    Head,
+    /// The end: right for the output of a command, where the error comes last.
+    Tail,
+    /// The start and the end, with the middle left out. What is assumed of a tool that
+    /// does not say.
+    #[default]
+    Ends,
+}
+
+impl Keep {
+    /// The word for this in a tool's own description of itself (`result-keep` in the
+    /// plugin world): `head`, `tail` or `ends`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Head => "head",
+            Self::Tail => "tail",
+            Self::Ends => "ends",
+        }
+    }
+
+    /// The way `word` names, if it names one.
+    #[must_use]
+    pub fn parse(word: &str) -> Option<Self> {
+        match word {
+            "head" => Some(Self::Head),
+            "tail" => Some(Self::Tail),
+            "ends" => Some(Self::Ends),
+            _ => None,
+        }
+    }
+}
+
+/// What a tool says about the size of its results: the most one should take of the model's
+/// context, and which part of a longer one is kept.
+///
+/// The size is in tokens, since that is what a model's context is counted in, and a token
+/// is taken to be [`BYTES_PER_TOKEN`] bytes of text: nobody but the model's own tokenizer
+/// knows the real count, and the same bytes come to very different counts (prose near four
+/// bytes to a token, a server's log nearer one and a half). Whoever runs the call cuts a
+/// longer result, and may hold a call to less than its tool asked for when the model holds
+/// little. A tool that would rather choose what to leave out asks what its call may return
+/// ([`call::budget`](crate::call::budget)) and keeps to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ResultBudget {
+    /// The most one result should take, in tokens of [`BYTES_PER_TOKEN`] bytes.
+    pub tokens: u32,
+    /// Which part of a longer result is kept.
+    pub keep: Keep,
+}
+
+/// How many bytes of text are counted as one token wherever a size is estimated.
+pub const BYTES_PER_TOKEN: u32 = 3;
+
+impl ResultBudget {
+    /// At most `tokens` tokens of a result, keeping `keep` of a longer one.
+    #[must_use]
+    pub const fn new(tokens: u32, keep: Keep) -> Self {
+        Self { tokens, keep }
+    }
+
+    /// The budget in bytes of text.
+    #[must_use]
+    pub const fn bytes(self) -> usize {
+        (self.tokens as usize).saturating_mul(BYTES_PER_TOKEN as usize)
+    }
 }
 
 impl ToolSpec {
@@ -82,7 +163,16 @@ impl ToolSpec {
             input_schema: input_schema.into(),
             replay_safe: false,
             read_only: false,
+            result: None,
         }
+    }
+
+    /// Say how much of the model's context one result should take at most, in tokens, and
+    /// which part of a longer one is kept. See [`ResultBudget`].
+    #[must_use]
+    pub const fn result(mut self, tokens: u32, keep: Keep) -> Self {
+        self.result = Some(ResultBudget::new(tokens, keep));
+        self
     }
 
     /// Say whether calling the tool twice is the same as calling it once, so that a call
@@ -315,7 +405,77 @@ where
     }
 }
 
+/// `schema`, a JSON Schema as JSON text, without the spaces and line ends between its
+/// parts, so that two writings of one schema compare equal. What is inside a string is
+/// kept as it is.
+fn packed(schema: &str) -> String {
+    let mut packed = String::with_capacity(schema.len());
+    let (mut quoted, mut escaped) = (false, false);
+    for character in schema.chars() {
+        if quoted {
+            quoted = escaped || character != '"';
+            escaped = !escaped && character == '\\';
+        } else if character.is_ascii_whitespace() {
+            continue;
+        } else {
+            quoted = character == '"';
+        }
+        packed.push(character);
+    }
+    packed
+}
+
+/// How a tool declared as `new` differs from the one declared as `used`, for a caller that
+/// took one for the other: in what it takes, or in whether a call may be made again. `Ok`
+/// if in neither.
+///
+/// What a tool says of itself to the model, whether it only reads, and how much of a
+/// result it keeps are its own, and may differ. So may what it returns, which no tool
+/// declares.
+fn differs(new: &ToolSpec, used: &ToolSpec) -> Result<(), String> {
+    if packed(&new.input_schema) != packed(&used.input_schema) {
+        return Err("its input schema is not the same as that of the tool it replaces".to_owned());
+    }
+    match (new.replay_safe, used.replay_safe) {
+        (true, false) => Err(
+            "it says a call may be made again after a crash (replay-safe), \
+                              and the tool it replaces does not"
+                .to_owned(),
+        ),
+        (false, true) => Err(
+            "the tool it replaces says a call may be made again after a \
+                              crash (replay-safe), and it does not"
+                .to_owned(),
+        ),
+        _ => Ok(()),
+    }
+}
+
 impl Registry<dyn Tool> {
+    /// Put `tool` in the place of the tool registered under its name, on behalf of the
+    /// plugin behind `ctx`: from now on a call of that name is a call of `tool`.
+    ///
+    /// It is done only for a tool that can be taken for the one it replaces: the same
+    /// name, the same input schema (as JSON text, spaces between its parts aside) and the
+    /// same word on whether a call may be made again after a crash. The tool it replaces
+    /// stays registered beneath it, and is called again once the plugin behind `ctx` is
+    /// unloaded.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NotReplaced::Missing`] if no tool of that name is registered, and
+    /// [`NotReplaced::Differs`], saying how, if the two differ.
+    pub fn stand_in(
+        self: &Arc<Self>,
+        ctx: &mut Context<'_>,
+        tool: Arc<dyn Tool>,
+    ) -> Result<(), NotReplaced> {
+        let spec = tool.spec();
+        self.replace(ctx, spec.name.clone(), tool, |used| {
+            differs(&spec, &used.spec())
+        })
+    }
+
     /// The specs of every registered tool, sorted by name.
     #[must_use]
     pub fn specs(&self) -> Vec<ToolSpec> {
@@ -338,8 +498,6 @@ impl Registry<dyn Tool> {
 
 #[cfg(test)]
 mod tests {
-    use alloc::sync::Arc;
-
     use super::*;
 
     fn shout() -> impl Tool {
@@ -461,5 +619,39 @@ mod tests {
         );
         assert_eq!(blocks.call("some").unwrap().to_text(), "some\nmore");
         assert_eq!(output.call("{}").unwrap().content(), []);
+    }
+
+    #[test]
+    fn a_tool_differs_from_another_in_what_it_takes_or_whether_it_is_repeated() {
+        let schema = r#"{"type":"object","properties":{"command":{"type":"string"}}}"#;
+        let used = ToolSpec::new("bash", "Runs a command.", schema);
+        // Its own words for itself, its budget and how its schema is laid out are its own.
+        let spaced =
+            "{ \"type\": \"object\",\n \"properties\": {\"command\": {\"type\": \"string\"}} }";
+        let same = ToolSpec::new("bash", "Runs a command, briefly.", spaced)
+            .read_only(true)
+            .result(100, Keep::Tail);
+        assert_eq!(differs(&same, &used), Ok(()));
+
+        let other = ToolSpec::new("bash", "Runs a command.", r#"{"type":"object"}"#);
+        assert!(differs(&other, &used).unwrap_err().contains("input schema"));
+        // A space inside a string is part of the schema.
+        let renamed = ToolSpec::new("bash", "", schema.replace("command", "com mand"));
+        assert!(differs(&renamed, &used).is_err());
+        let repeated = ToolSpec::new("bash", "", schema).replay_safe(true);
+        assert!(
+            differs(&repeated, &used)
+                .unwrap_err()
+                .contains("replay-safe")
+        );
+        assert!(
+            differs(&used, &repeated)
+                .unwrap_err()
+                .contains("replay-safe")
+        );
+        assert_eq!(
+            packed(r#"{ "a b" : "c \" d" , "e":1 }"#),
+            r#"{"a b":"c \" d","e":1}"#
+        );
     }
 }

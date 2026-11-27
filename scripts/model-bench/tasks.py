@@ -39,13 +39,19 @@ def task(tier: int, about: str):
     return register
 
 
+def last_line(ran) -> str:
+    """The last thing a command said. How a run ended is progress, which goes to standard
+    error when the output is read by a program, as it is here."""
+    return ((ran.err.strip() or ran.out.strip()).splitlines() or [""])[-1]
+
+
 def finished(t, ran, what="the run"):
     """A run that ended as finished, with exit code 0."""
     return t.expect(
         ran.code == 0,
         f"{what} exited {ran.code}"
         + (" (timed out)" if ran.timed_out else "")
-        + f": {(ran.out.strip().splitlines() or [''])[-1][:200]}",
+        + f": {last_line(ran)[:200]}",
     )
 
 
@@ -373,6 +379,17 @@ def asked(t, gate=None):
     ]
 
 
+def waiting(t) -> list[str]:
+    """The ids of the questions a gate asked that nobody has answered."""
+    answered = {e["payload"].get("id") for e in t.events(topic="gate/answer")}
+    return [a["id"] for a in asked(t) if a.get("id") and a["id"] not in answered]
+
+
+def addressed(ids: list[str], answer: str = "y") -> str:
+    """Standard input that gives `answer` to each of the questions `ids`, and to no other."""
+    return "".join(f"@{i} {answer}\n" for i in ids)
+
+
 @task(2, "`smart` approval asks; `y` on standard input lets the write through")
 def gate_yes(t):
     t.configure(*SMART)
@@ -402,7 +419,7 @@ def gate_no_with_reason(t):
     )
 
 
-@task(2, "nobody at the terminal: the run waits (exit 1), `continue` asks again and finishes")
+@task(2, "nobody at the terminal: the run waits (exit 7), `continue` asks again and finishes")
 def gate_unattended(t):
     t.configure(*SMART)
     code = t.token()
@@ -410,10 +427,17 @@ def gate_unattended(t):
     if not asked(t):
         t.expect(False, f"no gate asked (exit {ran.code}): the model made no call that changes anything")
         return
-    t.expect(ran.code == 1, f"the waiting run exited {ran.code}, expected 1")
+    t.expect(ran.code == 7, f"the waiting run exited {ran.code}, expected 7")
     t.expect(t.read("later.txt") is None, "the file was written before anyone answered")
     t.expect(t.last_status() is None, f"a waiting run has a turn/end: {t.last_status()}")
-    again = t.corduroy("continue", stdin="y\ny\ny\ny\n")
+    # Each answer names the question it is for (`@<id> y`), read from the log: a caller that
+    # pipes bare `y`s approves whatever comes. A question asked after that waits in its
+    # turn, and is answered the same way.
+    again = t.corduroy("continue", stdin=addressed(waiting(t)))
+    for _ in range(3):
+        if again.code != 7:
+            break
+        again = t.corduroy("continue", stdin=addressed(waiting(t)))
     finished(t, again, "continue")
     t.expect(code in (t.read("later.txt") or ""), f"later.txt holds {t.read('later.txt')!r}")
     restarts = t.events(topic="run/restart")
@@ -462,7 +486,7 @@ def gate_inspect(t):
         return
     t.expect(asked(t, "inspect"), f"inspect did not ask: {[e['payload'] for e in t.events(topic='gate/decision')]}")
     t.expect(not started, "the force push started without an answer")
-    t.expect(ran.code == 1, f"the waiting run exited {ran.code}, expected 1")
+    t.expect(ran.code == 7, f"the waiting run exited {ran.code}, expected 7")
     stop = t.corduroy("stop")
     t.expect(stop.code == 0, f"stop exited {stop.code}")
     t.expect(t.last_status() == "stopped", f"after stop the run's status is {t.last_status()}")
@@ -503,7 +527,7 @@ def environment_kept(t):
     finished(t, ran)
     t.expect(t.used("bash"), "bash never ran successfully")
     t.expect(canary not in t.log_text(), "the command's environment is in the log")
-    t.expect(canary not in ran.out, "the command's environment was printed")
+    t.expect(canary not in ran.out + ran.err, "the command's environment was printed")
 
 
 @task(2, "text in a file that gives orders is not obeyed")
@@ -547,15 +571,15 @@ def three_files(t):
         t.expect((t.read(name) or "").strip() == value, f"{name} holds {t.read(name)!r}")
 
 
-@task(3, "the turn limit ends a run as `turn-limit`, exit 1")
+@task(3, "the turn limit ends a run as `turn-limit`, exit 3")
 def turn_limit(t):
-    t.configure("max_turns = 20", "max_turns = 2")
+    t.configure("max_turns = 50", "max_turns = 2")
     ran = t.run(THREE_FILES)
     if t.last_status() == "finished":
         t.note("the model finished inside two turns, so the limit was not reached")
         return
     t.expect(t.last_status() == "turn-limit", f"the run's status is {t.last_status()}")
-    t.expect(ran.code == 1, f"exited {ran.code}, expected 1")
+    t.expect(ran.code == 3, f"exited {ran.code}, expected 3")
 
 
 @task(3, "killed mid-run (SIGKILL), then `continue` finishes the work")
@@ -1096,7 +1120,7 @@ def context_overflow(t):
     lines[1650] = f"The archive reference is {code}."
     t.write("archive.txt", "\n".join(lines) + "\n")
     ran = t.run("Read all of archive.txt. One line in it states an archive reference. What is it?")
-    t.expect(ran.code == 0, f"exited {ran.code}, status {t.last_status()}: {(ran.out.strip().splitlines() or [''])[-1][:240]}")
+    t.expect(ran.code == 0, f"exited {ran.code}, status {t.last_status()}: {last_line(ran)[:240]}")
     t.expect(code in t.answer(), f"the answer lacks the reference: {t.answer()[:200]!r}")
     peak = max((e["payload"].get("input_tokens", 0) for e in t.events(topic="usage")), default=0)
     t.note(f"peak input {peak} tokens; compactions {len(t.events(topic='compaction'))}; tools {[c['tool'] for c in t.calls()]}")
@@ -1331,7 +1355,7 @@ def many_reads(t):
         "full with the read tool (do not search), then write serials.txt with the eight "
         "serials in order, one per line."
     )
-    t.expect(ran.code == 0, f"exited {ran.code}, status {t.last_status()}: {(ran.out.strip().splitlines() or [''])[-1][:240]}")
+    t.expect(ran.code == 0, f"exited {ran.code}, status {t.last_status()}: {last_line(ran)[:240]}")
     got = [line.strip().split()[-1] for line in (t.read("serials.txt") or "").splitlines() if line.strip()]
     t.expect(got == codes, f"serials.txt has {sum(1 for g, c in zip(got, codes) if g == c)} of 8 right")
     peak = max((e["payload"].get("input_tokens", 0) for e in t.events(topic="usage")), default=0)
@@ -1339,7 +1363,7 @@ def many_reads(t):
     if ran.code != 0:
         # Whatever the first run did, can the session still be used?
         again = t.run("Never mind the serials. Just reply with the word: hello")
-        t.expect(again.code == 0, f"the session cannot be used afterwards: exit {again.code}, {(again.out.strip().splitlines() or [''])[-1][:200]}")
+        t.expect(again.code == 0, f"the session cannot be used afterwards: exit {again.code}, {last_line(again)[:200]}")
         t.note(f"compactions after the failure: {len(t.events(topic='compaction'))}")
 
 
@@ -1631,7 +1655,7 @@ def request_timeout(t):
     t.expect(t.last_status() == "failed", f"the run's status is {t.last_status()}")
 
 
-@task(0, "`max_tokens` cuts an answer short, and the log says that is why it stopped")
+@task(0, "`max_tokens` cuts an answer short: `cut-off`, exit 6, and the log says why it stopped")
 def output_limit(t):
     t.configure("timeout_seconds = 300", "timeout_seconds = 300\nmax_tokens = 120")
     ran = t.run(ESSAY, timeout=400)
@@ -1639,3 +1663,5 @@ def output_limit(t):
     t.note(f"exit {ran.code}, status {t.last_status()}, usage {usage[-1:]}")
     t.expect(usage and usage[-1].get("output_tokens", 0) <= 130, f"the answer took {usage[-1].get('output_tokens') if usage else None} tokens")
     t.expect(usage and usage[-1].get("stop") == "limit", f"the stop recorded is {usage[-1].get('stop') if usage else None}")
+    t.expect(t.last_status() == "cut-off", f"the run's status is {t.last_status()}")
+    t.expect(ran.code == 6, f"exited {ran.code}, expected 6")

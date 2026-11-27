@@ -130,9 +130,16 @@ fn corduroy_with(
     typed: &str,
     env: &[(&str, &str)],
 ) -> std::io::Result<Output> {
+    // Everything on standard output, as at a terminal, unless the test says otherwise.
+    let together: &[&str] = if args.contains(&"--progress") {
+        &[]
+    } else {
+        &["--progress", "stdout"]
+    };
     let mut child = Command::new(env!("CARGO_BIN_EXE_corduroy"))
         .arg("--workspace")
         .arg(workspace)
+        .args(together)
         .args(args)
         .env_remove("ANTHROPIC_API_KEY")
         .env_remove("OPENAI_API_KEY")
@@ -215,6 +222,7 @@ fn attended(workspace: &Path, args: &[&str]) -> std::io::Result<std::process::Ch
     Command::new(env!("CARGO_BIN_EXE_corduroy"))
         .arg("--workspace")
         .arg(workspace)
+        .args(["--progress", "stdout"])
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -487,7 +495,11 @@ fn a_run_waits_across_processes_for_its_answer() {
     .unwrap();
 
     let first = corduroy(&workspace, &["run", "write", "later"], "").unwrap();
-    assert!(!first.status.success());
+    assert_eq!(
+        first.status.code(),
+        Some(7),
+        "waiting has a code of its own"
+    );
     assert!(text(&first.stdout).contains("corduroy continue"));
     assert!(!target.exists());
 
@@ -500,6 +512,91 @@ fn a_run_waits_across_processes_for_its_answer() {
     );
     assert!(stdout.contains("Done, once you said so."), "{stdout}");
     assert_eq!(fs::read_to_string(&target).unwrap(), "later");
+}
+
+/// A program that drives the command reads the answer on standard output and nothing else,
+/// and an answer it gives a gate goes to the question it names or to none.
+#[test]
+fn a_program_reads_the_answer_alone_and_answers_a_question_by_its_id() {
+    let workspace = scratch("cli-driven");
+    let plugins = plugin("pi-tools").parent().unwrap().to_owned();
+    let target = workspace.join("later.txt");
+    let (address, _seen) = model(vec![
+        tool_call("write", &json!({"path": target, "content": "later"})),
+        answer("Done, once you said so."),
+    ])
+    .unwrap();
+    fs::write(
+        workspace.join("corduroy.toml"),
+        agent_file(address, &plugins),
+    )
+    .unwrap();
+    // Standard output is a pipe here, so progress is kept apart without being asked.
+    let driven = |args: &[&str], typed: &str| {
+        let mut all = vec!["--progress", "stderr"];
+        all.extend_from_slice(args);
+        corduroy(&workspace, &all, typed).unwrap()
+    };
+
+    let first = driven(&["run", "write", "later"], "");
+    assert_eq!(first.status.code(), Some(7));
+    assert_eq!(text(&first.stdout), "", "nothing was answered yet");
+    let progress = text(&first.stderr);
+    assert!(
+        progress.contains("▸ write") && progress.contains("approval asks (call_1):"),
+        "{progress}"
+    );
+    assert!(progress.contains("about call_1"), "{progress}");
+
+    // Answers prepared for other questions are given to none, however many there are.
+    let wrong = driven(&["continue"], "@call_9 y\n@call_8 y\n");
+    assert_eq!(wrong.status.code(), Some(7), "{}", text(&wrong.stderr));
+    assert!(
+        text(&wrong.stderr).contains("no question `call_9` is waiting"),
+        "{}",
+        text(&wrong.stderr)
+    );
+    assert!(!target.exists());
+
+    let right = driven(&["continue"], "@call_1 y\n");
+    assert!(right.status.success(), "{}", text(&right.stderr));
+    assert_eq!(text(&right.stdout), "Done, once you said so.\n");
+    assert!(text(&right.stderr).contains("✓"), "{}", text(&right.stderr));
+    assert_eq!(fs::read_to_string(&target).unwrap(), "later");
+}
+
+/// Left to itself, the command keeps progress apart whenever its output is not a terminal.
+#[test]
+fn progress_goes_to_standard_error_when_the_output_is_piped() {
+    let workspace = scratch("cli-piped");
+    let plugins = plugin("pi-tools").parent().unwrap().to_owned();
+    let (address, _seen) = model(vec![
+        tool_call("read", &json!({"path": "notes.txt"})),
+        answer("It says hello."),
+    ])
+    .unwrap();
+    fs::write(workspace.join("notes.txt"), "hello").unwrap();
+    fs::write(
+        workspace.join("corduroy.toml"),
+        agent_file(address, &plugins),
+    )
+    .unwrap();
+
+    let piped = Command::new(env!("CARGO_BIN_EXE_corduroy"))
+        .arg("--workspace")
+        .arg(&workspace)
+        .args(["run", "what does notes.txt say?"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+
+    assert!(piped.status.success(), "{}", text(&piped.stderr));
+    assert_eq!(text(&piped.stdout), "It says hello.\n");
+    assert!(
+        text(&piped.stderr).contains("▸ read"),
+        "{}",
+        text(&piped.stderr)
+    );
 }
 
 #[test]
@@ -692,6 +789,37 @@ fn check_says_what_the_agent_has_and_a_plugin_cannot_read_the_agent_file() {
         stdout.contains("! pi-tools was refused `fs-read`"),
         "{stdout}"
     );
+}
+
+#[test]
+fn certificates_that_cannot_be_read_stop_a_request_and_not_the_command() {
+    let workspace = scratch("cli-certificates");
+    let plugins = plugin("pi-tools").parent().unwrap().to_owned();
+    let (address, _seen) = model(vec![answer("never asked")]).unwrap();
+    fs::write(
+        workspace.join("corduroy.toml"),
+        agent_file(address, &plugins),
+    )
+    .unwrap();
+    let missing = workspace.join("no-such-certificates.pem");
+    // Both places certificates are looked for: a test run is given a directory of them.
+    let env = [
+        ("SSL_CERT_FILE", missing.to_str().unwrap()),
+        ("SSL_CERT_DIR", missing.to_str().unwrap()),
+    ];
+
+    // A command that asks no model says what the agent has, as ever.
+    let check = corduroy_with(&workspace, &["check"], "", &env).unwrap();
+    let report = text(&check.stdout);
+    assert!(check.status.success(), "{report}\n{}", text(&check.stderr));
+    assert!(report.contains("tool      read (read-only)"), "{report}");
+
+    // The first request is where it fails, saying which variable to look at.
+    let run = corduroy_with(&workspace, &["run", "hi"], "", &env).unwrap();
+    let said = format!("{}{}", text(&run.stdout), text(&run.stderr));
+    assert_eq!(run.status.code(), Some(1), "{said}");
+    assert!(said.contains("SSL_CERT_FILE names"), "{said}");
+    assert!(said.contains("no-such-certificates.pem"), "{said}");
 }
 
 #[test]
@@ -897,4 +1025,94 @@ fn without_an_agent_file_no_key_is_read_and_the_agent_says_what_it_is() {
             .stdout,
     );
     assert!(!log.contains("sk-ant-unused") && !said.contains("sk-ant-unused"));
+}
+
+/// The log's `turn/end` payloads, in order.
+fn ends(workspace: &Path) -> Vec<String> {
+    let log = fs::read_to_string(workspace.join(".corduroy/log.jsonl")).unwrap_or_default();
+    log.lines()
+        .filter_map(|line| serde_json::from_str::<Vec<Value>>(line).ok())
+        .flatten()
+        .filter(|event| event.get("topic").and_then(Value::as_str) == Some("turn/end"))
+        // The payload is the JSON itself in the file, read in one go.
+        .filter_map(|event| event.get("payload").map(Value::to_string))
+        .collect()
+}
+
+/// Each way a run ends short of an answer has an exit code of its own, which `corduroy
+/// codes` explains, so a program that started the command can tell them apart.
+#[test]
+fn a_run_cut_short_exits_with_the_code_of_what_cut_it() {
+    let plugins = plugin("pi-tools").parent().unwrap().to_owned();
+    let reads = || tool_call("tree", &json!({}));
+    let cut = completion(
+        &json!({"role": "assistant", "content": "Half of"}),
+        "length",
+    );
+    let cases = [
+        (
+            "turns",
+            "max_turns = 1\n",
+            vec![reads(), reads()],
+            3,
+            "turn-limit",
+        ),
+        (
+            "time",
+            "max_seconds = 0\n",
+            vec![answer("never asked")],
+            4,
+            "time-limit",
+        ),
+        // Each reply of the fake model is five tokens written.
+        (
+            "output",
+            "max_output_tokens = 5\n",
+            vec![reads(), reads()],
+            5,
+            "output-limit",
+        ),
+        ("cut", "", vec![cut], 6, "cut-off"),
+    ];
+    for (name, limit, replies, code, status) in cases {
+        let workspace = scratch(&format!("cli-code-{name}"));
+        let (address, seen) = model(replies).unwrap();
+        let file = format!("{limit}{}", agent_file(address, &plugins).trim_start());
+        fs::write(workspace.join("corduroy.toml"), file).unwrap();
+
+        let ran = corduroy(&workspace, &["run", "look", "around"], "").unwrap();
+
+        let stdout = text(&ran.stdout);
+        assert_eq!(ran.status.code(), Some(code), "{name}: {stdout}");
+        assert_eq!(ends(&workspace), [format!(r#"{{"status":"{status}"}}"#)]);
+        // Out of time before the first request, the model is never asked.
+        let asked = seen.lock().unwrap().len();
+        assert_eq!(asked, usize::from(name != "time"), "{name}");
+
+        let explained = corduroy(&workspace, &["codes", &code.to_string()], "").unwrap();
+        let line = text(&explained.stdout);
+        assert!(explained.status.success());
+        assert!(line.starts_with(&format!("{code:<3} {status}")), "{line}");
+    }
+}
+
+#[test]
+fn codes_lists_every_exit_code_without_an_agent() {
+    let workspace = scratch("cli-codes");
+    // A broken agent file is not read: the table is the command's, not an agent's.
+    fs::write(workspace.join("corduroy.toml"), "not toml [").unwrap();
+
+    let all = corduroy(&workspace, &["codes"], "").unwrap();
+
+    let stdout = text(&all.stdout);
+    assert!(all.status.success(), "{}", text(&all.stderr));
+    let numbers: Vec<&str> = stdout
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .collect();
+    assert_eq!(numbers, ["0", "1", "3", "4", "5", "6", "7", "130"]);
+
+    let unknown = corduroy(&workspace, &["codes", "2"], "").unwrap();
+    assert_eq!(unknown.status.code(), Some(1));
+    assert!(text(&unknown.stderr).contains("not a code this command exits with"));
 }

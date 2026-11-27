@@ -77,7 +77,9 @@ fn workspace(test: &str, files: &[(&str, &str)]) -> io::Result<(PathBuf, PathBuf
     }
     let url = endpoint()?;
     let dir = scratch(test);
-    let workspace = dir.join("workspace");
+    // A directory with a real name: a small model builds absolute paths from this one, and
+    // loses the last part far more often when it is called `workspace`.
+    let workspace = dir.join("acme-site");
     fs::create_dir_all(&workspace)?;
     for (name, contents) in files {
         fs::write(workspace.join(name), contents)?;

@@ -120,13 +120,23 @@ def deny(reason: str) -> tuple[str, str]:
 class Tool:
     """A tool registered with `Plugin.tool`."""
 
-    def __init__(self, run, name, description, input, read_only, replay_safe):
+    def __init__(
+        self, run, name, description, input, read_only, replay_safe, result_tokens=None, result_keep="ends"
+    ):
         self.run = run
         self.name = name
         self.description = description
         self.input = input if input is not None else {"type": "object"}
         self.read_only = read_only
         self.replay_safe = replay_safe
+        self.result_tokens = result_tokens
+        self.result_keep = result_keep
+
+    def more(self) -> list[tuple[str, str]]:
+        """What the tool says about itself beyond the record's own fields, by name."""
+        if not self.result_tokens:
+            return []
+        return [("result-tokens", str(int(self.result_tokens))), ("result-keep", self.result_keep)]
 
 
 class Plugin:
@@ -150,15 +160,29 @@ class Plugin:
         input: dict | None = None,
         read_only: bool = False,
         replay_safe: bool = False,
+        result_tokens: int | None = None,
+        result_keep: str = "ends",
     ):
         """Offer the decorated function to the model as a tool. It takes the parsed input
         object and returns text, or anything else as JSON; or content blocks, as a `Text` or
-        an `Image` or a list of them, which is how a tool returns an image."""
+        an `Image` or a list of them, which is how a tool returns an image.
+
+        `result_tokens` is the most one result should take of the model's context, in tokens
+        counted as three bytes of text, and `result_keep` which part of a longer one is kept:
+        `head`, `tail` or `ends` (both, with the middle left out). The host cuts a longer
+        result, and holds a call to less for a model that holds little."""
 
         def register(run):
             tool_name = name or run.__name__
             self.tools[tool_name] = Tool(
-                run, tool_name, description or (run.__doc__ or "").strip(), input, read_only, replay_safe
+                run,
+                tool_name,
+                description or (run.__doc__ or "").strip(),
+                input,
+                read_only,
+                replay_safe,
+                result_tokens,
+                result_keep,
             )
             return run
 

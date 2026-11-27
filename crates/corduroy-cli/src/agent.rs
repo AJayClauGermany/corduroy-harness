@@ -61,6 +61,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use corduroy_harness::core::{FiberId, FiberState, ModelInfo, Scope};
 use corduroy_harness::wasm::{CAPABILITIES, WORLD, WasmRuntime};
@@ -90,6 +91,12 @@ pub struct AgentFile {
     /// Model turns a run may take without answering.
     #[serde(default)]
     pub max_turns: Option<u32>,
+    /// Seconds a run may be driven for without answering. Unlimited if not given.
+    #[serde(default)]
+    pub max_seconds: Option<u64>,
+    /// Tokens the model may write in a run without answering. Unlimited if not given.
+    #[serde(default)]
+    pub max_output_tokens: Option<u64>,
     /// The event log, `{data}/log.jsonl` by default.
     #[serde(default)]
     pub log: Option<String>,
@@ -291,6 +298,10 @@ pub struct PluginEntry {
     /// Each capability it is granted, with its scope.
     #[serde(default)]
     pub grants: BTreeMap<String, Grant>,
+    /// The tools it offers in the place of tools add-ons before it registered, by name.
+    /// Each has to be one that can be taken for the tool it replaces.
+    #[serde(default)]
+    pub replaces: Vec<String>,
     /// Set to `false` to keep the entry without loading the plugin.
     #[serde(default = "yes")]
     pub enabled: bool,
@@ -701,6 +712,18 @@ fs-read = ["{workspace}", "{workspace}/*"]
 fs-write = { allow = ["{workspace}", "{workspace}/*"], deny = ["{workspace}/.git/*"] }
 kernel = "shell"
 
+# bash from another add-on, in pi-tools' place: each command goes through rtk, which
+# shortens what it prints before the model reads it (it has to be installed; a call says so
+# when it is not). A tool's name belongs to one add-on, and `replaces` says this one takes
+# bash over: it is let to only because its bash takes what pi-tools' takes. To turn it on,
+# take the # off these lines.
+# [[plugins]]
+# name = "lean-shell"
+# path = "lean_shell.wasm"
+# replaces = ["bash"]
+# config = { kernel = "shell" }
+# grants = { kernel = "shell" }
+
 # grep and find: searching the workspace without a command. They only look, so the approval
 # gate below does not ask about them as it does about a grep run in the shell.
 [[plugins]]
@@ -949,6 +972,12 @@ pub fn assemble_from(
     if let Some(max_turns) = file.max_turns {
         harness = harness.with_max_turns(max_turns);
     }
+    if let Some(seconds) = file.max_seconds {
+        harness = harness.with_time_limit(Duration::from_secs(seconds));
+    }
+    if let Some(tokens) = file.max_output_tokens {
+        harness = harness.with_output_limit(tokens);
+    }
     let mut failed = natives(&harness, file, places, standard)?;
     failed.extend(extend(&harness, file, places, standard)?);
     failed.extend(plugins(&harness, file, places, standard, &log)?);
@@ -1070,7 +1099,15 @@ fn providers(harness: &Harness, file: &AgentFile) -> Result<Vec<Unstarted>, Agen
                  [secrets.{secret}]"
             )));
         }
-        match corduroy_providers::build_with(name, &entry.spec, harness.secrets()) {
+        // What the file states about a model is the provider's to know as well: an answer's
+        // default limit comes from it.
+        let mut spec = entry.spec.clone();
+        spec.models = entry
+            .models
+            .iter()
+            .map(|(model, stated)| (model.clone(), stated.info()))
+            .collect();
+        match corduroy_providers::build_with(name, &spec, harness.secrets()) {
             Ok(built) => {
                 let described = entry
                     .models
@@ -1181,7 +1218,8 @@ fn plugins(
             .load(&component)
             .map_err(|error| failed(&error))?
             .named(entry.name.clone())
-            .config(config.to_string());
+            .config(config.to_string())
+            .replacing(entry.replaces.iter().cloned());
         for (capability, grant) in &entry.grants {
             plugin = plugin.grant(capability.clone(), grant.scope(places));
         }

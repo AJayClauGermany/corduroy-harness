@@ -50,6 +50,7 @@ struct Serving {
     scope: Scope,
     waits: Vec<String>,
     stop: Option<Arc<AtomicBool>>,
+    budget: Option<u32>,
 }
 
 #[cfg(feature = "std")]
@@ -89,6 +90,7 @@ fn serving<R>(work: impl FnOnce(&mut Vec<Serving>) -> R) -> R {
 pub struct Serve {
     scope: Scope,
     stop: Option<Arc<AtomicBool>>,
+    budget: Option<u32>,
 }
 
 impl Serve {
@@ -101,6 +103,7 @@ impl Serve {
                 call: None,
             },
             stop: None,
+            budget: None,
         }
     }
 
@@ -119,6 +122,15 @@ impl Serve {
         self
     }
 
+    /// Let the work find out, through [`budget`], the most its result should take of the
+    /// model's context: `tokens`, counted as
+    /// [`BYTES_PER_TOKEN`](crate::BYTES_PER_TOKEN) bytes of text to a token.
+    #[must_use]
+    pub const fn budget(mut self, tokens: u32) -> Self {
+        self.budget = Some(tokens);
+        self
+    }
+
     /// Run `serve` in this scope. Returns what it returned, and the signals anything on the
     /// call chain said the call waits for, in order.
     ///
@@ -130,6 +142,7 @@ impl Serve {
                 scope: self.scope,
                 waits: Vec::new(),
                 stop: self.stop,
+                budget: self.budget,
             });
         });
         // Popped even if `serve` panics, so a later call on this thread is not misattributed.
@@ -201,9 +214,44 @@ pub fn stopping() -> bool {
     })
 }
 
+/// The most the result of the tool call this thread is serving should take, in tokens.
+///
+/// It is a share of the model's context, counted as
+/// [`BYTES_PER_TOKEN`](crate::BYTES_PER_TOKEN) bytes of text to a token. A longer result is
+/// cut by whoever runs the call; a tool that asks can choose what to leave out.
+///
+/// `None` when no tool call is being served, or nothing bounds its result.
+#[must_use]
+pub fn budget() -> Option<u32> {
+    serving(|serving| {
+        serving
+            .last()
+            .filter(|served| served.scope.call.is_some())
+            .and_then(|served| served.budget)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_call_knows_what_its_result_may_take() {
+        assert_eq!(budget(), None);
+        let serve = Serve::session(SessionId::new("main"))
+            .call("1")
+            .budget(2048);
+        let ((inside, nested), _waits) = serve.run(|| {
+            // A call made for this one has a result of its own, and no bound unless given.
+            let (nested, _) = within(SessionId::new("main"), "2".into(), budget);
+            (budget(), nested)
+        });
+        assert_eq!(inside, Some(2048));
+        assert_eq!(nested, None);
+        // A session served without a call has no result to bound.
+        let (unserved, _) = Serve::session(SessionId::new("main")).budget(9).run(budget);
+        assert_eq!(unserved, None);
+    }
 
     #[test]
     fn a_call_knows_its_session_and_collects_its_waits() {

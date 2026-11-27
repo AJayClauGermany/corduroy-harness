@@ -138,10 +138,15 @@ impl HostState {
         })
     }
 
-    /// Record that `capability` was refused for `resource`.
+    /// Record that `capability` was refused for `resource`, and for which tool call of a
+    /// session, where the plugin was serving one.
     fn refused(&mut self, capability: &str, resource: &str) {
+        let call = corduroy_core::call::current()
+            .and_then(|serving| serving.call)
+            .map(|call| format!(",\"call\":{}", json::string(&call)))
+            .unwrap_or_default();
         let payload = format!(
-            "{{\"plugin\":{},\"capability\":{},\"resource\":{}}}",
+            "{{\"plugin\":{},\"capability\":{},\"resource\":{}{call}}}",
             json::string(&self.plugin),
             json::string(capability),
             json::string(resource)
@@ -165,7 +170,16 @@ impl HostState {
                 "`{key}` is protected by the host and out of reach of every plugin"
             )));
         }
-        self.check(capability, &key)?;
+        // A refusal says where paths start from, as a person refusing would: the usual
+        // cause is an absolute path a model made up, and the plain message gives it
+        // nowhere to go but another tool. It says nothing of what the grant covers.
+        self.check(capability, &key).map_err(|error| match error {
+            HostError::Denied(why) => HostError::Denied(format!(
+                "{why}: paths are relative to `{}`, and a relative path is the usual case",
+                paths::scope_key(&self.root)
+            )),
+            failed @ HostError::Failed(_) => failed,
+        })?;
         Ok(resolved)
     }
 }
@@ -349,6 +363,32 @@ impl session::Host for HostState {
     fn stopping(&mut self) -> bool {
         corduroy_core::call::stopping()
     }
+
+    fn result_budget(&mut self) -> Option<u32> {
+        corduroy_core::call::budget()
+    }
+}
+
+/// The name under which a tool says how many tokens one result should take at most.
+pub(super) const RESULT_TOKENS: &str = "result-tokens";
+/// The name under which a tool says which part of a longer result is kept.
+pub(super) const RESULT_KEEP: &str = "result-keep";
+
+/// What the core's `spec` says beyond the record's own fields, as the world's named values.
+fn more(spec: &corduroy_core::ToolSpec) -> Vec<types::NamedValue> {
+    let Some(result) = spec.result else {
+        return Vec::new();
+    };
+    vec![
+        types::NamedValue {
+            name: RESULT_TOKENS.to_owned(),
+            value: result.tokens.to_string(),
+        },
+        types::NamedValue {
+            name: RESULT_KEEP.to_owned(),
+            value: result.keep.as_str().to_owned(),
+        },
+    ]
 }
 
 impl random::Host for HostState {
@@ -472,6 +512,7 @@ impl tools::Host for HostState {
             .into_iter()
             .filter(|spec| self.grants.check("tools", &spec.name).is_ok())
             .map(|spec| ToolSpec {
+                more: more(&spec),
                 name: spec.name,
                 description: spec.description,
                 input_schema: spec.input_schema,

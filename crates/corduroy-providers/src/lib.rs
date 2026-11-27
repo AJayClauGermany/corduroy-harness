@@ -14,10 +14,22 @@
 //! never part of the spec, the agent file or the event log.
 //!
 //! Each request asks for at most the spec's `max_tokens`, by default the most the model may
-//! write as oi-kit's model catalog has it (4096 for a model it does not know), and thinks
-//! only as hard as the spec's `thinking` says. A request to `OpenAI`'s Responses API is the
-//! exception: it carries a limit only when the spec states one, and the system prompt as
-//! `instructions`, which is the shape an account paying through a `ChatGPT` plan is held to.
+//! write as the spec's `models` or oi-kit's model catalog have it (for a model neither
+//! describes, a quarter of the context `models` states, or 4096), and thinks only as hard
+//! as the spec's `thinking` says. One attempt at a request has `timeout_seconds` in all,
+//! streamed or not, and one that runs out ends the request as a timeout. A request to
+//! `OpenAI`'s Responses API is the exception: it carries a limit only when the spec states
+//! one, and the system prompt as `instructions`, which is the shape an account paying
+//! through a `ChatGPT` plan is held to.
+//!
+//! A request that fails in a way worth trying again is made again by one layer, and each
+//! time is told to whoever asked ([`corduroy_harness::Reports::retry`]): oi-kit's own
+//! client retries a refused request by itself, which is heard ([`heard`]) and told as the
+//! client's ([`BY_CLIENT`]), and what it does not retry is tried again here.
+//!
+//! A provider whose HTTP client cannot be set up when it is built (the machine's
+//! certificates cannot be loaded) is built all the same, and the client is tried again at
+//! each request: only asking the model needs it.
 //!
 //! What is built is a [`corduroy_harness::Provider`]: it speaks the harness's own messages,
 //! and converts to and from oi-kit's for each request. oi-kit's types go no further than this
@@ -38,13 +50,17 @@
 
 pub mod adapter;
 pub mod auth;
+pub mod heard;
+
+pub use adapter::BY_CLIENT;
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
-use corduroy_harness::Provider;
 use corduroy_harness::core::Secrets;
+use corduroy_harness::{ModelInfo, Provider};
 use oi_kit_provider_types::base::Provider as OiKitProvider;
 use oi_kit_providers::declarative::{
     EnvKeyResolver, deserialize_provider_config, fixed_provider_config_entries, from_json,
@@ -75,14 +91,18 @@ pub struct ProviderSpec {
     /// Extra headers sent with every request.
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
-    /// Seconds a request may take in all.
+    /// Seconds one attempt at a request may take in all, from sending it to the end of its
+    /// answer, streamed or not: 600 by default. An attempt that runs out is not tried
+    /// again; one retried for another reason (a rate limit, a dropped connection) starts
+    /// the count afresh.
     #[serde(default)]
     pub timeout_seconds: Option<u64>,
     /// Whether to stream responses. Each engine has a default.
     #[serde(default)]
     pub streaming: Option<bool>,
     /// The most tokens one answer may take. By default, the most the model may write as
-    /// oi-kit's model catalog has it, or 4096 for a model it does not know.
+    /// [`models`](Self::models) states it, or as oi-kit's model catalog has it; for a model
+    /// neither describes, a quarter of the context `models` states (at least 1024), or 4096.
     #[serde(default)]
     pub max_tokens: Option<u32>,
     /// Sampling temperature. By default, the model's own.
@@ -92,7 +112,15 @@ pub struct ProviderSpec {
     /// not, unless the model always does.
     #[serde(default)]
     pub thinking: Option<Thinking>,
+    /// What the host states about models of this provider, by the provider's name for
+    /// each: the default for `max_tokens` is taken from it. Not a key of the entry this is
+    /// read from; whoever reads the entry fills it in.
+    #[serde(skip)]
+    pub models: BTreeMap<String, ModelInfo>,
 }
+
+/// Seconds one attempt at a request may take where the spec does not say.
+const DEFAULT_TIMEOUT_SECONDS: u64 = 600;
 
 /// How hard a model thinks before it answers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -125,6 +153,7 @@ impl ProviderSpec {
             max_tokens: None,
             temperature: None,
             thinking: None,
+            models: BTreeMap::new(),
         }
     }
 
@@ -329,23 +358,63 @@ fn credential(
     }
 }
 
-fn assemble(
-    name: &str,
-    spec: &ProviderSpec,
-    secrets: Option<&Arc<Secrets>>,
-) -> Result<Arc<dyn Provider>, BuildError> {
-    let config = config(name, spec)?;
-    if let Some(temperature) = spec.temperature
-        && !(0.0..=2.0).contains(&temperature)
-    {
-        return Err(BuildError(format!(
-            "provider `{name}`: temperature {temperature} is not between 0 and 2"
-        )));
+/// Why oi-kit could not make a provider.
+enum Refused {
+    /// The entry is at fault: an unknown kind, a missing key, a configuration it refuses.
+    Entry(String),
+    /// The HTTP client could not be set up, whatever the entry says: the machine's
+    /// certificates could not be loaded, for one.
+    Client(String),
+}
+
+/// What reqwest says of a client it could not build.
+const CLIENT_NOT_BUILT: &str = "builder error";
+
+/// What is said when no certificate could be loaded for the client.
+const NO_CERTIFICATES: &str = "No CA certificates";
+
+/// The variables that say where certificates are read from, in place of the system's: a
+/// file of them, and a directory.
+const CERTIFICATES_VARIABLES: [&str; 2] = ["SSL_CERT_FILE", "SSL_CERT_DIR"];
+
+/// Why oi-kit refused, said for `name`, and which of the two it is.
+fn refusal(name: &str, error: &anyhow::Error) -> Refused {
+    let said = format!("provider `{name}`: {error:#}");
+    if !said.contains(CLIENT_NOT_BUILT) {
+        return Refused::Entry(said);
     }
-    let refused = |error: anyhow::Error| BuildError(format!("provider `{name}`: {error:#}"));
-    let secret = credential(name, spec, secrets)?;
-    let protocol = engine(&spec.kind).map(|engine| engine.protocol);
-    let provider: Arc<dyn OiKitProvider> = match protocol {
+    if !said.contains(NO_CERTIFICATES) {
+        return Refused::Client(said);
+    }
+    // The variables are looked at only to say what to mend, and only once the client has
+    // failed for want of certificates.
+    let named: Vec<String> = CERTIFICATES_VARIABLES
+        .into_iter()
+        .filter_map(|variable| {
+            let names = std::env::var_os(variable)?;
+            Some(format!("{variable} names `{}`", names.to_string_lossy()))
+        })
+        .collect();
+    if named.is_empty() {
+        return Refused::Client(said);
+    }
+    Refused::Client(format!(
+        "{said} ({}: check that it is there and can be read, or unset the variable)",
+        named.join(" and ")
+    ))
+}
+
+/// The oi-kit provider `config` describes, sending `secret` as its credential if there is
+/// one.
+fn oi_kit(
+    name: &str,
+    kind: &str,
+    config: &Value,
+    secret: Option<Named>,
+) -> Result<Arc<dyn OiKitProvider>, Refused> {
+    let refused = |error: anyhow::Error| refusal(name, &error);
+    let protocol = engine(kind).map(|engine| engine.protocol);
+    Ok(match protocol {
         Some("openai") => {
             let parsed = deserialize_provider_config(&config.to_string()).map_err(refused)?;
             let builder = openai::from_declarative_config(parsed, None, EnvKeyResolver::new())
@@ -366,19 +435,60 @@ fn assemble(
                 });
             Arc::new(builder.build())
         }
-        _ if secret.is_some() => {
-            return Err(BuildError(format!(
-                "provider `{name}` ({}) takes no secret: `secret` is for anthropic, openai \
-                 and their -compatible forms",
-                spec.kind
-            )));
-        }
         _ => {
             Arc::from(from_json(&config.to_string(), None, EnvKeyResolver::new()).map_err(refused)?)
         }
+    })
+}
+
+fn assemble(
+    name: &str,
+    spec: &ProviderSpec,
+    secrets: Option<&Arc<Secrets>>,
+) -> Result<Arc<dyn Provider>, BuildError> {
+    let config = config(name, spec)?;
+    if let Some(temperature) = spec.temperature
+        && !(0.0..=2.0).contains(&temperature)
+    {
+        return Err(BuildError(format!(
+            "provider `{name}`: temperature {temperature} is not between 0 and 2"
+        )));
+    }
+    let secret = credential(name, spec, secrets)?;
+    let protocol = engine(&spec.kind).map(|engine| engine.protocol);
+    if secret.is_some() && protocol.is_none_or(|protocol| protocol == "ollama") {
+        return Err(BuildError(format!(
+            "provider `{name}` ({}) takes no secret: `secret` is for anthropic, openai \
+             and their -compatible forms",
+            spec.kind
+        )));
+    }
+    // An entry oi-kit refuses stops the provider from being built. A client that could not
+    // be set up does not: nothing is asked of it until a request is made, so the provider
+    // is built without it and the client is tried again then. A command that asks no model
+    // is not stopped by the machine's certificates.
+    let (source, id) = match oi_kit(name, &spec.kind, &config, secret.clone()) {
+        Ok(provider) => {
+            let id = provider.get_name().to_owned();
+            (adapter::Source::Built(provider), id)
+        }
+        Err(Refused::Entry(said)) => return Err(BuildError(said)),
+        Err(Refused::Client(_)) => {
+            let id = config
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or(&spec.kind)
+                .to_owned();
+            let (name, kind, config) = (name.to_owned(), spec.kind.clone(), config.clone());
+            let make: adapter::Make = Box::new(move || {
+                oi_kit(&name, &kind, &config, secret.clone())
+                    .map_err(|(Refused::Entry(said) | Refused::Client(said))| said)
+            });
+            (adapter::Source::later(make), id)
+        }
     };
     let settings = adapter::Settings {
-        provider: provider.get_name().to_owned(),
+        provider: id,
         openai_path: (protocol == Some("openai"))
             .then(|| config.get("base_url").and_then(Value::as_str))
             .flatten()
@@ -386,8 +496,10 @@ fn assemble(
         max_tokens: spec.max_tokens,
         temperature: spec.temperature,
         thinking: spec.thinking,
+        timeout: Duration::from_secs(spec.timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECONDS)),
+        stated: spec.models.clone(),
     };
-    Ok(Arc::new(adapter::Adapted::new(provider, settings)))
+    Ok(Arc::new(adapter::Adapted::new(source, settings)))
 }
 
 #[cfg(test)]

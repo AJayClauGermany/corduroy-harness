@@ -10,22 +10,27 @@
 //! `bash` runs in a long-lived kernel rather than a fresh process, so the working directory
 //! and variables carry over from one call to the next. `tree` shows a directory's layout
 //! through `fs-read` alone, so an agent without a shell can still find its way.
+//!
+//! `tools` in the configuration lists the ones to offer, all five when it is absent. It is
+//! how a tool is left to another add-on: a name belongs to one plugin, so `bash` from
+//! `lean-shell`, say, means this one is configured without it. `bash`'s contract (its input,
+//! its result, the call into the kernel) is the `shell-tool` crate's, which both build on.
 
 mod text;
 
 use std::fmt::Write as _;
 use std::sync::OnceLock;
 
-use corduroy_guest::host::{fs_read, fs_write, kernel};
-use corduroy_guest::{Plugin, PluginInfo, ToolError, ToolSpec, parse};
+use corduroy_guest::host::{fs_read, fs_write};
+use corduroy_guest::{Keep, Plugin, PluginInfo, ToolError, ToolSpec, parse};
 use serde::Deserialize;
 
 /// Lines returned by `read` and kept from `bash` output unless the call asks otherwise.
 const MAX_LINES: usize = 2000;
 /// Bytes returned by `read` and kept from `bash` output.
 const MAX_BYTES: usize = 50 * 1024;
-/// Seconds a `bash` command may run when the call does not say.
-const DEFAULT_TIMEOUT: u32 = 120;
+/// The tools this add-on has, in the order it offers them.
+const TOOLS: [&str; 5] = ["read", "write", "edit", shell_tool::NAME, "tree"];
 
 /// Plugin configuration, from the host.
 #[derive(Deserialize)]
@@ -33,12 +38,33 @@ const DEFAULT_TIMEOUT: u32 = 120;
 struct Config {
     /// Name of the host kernel `bash` runs in.
     kernel: String,
+    /// The tools to offer, by name; all of them when absent.
+    tools: Option<Vec<String>>,
+}
+
+impl Config {
+    /// Whether the tool `name` is offered.
+    fn offers(&self, name: &str) -> bool {
+        self.tools
+            .as_ref()
+            .is_none_or(|tools| tools.iter().any(|tool| tool == name))
+    }
+
+    /// The first name in `tools` that is no tool of this add-on's.
+    fn unknown(&self) -> Option<&str> {
+        self.tools
+            .iter()
+            .flatten()
+            .map(String::as_str)
+            .find(|tool| !TOOLS.contains(tool))
+    }
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             kernel: "shell".to_owned(),
+            tools: None,
         }
     }
 }
@@ -78,24 +104,31 @@ const MAX_ENTRIES: usize = 1000;
 /// Directories `tree` names but does not open.
 const UNOPENED: [&str; 5] = [".git/", "node_modules/", "target/", ".corduroy/", ".venv/"];
 
-#[derive(Deserialize)]
-struct Bash {
-    command: String,
-    /// Seconds.
-    timeout: Option<u32>,
-}
-
 struct PiTools;
 
 impl Plugin for PiTools {
     fn activate(config: String) -> Result<PluginInfo, String> {
         let config: Config = corduroy_guest::config(&config)?;
+        if let Some(unknown) = config.unknown() {
+            return Err(format!(
+                "bad config: `tools` names `{unknown}`, and the tools are {}",
+                TOOLS.join(", ")
+            ));
+        }
         // A second activation in the same instance keeps the first configuration.
-        CONFIG.get_or_init(|| config);
-        Ok(PluginInfo::new("pi-tools", env!("CARGO_PKG_VERSION")).tools(specs()))
+        let config = CONFIG.get_or_init(|| config);
+        let offered: Vec<ToolSpec> = specs()
+            .into_iter()
+            .filter(|spec| config.offers(&spec.name))
+            .collect();
+        Ok(PluginInfo::new("pi-tools", env!("CARGO_PKG_VERSION")).tools(offered))
     }
 
     fn call_tool(name: String, input: String) -> Result<String, ToolError> {
+        // A tool left to another add-on is not this one's to run.
+        if CONFIG.get().is_some_and(|config| !config.offers(&name)) {
+            return Err(ToolError::UnknownTool(name));
+        }
         match name.as_str() {
             "read" => read(&parse(&input)?),
             "write" => write(&parse(&input)?),
@@ -111,6 +144,12 @@ corduroy_guest::export!(PiTools);
 
 fn read(args: &Read) -> Result<String, ToolError> {
     let contents = fs_read::read(&args.path)?;
+    if let Some(binary) = shell_tool::binary(&contents) {
+        return Ok(format!(
+            "[{}: {binary}, not text, so it is not shown.]",
+            args.path
+        ));
+    }
     let offset = args.offset.unwrap_or(1).max(1);
     let limit = args.limit.unwrap_or(MAX_LINES).min(MAX_LINES);
     let page = text::page(&contents, offset, limit, MAX_BYTES);
@@ -154,23 +193,15 @@ fn edit(args: &Edit) -> Result<String, ToolError> {
     ))
 }
 
-fn bash(args: &Bash) -> Result<String, ToolError> {
+fn bash(args: &shell_tool::Call) -> Result<String, ToolError> {
     let kernel = CONFIG
         .get()
         .map_or("shell", |config| config.kernel.as_str());
-    let timeout_ms = args.timeout.unwrap_or(DEFAULT_TIMEOUT).saturating_mul(1000);
-    let cell = kernel::exec(kernel, &args.command, timeout_ms)?;
-    let (mut output, dropped) = text::tail(&cell.output, MAX_LINES, MAX_BYTES);
-    if dropped || cell.truncated {
-        output.insert_str(0, "[Earlier output was truncated.]\n");
-    }
-    if cell.status != 0 {
-        if !output.is_empty() && !output.ends_with('\n') {
-            output.push('\n');
-        }
-        let _ = write!(output, "[exit status {}]", cell.status);
-    }
-    Ok(output)
+    let limits = shell_tool::Limits {
+        lines: MAX_LINES,
+        bytes: MAX_BYTES,
+    };
+    shell_tool::run(kernel, &args.command, args.timeout, limits)
 }
 
 fn tree(args: &Tree) -> Result<String, ToolError> {
@@ -210,6 +241,10 @@ fn walk(dir: &str, entries: &[String], prefix: &str, depth: usize, lines: &mut V
     }
 }
 
+/// The most one result should take of the model's context, in tokens of three bytes: what
+/// [`MAX_BYTES`] comes to. The host holds a call to less for a model that holds little.
+const RESULT_TOKENS: u32 = 16_384;
+
 fn specs() -> Vec<ToolSpec> {
     // `(replay_safe, read_only)`. Reading twice, or writing the same content twice, is the
     // same as once; an edit that already happened no longer finds its old text, and a command
@@ -222,41 +257,53 @@ fn specs() -> Vec<ToolSpec> {
         read_only,
         ..ToolSpec::new(name, description, input_schema)
     };
-    vec![
+    // Which part of a result too long for the model is kept: the start of a file or a
+    // listing, the end of a command's output, where the error is. `write` and `edit`
+    // answer in a line.
+    let kept = |spec: ToolSpec| {
+        let keep = match spec.name.as_str() {
+            "read" | "tree" => Keep::Head,
+            // `bash` says its own, with the rest of its contract.
+            _ => return spec,
+        };
+        spec.result(RESULT_TOKENS, keep)
+    };
+    [
         spec(
             "read",
             (true, true),
             "Read a text file. Returns at most 2000 lines or 50KB; use offset and limit to \
-             page through larger files.",
-            r#"{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","description":"First line to return, counting from 1"},"limit":{"type":"integer","description":"Maximum number of lines"}},"required":["path"]}"#,
+             page through larger files. A binary file is named by its kind and size.",
+            r#"{"type":"object","properties":{"path":{"type":"string","description":"The file, relative to the working directory, such as src/main.rs; an absolute path is rarely needed"},"offset":{"type":"integer","description":"First line to return, counting from 1"},"limit":{"type":"integer","description":"Maximum number of lines"}},"required":["path"]}"#,
         ),
         spec(
             "write",
             (true, false),
             "Create or overwrite a file with the given content. Parent directories are \
              created as needed.",
-            r#"{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}"#,
+            r#"{"type":"object","properties":{"path":{"type":"string","description":"The file, relative to the working directory, such as src/main.rs; an absolute path is rarely needed"},"content":{"type":"string"}},"required":["path","content"]}"#,
         ),
         spec(
             "edit",
             (false, false),
             "Replace exact text in a file. Each oldText must occur exactly once in the file \
              as it is now; edits must not overlap.",
-            r#"{"type":"object","properties":{"path":{"type":"string"},"edits":{"type":"array","items":{"type":"object","properties":{"oldText":{"type":"string"},"newText":{"type":"string"}},"required":["oldText","newText"]}}},"required":["path","edits"]}"#,
+            r#"{"type":"object","properties":{"path":{"type":"string","description":"The file, relative to the working directory, such as src/main.rs; an absolute path is rarely needed"},"edits":{"type":"array","items":{"type":"object","properties":{"oldText":{"type":"string"},"newText":{"type":"string"}},"required":["oldText","newText"]}}},"required":["path","edits"]}"#,
         ),
-        spec(
-            "bash",
-            (false, false),
+        shell_tool::spec(
             "Run a shell command. The shell is persistent: the working directory and \
-             variables carry over between calls. Returns the last 2000 lines or 50KB of output.",
-            r#"{"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"integer","description":"Seconds before the command is stopped (default 120)"}},"required":["command"]}"#,
+             variables carry over between calls. Returns the last 2000 lines or 50KB of \
+             output; binary output is named by its kind and size.",
+            RESULT_TOKENS,
         ),
         spec(
             "tree",
             (true, true),
             "Show the files and directories below a path as a tree, a few levels deep. \
              .git, node_modules, target and .venv are named but not opened.",
-            r#"{"type":"object","properties":{"path":{"type":"string","description":"Directory (default .)"},"depth":{"type":"integer","description":"Levels to show (default 3, at most 10)"}}}"#,
+            r#"{"type":"object","properties":{"path":{"type":"string","description":"The directory, relative to the working directory (default .)"},"depth":{"type":"integer","description":"Levels to show (default 3, at most 10)"}}}"#,
         ),
     ]
+    .map(kept)
+    .to_vec()
 }

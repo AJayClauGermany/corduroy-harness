@@ -22,7 +22,7 @@ use std::ops::ControlFlow;
 use std::sync::OnceLock;
 
 use corduroy_guest::host::fs_read;
-use corduroy_guest::{Plugin, PluginInfo, ToolError, ToolSpec, parse};
+use corduroy_guest::{HostError, Keep, Plugin, PluginInfo, ToolError, ToolSpec, parse};
 use regex::{Regex, RegexBuilder};
 use serde::Deserialize;
 
@@ -40,6 +40,11 @@ const MAX_FILES: usize = 20_000;
 const MAX_DEPTH: usize = 40;
 /// Bytes of a result, at most.
 const MAX_OUTPUT: usize = 50 * 1024;
+
+/// The most one result should take of the model's context, in tokens of three bytes: what
+/// [`MAX_OUTPUT`] comes to. The host holds a call to less for a model that holds little, and
+/// keeps the start, where the first matches are.
+const RESULT_TOKENS: u32 = 16_384;
 /// Bytes of text one `grep` reads unless the configuration says otherwise. A call's budget
 /// is spent at about 40 MB by a pattern found in every file, and far later by one found in
 /// few.
@@ -352,19 +357,23 @@ fn grep(input: &Grep) -> Result<String, ToolError> {
         files: 0,
         cut: false,
     };
-    if fs_read::list(root).is_ok() {
-        walk.each(&mut |file| {
+    match fs_read::list(root) {
+        Ok(_) => walk.each(&mut |file| {
             let passed_over = only.as_ref().is_some_and(|only| !only.matches(file))
                 || (root == "." && file == AGENT_FILE);
             if passed_over {
                 return ControlFlow::Continue(());
             }
             search.file(&join(root, file))
-        });
-    } else {
-        // Not a directory: one file, and what is wrong with it is the model's to hear.
-        fs_read::read(root)?;
-        let _stopped = search.file(root);
+        }),
+        // A place the grant does not reach is refused once: asking for it again as a file
+        // would be refused, and recorded, a second time.
+        Err(denied @ HostError::Denied(_)) => return Err(denied.into()),
+        Err(HostError::Failed(_)) => {
+            // Not a directory: one file, and what is wrong with it is the model's to hear.
+            fs_read::read(root)?;
+            let _stopped = search.file(root);
+        }
     }
     if walk.cut && search.stopped.is_none() {
         search.stopped = Some(format!(
@@ -404,7 +413,8 @@ impl Plugin for SearchTools {
                     r#"{"type":"object","properties":{"pattern":{"type":"string","description":"A regular expression, matched against each line"},"path":{"type":"string","description":"The directory or file to search (default: the working directory)"},"glob":{"type":"string","description":"Search only files matching this, such as *.rs or src/**/*.{ts,tsx}"},"ignore_case":{"type":"boolean"},"context":{"type":"integer","description":"Lines to show before and after each match (default 0)"},"limit":{"type":"integer","description":"Most matching lines (default 100)"},"files_only":{"type":"boolean","description":"List the files with a match instead of the lines"}},"required":["pattern"]}"#,
                 )
                 .read_only()
-                .replay_safe(),
+                .replay_safe()
+                .result(RESULT_TOKENS, Keep::Head),
             )
             .tool(
                 ToolSpec::new(
@@ -415,7 +425,8 @@ impl Plugin for SearchTools {
                     r#"{"type":"object","properties":{"pattern":{"type":"string","description":"A file-name pattern; without a / it is matched against the name alone"},"path":{"type":"string","description":"The directory to search (default: the working directory)"},"limit":{"type":"integer","description":"Most files listed (default 200)"}},"required":["pattern"]}"#,
                 )
                 .read_only()
-                .replay_safe(),
+                .replay_safe()
+                .result(RESULT_TOKENS, Keep::Head),
             ))
     }
 

@@ -17,6 +17,37 @@ and `today` added: 20 tools, `approval` in `auto` unless a task says otherwise.
 **Read the numbers as rates, not verdicts.** Nothing here was changed in the harness, so
 every failure below can be had again with the command at the end.
 
+## Since then
+
+This page is the stock-take of 27 November 2026 and is left as it was written: the counts
+and the behaviour below are of the tree at `858ba01`. What has been done about each finding
+since is listed here, with where it is written down. None of it has been run through the
+bench again, so nothing below says a rate has changed.
+
+| Finding | What was done | Where |
+| --- | --- | --- |
+| 1. One run outgrows the context; the session is then dead | A tool says how much of a result to keep and which part; the harness holds a result and a step to a share of the model's context; compaction may cut inside a turn; a session whose request overflowed is compacted on its next prompt | [Keeping within what the model holds](design.md#keeping-within-what-the-model-holds) |
+| 1. Binary output | `read` and `bash` name its kind and size | [Shipped add-ons](reference/shipped-add-ons.md#pi-tools) |
+| 2. Nothing bounds a request that keeps streaming | `timeout_seconds` bounds a whole attempt; a request always carries a limit on its answer; a run has limits of time and of tokens written | [Agent file](reference/agent-file.md#providersname), [What an extension can reach](design.md#what-an-extension-can-reach) |
+| 2. A cut-off answer ends as `finished` | It ends as `cut-off`, exit code 6 | [Command](reference/cli.md) |
+| 2. Nothing is recorded or shown while a request streams | An answer is shown as it is written, checkpointed in the log (`model/progress`), and kept if the request ends without one (`model/partial`) | [What the record promises](design.md#what-the-record-promises) |
+| 2. `thinking = "off"` against this server | Not tried | |
+| 3. A refusal is walked around through the shell | A refused path says where paths start from. A question that follows a refusal is to be flagged by the gate, with what a person can answer; a shell redirect outside the workspace waits for the confined kernel | [Capabilities](reference/capabilities.md), [G6](open-questions.md#g6-what-can-a-person-answer-to-an-ask), [What is safe by default](design.md#what-is-safe-by-default) |
+| 4. Absolute paths, got wrong | The `path` parameters say a path is relative; the evals' workspace has a real name | [Shipped add-ons](reference/shipped-add-ons.md#pi-tools) |
+| 5. Twenty turns | The example allows fifty; time and tokens are limits beside turns | [Agent file](reference/agent-file.md#top-level-keys) |
+| Exit code 1 for three endings | Each ending has its own code, and `corduroy codes` lists them | [Command](reference/cli.md) |
+| The answer mixed with tool lines | `--progress stderr`, the default when the output is piped | [Command](reference/cli.md) |
+| Each payload decoded twice | A payload is JSON in the log (schema 3) | [Events](reference/events.md#the-payload) |
+| A waiting call has no result | A `tool/result` is stored with its signal | [Events](reference/events.md#the-run) |
+| Answers taken in order | A line `@<id> y` answers that question and no other | [Control approval](how-to/control-approval.md) |
+| A model that is not there: 36 s | A request is made again by one layer, four tries in all, each recorded (`model/retry`) | [What the record promises](design.md#what-the-record-promises) |
+| `SSL_CERT_FILE` that cannot be read stops the command | It stops the first request, which says so, and no other command | [Agent file](reference/agent-file.md#providersname) |
+| Not recorded: the prompt and tool descriptions, what a request asked for, a failed request's size | `model/request` names what it carried by hash (`model/shown` holds each once), says what the provider added, and what the request was reckoned to take | [Events](reference/events.md#the-run) |
+| Not recorded: retries, the size of a tool result, which call a denial belongs to | `model/retry`; `bytes`, `tokens`, `budget` and `cut` on `tool/result`; `call` on `capability/denied` | [Events](reference/events.md) |
+| Not recorded: why a turn-limited run was still going; a run's cost in one place | Left: the second is `corduroy report`'s to add up | [G17](open-questions.md#g17-where-is-usage-added-up) |
+| Smaller things: a denial printed twice, `find` and `[1-8]` | Said once; `find` refuses a pattern it does not support | [Shipped add-ons](reference/shipped-add-ons.md#search) |
+| Any model but this one | Not tried; the candidates are listed | [model-bench](../scripts/model-bench/README.md#models-to-try-next) |
+
 ## In short
 
 - **Every part of the agent is reachable, every time.** Each shipped tool, an MCP server, a
@@ -44,7 +75,7 @@ Ordered by how much they cost a small model. Each names the tasks that show it.
 Seen in `many_reads` (3 of 3), and once each in `log_pipeline`, `makefile_tabs`,
 `rename_across_files`, `honest_missing` and `compaction`: 8 of 279 trials.
 
-- A turn in progress is never compacted ([G14](open-questions.md#g14-can-a-long-turn-be-compacted)),
+- A turn in progress is never compacted (G14, since decided: [Keeping within what the model holds](design.md#keeping-within-what-the-model-holds)),
   so `compact` cannot help a run that reads its way past the limit. The run ends as
   `failed: Context length exceeded`.
 - **The session cannot be used afterwards.** The oversized messages stay in the
@@ -57,7 +88,7 @@ Seen in `many_reads` (3 of 3), and once each in `log_pipeline`, `makefile_tabs`,
   fitted; a web server's log at 50 KB was 33 000 and did not. One `cat` of a compiled
   binary (`makefile_tabs`) did the same. The agent file states the model's
   `context_tokens`, but only `compact` reads it
-  ([B25](open-questions.md#b25-whose-job-is-a-tools-input-and-the-size-of-its-result)).
+  (B25, since decided in the same place).
 - Eight `read` calls in one message (the model does call tools in parallel, and it works)
   made a 26 000-token request in a single step. Nothing looks at the size of a step's
   results before they are sent.
@@ -213,7 +244,7 @@ happened. It works. What the other harness has to know or work around:
 | --- | --- | --- |
 | How the run ended | exit 0, 1 or 130 | 1 is *failed*, *turn limit* and *waiting for an answer* alike. Telling them apart means reading `turn/end` in the log, or finding there is none |
 | The answer | standard output | Mixed with the `▸`/`✓` lines of every tool call. The bench reads the last assistant `message` from the log instead |
-| The log | `.corduroy/log.jsonl` | Each `payload` is JSON kept as a string inside JSON, so it is decoded twice ([C7](open-questions.md#c7-is-an-events-payload-json-by-contract-or-by-convention)) |
+| The log | `.corduroy/log.jsonl` | Each `payload` is JSON kept as a string inside JSON, so it is decoded twice (C7, since decided: [the payload](reference/events.md#the-payload)) |
 | A tool call's result | `tool/result` | A call that waited (`delegate`) has none. Its result is a `signal`, which carries neither the call's id nor whether it worked. The bench's first version counted every delegation as failed for this |
 | Answering a gate | `continue` with `y` on standard input | Works, and is not counted as a restart. But answers are taken in order with no way to say which question one is for, so a caller that pipes `y` three times approves whatever comes (finding 3). There is no "answer question *id*" outside the page |
 | A conversation | prompts on standard input, then `/exit` | Works (`conversation_piped`) |

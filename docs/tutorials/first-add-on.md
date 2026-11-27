@@ -174,7 +174,7 @@ corduroy run "Use count_lines on todo.txt, then on /etc/hosts."
   ✓ todo.txt: 4 line(s)
 ▸ count_lines {"path":"/etc/hosts"}
   ! line-count was refused `fs-read` on /etc/hosts
-  ✗ permission denied: capability `fs-read` does not cover `/etc/hosts`
+  ✗ permission denied: capability `fs-read` does not cover `/etc/hosts`: paths are relative to `/home/you/corduroy-tutorial`, and a relative path is the usual case
 todo.txt has 4 lines. I'm not allowed to read /etc/hosts.
 ```
 

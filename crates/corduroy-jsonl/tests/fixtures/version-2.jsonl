@@ -1,0 +1,3 @@
+{"corduroy-log":2}
+[{"cause":null,"id":1,"payload":"{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"text\":\"hi\"}]}","session":"main","source":"user","time":1795368645804,"topic":"message"}]
+[{"cause":1,"id":2,"payload":"{\"status\":\"finished\"}","session":"main","source":"host","time":1795368645900,"topic":"turn/end"},{"cause":null,"id":3,"payload":"not json","session":null,"source":"plugin:notes","time":1795368645901,"topic":"notes/saved"}]

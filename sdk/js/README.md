@@ -42,7 +42,7 @@ node bin/corduroy-js.js build counter.js --out counter.wasm --capabilities state
 | --- | --- |
 | `name`, `version` | the plugin's name and version |
 | `activate(config)` | called with the parsed configuration when the plugin starts, and again after a trap |
-| `tools: { name: { description, input, readOnly, replaySafe, run(input) } }` | tools for the model; `run` returns text, anything else as JSON, or content blocks (below) |
+| `tools: { name: { description, input, readOnly, replaySafe, result, run(input) } }` | tools for the model; `result: { tokens, keep }` says the most one result should take of the model's context and which part of a longer one the host keeps (`head`, `tail` or `ends`); `run` returns text, anything else as JSON, or content blocks (below) |
 | `subscriptions`, `onEvent(event)` | events whose topic matches one of the globs |
 | `prompt()` | text for the system prompt, or `undefined` |
 | `gates: { 'tool/call': (request) => 'allow' \| { ask } \| { deny } }` | a gate; one that throws denies |

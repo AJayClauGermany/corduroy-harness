@@ -4,16 +4,32 @@
 //! store. The file is plain text so a run can be read, searched and repaired by hand:
 //!
 //! ```text
-//! {"corduroy-log":2}
-//! [{"id":1,"time":1795368645804,"session":"main","source":"user","cause":null,"topic":"message","payload":"..."}]
-//! [{"id":2,"time":1795368647113,"session":"main","source":"agent","cause":null,"topic":"message","payload":"..."},{"id":3,...}]
+//! {"corduroy-log":3}
+//! [{"id":1,"time":1795368645804,"session":"main","source":"user","cause":null,"topic":"message","payload":{"role":"user","parts":[...]}}]
+//! [{"id":2,"time":1795368647113,"session":"main","source":"agent","cause":null,"topic":"message","payload":{...}},{"id":3,...}]
 //! ```
 //!
 //! The first line is the header and carries the schema version. Version 2 added `time`
 //! (milliseconds since the Unix epoch) to each event; a version 1 log is still read, its
-//! events having time 0, and is continued as it is. Every line after the header is one
-//! commit: the events of one step, written with a single `write` and flushed to the device
-//! before the stream shows them to anyone. A crash can therefore leave at most one unfinished
+//! events having time 0.
+//!
+//! Version 3 stores a payload as the JSON it is, so that a reader decodes a line once. An
+//! event's payload is text ([`Event::payload`]), and by contract JSON for every topic the
+//! core and the loop define. Where that text is a JSON object, array, number, `true`,
+//! `false` or `null`, written the way this crate writes JSON (no spaces, an object's keys
+//! in the order `serde_json` keeps them), `payload` holds that value. Any other payload is
+//! held as a JSON string of its text, exactly as versions 1 and 2 held every payload: text
+//! that is not JSON (an add-on's own topic may hold anything), JSON written another way
+//! (spaces, another order of keys, a number this crate would write differently), and JSON
+//! that is itself a string. So a `payload` that is a string is always the payload's text,
+//! in every version, and what is read back is byte for byte what was committed.
+//!
+//! An older log is continued in the new form: the first commit made to it writes the
+//! header again as version 3, in place, so that a build which reads only the older
+//! versions refuses the file whole instead of failing at a line.
+//!
+//! Every line after the header is one commit: the events of one step, written with a single
+//! `write` and flushed to the device before the stream shows them to anyone. A crash can therefore leave at most one unfinished
 //! last line, which [`JsonlLog::open`] cuts off, so a commit is in the log whole or not at all.
 //!
 //! The file is locked while it is open: a log has one writer.
@@ -51,7 +67,7 @@ use corduroy_core::{Draft, Event, EventId, EventStream, Log, LogError, SessionId
 use serde_json::{Value, json};
 
 /// The schema version this crate writes.
-pub const SCHEMA_VERSION: u64 = 2;
+pub const SCHEMA_VERSION: u64 = 3;
 
 /// The oldest schema version this crate still reads.
 pub const OLDEST_READ: u64 = 1;
@@ -75,6 +91,9 @@ pub struct JsonlLog {
     file: File,
     /// The id of the last event stored, to check that commits arrive in order.
     last: u64,
+    /// Whether the file's header names an older schema version than this crate writes, and
+    /// is to be written again before the first commit.
+    older: bool,
 }
 
 impl fmt::Debug for JsonlLog {
@@ -96,10 +115,14 @@ impl JsonlLog {
     /// it), is not a corduroy log, has a schema version outside [`OLDEST_READ`] to
     /// [`SCHEMA_VERSION`], or holds a complete line that is not a valid commit.
     pub fn open(path: impl AsRef<Path>) -> Result<(Self, Vec<Event>), LogError> {
-        let Opened { file, commits } = open_locked(path.as_ref())?;
+        let Opened {
+            file,
+            commits,
+            older,
+        } = open_locked(path.as_ref())?;
         let events: Vec<Event> = commits.into_iter().flatten().collect();
         let last = events.last().map_or(0, |event| event.id.get());
-        Ok((Self { file, last }, events))
+        Ok((Self { file, last, older }, events))
     }
 }
 
@@ -109,6 +132,8 @@ struct Opened {
     file: File,
     /// Its commits, in order, without an unfinished last line.
     commits: Vec<Vec<Event>>,
+    /// Whether its header names an older schema version than this crate writes.
+    older: bool,
 }
 
 /// Open, lock and read the log at `path`, creating it if it does not exist and cutting off
@@ -151,9 +176,10 @@ fn open_locked(path: &Path) -> Result<Opened, LogError> {
         return Ok(Opened {
             file,
             commits: Vec::new(),
+            older: false,
         });
     };
-    check_header(first).map_err(|error| fail("cannot use", &error))?;
+    let version = check_header(first).map_err(|error| fail("cannot use", &error))?;
 
     let mut commits: Vec<Vec<Event>> = Vec::new();
     let mut last = 0;
@@ -168,7 +194,11 @@ fn open_locked(path: &Path) -> Result<Opened, LogError> {
             .and_then(|()| file.sync_data())
             .map_err(|error| fail("cannot repair", &error))?;
     }
-    Ok(Opened { file, commits })
+    Ok(Opened {
+        file,
+        commits,
+        older: version < SCHEMA_VERSION,
+    })
 }
 
 /// The header line this crate writes.
@@ -202,6 +232,7 @@ pub fn remove(
     let Opened {
         file: held,
         commits,
+        ..
     } = open_locked(path)?;
     let all: Vec<Event> = commits.iter().flatten().cloned().collect();
     let (removed, markers) = choose(&EventStream::load(all))?;
@@ -268,7 +299,11 @@ fn write_without(
     // Numbered after the last event the old log held, removed or not, so no id comes back.
     let stream = EventStream::load(kept.into_iter().flatten())
         .continuing(EventId::new(last), time)
-        .with_log(JsonlLog { file, last });
+        .with_log(JsonlLog {
+            file,
+            last,
+            older: false,
+        });
     stream.commit(markers)?;
     Ok(next)
 }
@@ -309,11 +344,59 @@ fn line_of(batch: &[Event]) -> Value {
                     "source": event.source.to_string(),
                     "cause": event.cause.map(EventId::get),
                     "topic": event.topic,
-                    "payload": event.payload,
+                    "payload": stored(&event.payload),
                 })
             })
             .collect(),
     )
+}
+
+/// A payload as a line holds it: the JSON it is, where reading that back gives the same
+/// text, and otherwise its text as a JSON string. A payload that is itself a JSON string is
+/// held as its text too, so that a string in a line always means the text.
+fn stored(payload: &str) -> Value {
+    let nested = serde_json::from_str::<Value>(payload)
+        .ok()
+        .filter(|value| !value.is_string())
+        .map(|value| (value.to_string(), value))
+        .filter(|(written, _)| written == payload);
+    match nested {
+        Some((_, value)) => value,
+        None => Value::String(payload.to_owned()),
+    }
+}
+
+/// The text of a payload a line holds: a string's own text, as every version holds what it
+/// could not nest and versions 1 and 2 held everything, and any other value as it is
+/// written.
+fn payload_of(entry: &Value) -> Result<String, String> {
+    match entry.get("payload") {
+        Some(Value::String(text)) => Ok(text.clone()),
+        Some(value) => Ok(value.to_string()),
+        None => Err("an event has no `payload`".to_owned()),
+    }
+}
+
+impl JsonlLog {
+    /// Write the header again as this crate's version, in place, where the file was begun
+    /// by an older one. Both headers are as long as each other while a version is one
+    /// digit; one that is not is left, and the file stays readable either way.
+    fn renew_header(&mut self) -> io::Result<()> {
+        if !self.older {
+            return Ok(());
+        }
+        let header = header();
+        let mut first = vec![0; header.len() + 1];
+        self.file.seek(SeekFrom::Start(0))?;
+        let fits = self.file.read_exact(&mut first).is_ok() && first.last() == Some(&b'\n');
+        if fits {
+            self.file.seek(SeekFrom::Start(0))?;
+            self.file.write_all(header.as_bytes())?;
+        }
+        self.file.seek(SeekFrom::End(0))?;
+        self.older = false;
+        Ok(())
+    }
 }
 
 impl Log for JsonlLog {
@@ -335,8 +418,8 @@ impl Log for JsonlLog {
         }
         // One write for the whole commit, so a crash cannot store only some of its events.
         let line = format!("{}\n", line_of(batch));
-        self.file
-            .write_all(line.as_bytes())
+        self.renew_header()
+            .and_then(|()| self.file.write_all(line.as_bytes()))
             .and_then(|()| self.file.sync_data())
             .map_err(|error| LogError::new(format!("cannot store a commit: {error}")))?;
         self.last = last;
@@ -363,13 +446,13 @@ fn read_locked(file: &mut File) -> io::Result<Vec<u8>> {
 }
 
 /// Check that `line` is the header of a log this crate can read.
-fn check_header(line: &str) -> Result<(), String> {
+fn check_header(line: &str) -> Result<u64, String> {
     let version = serde_json::from_str::<Value>(line)
         .ok()
         .and_then(|header| header.get(HEADER_KEY).and_then(Value::as_u64))
         .ok_or("it is not a corduroy log")?;
     if (OLDEST_READ..=SCHEMA_VERSION).contains(&version) {
-        Ok(())
+        Ok(version)
     } else {
         Err(format!(
             "it has schema version {version}, and this build reads versions {OLDEST_READ} \
@@ -411,7 +494,7 @@ fn parse_commit(line: &str, mut last: u64) -> Result<Vec<Event>, String> {
                 .map_err(|error: LogError| error.to_string())?,
             cause: entry.get("cause").and_then(Value::as_u64).map(EventId::new),
             topic: text("topic")?.to_owned(),
-            payload: text("payload")?.to_owned(),
+            payload: payload_of(&entry)?,
         });
     }
     Ok(events)
@@ -462,7 +545,7 @@ mod tests {
         let text = fs::read_to_string(&path).unwrap();
         // A header, then one line per commit.
         assert_eq!(text.lines().count(), 4);
-        assert_eq!(text.lines().next(), Some(r#"{"corduroy-log":2}"#));
+        assert_eq!(text.lines().next(), Some(r#"{"corduroy-log":3}"#));
     }
 
     #[test]
@@ -521,7 +604,7 @@ mod tests {
         drop(stream);
 
         let text = fs::read_to_string(&path).unwrap();
-        assert!(text.starts_with(r#"{"corduroy-log":2}"#), "{text:?}");
+        assert!(text.starts_with(r#"{"corduroy-log":3}"#), "{text:?}");
         assert_eq!(open(&path).unwrap().len(), 1);
     }
 
@@ -549,6 +632,84 @@ mod tests {
 
         assert!(stored > 0);
         assert_eq!(open(&path).unwrap().events()[1].time, stored);
+    }
+
+    #[test]
+    fn a_payload_that_is_json_is_stored_as_json_and_read_back_as_it_was() {
+        let path = log_in("jsonl-nested");
+        let payloads = [
+            // As the loop writes it: nested.
+            r#"{"id":"1","ok":true,"output":"a\nb"}"#,
+            "[1,2]",
+            "null",
+            // Kept as text: not JSON, JSON written another way, and JSON that is a string.
+            "",
+            "side",
+            r#"{ "b": 1, "a": 2 }"#,
+            "1.0e3",
+            r#""quoted""#,
+        ];
+        let stream = open(&path).unwrap();
+        for payload in payloads {
+            stream.emit(user("a").payload(payload)).unwrap();
+        }
+        let written = stream.events();
+        drop(stream);
+
+        let read = open(&path).unwrap().events();
+        assert_eq!(read, written);
+        let read: Vec<&str> = read.iter().map(|event| event.payload.as_str()).collect();
+        assert_eq!(read, payloads);
+
+        let text = fs::read_to_string(&path).unwrap();
+        let held: Vec<Value> = text
+            .lines()
+            .skip(1)
+            .map(|line| serde_json::from_str::<Value>(line).unwrap()[0]["payload"].clone())
+            .collect();
+        assert_eq!(held[0]["output"], "a\nb");
+        assert_eq!(held[1], json!([1, 2]));
+        assert_eq!(held[2], Value::Null);
+        for (kept, payload) in held.iter().zip(payloads).skip(3) {
+            assert_eq!(kept.as_str(), Some(payload));
+        }
+    }
+
+    /// A log as version 2 wrote it, kept as it was: every payload a string.
+    const VERSION_TWO: &str = include_str!("../tests/fixtures/version-2.jsonl");
+
+    #[test]
+    fn a_version_two_log_is_read_and_continued_as_version_three() {
+        let path = log_in("jsonl-v2");
+        fs::write(&path, VERSION_TWO).unwrap();
+
+        let stream = open(&path).unwrap();
+        let events = stream.events();
+        assert_eq!(events.len(), 3);
+        assert_eq!(
+            events[0].payload,
+            r#"{"role":"user","parts":[{"type":"text","text":"hi"}]}"#
+        );
+        assert_eq!(events[2].payload, "not json");
+        drop(stream);
+        // Reading alone changes nothing.
+        assert_eq!(fs::read_to_string(&path).unwrap(), VERSION_TWO);
+
+        let stream = open(&path).unwrap();
+        stream.emit(user("next").payload(r#"{"a":1}"#)).unwrap();
+        drop(stream);
+
+        let text = fs::read_to_string(&path).unwrap();
+        // The header says what the file now holds; the old lines are as they were.
+        assert_eq!(text.lines().next(), Some(r#"{"corduroy-log":3}"#));
+        let old: Vec<&str> = VERSION_TWO.lines().skip(1).collect();
+        let kept: Vec<&str> = text.lines().skip(1).take(old.len()).collect();
+        assert_eq!(kept, old);
+        assert!(text.contains(r#""payload":{"a":1}"#), "{text}");
+        let again = open(&path).unwrap().events();
+        assert_eq!(again.len(), 4);
+        assert_eq!(again[..3], events[..]);
+        assert_eq!(again[3].payload, r#"{"a":1}"#);
     }
 
     /// The markers removing `sessions` leave, as the harness writes them.
@@ -637,7 +798,7 @@ mod tests {
         let cases = [
             ("notes", "shopping list", "not a corduroy log"),
             ("foreign", "{\"other\":1}\n", "not a corduroy log"),
-            ("future", "{\"corduroy-log\":3}\n", "schema version 3"),
+            ("future", "{\"corduroy-log\":4}\n", "schema version 4"),
             ("corrupt", "{\"corduroy-log\":1}\nnot json\n", "line 2 of"),
             (
                 "backwards",

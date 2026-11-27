@@ -292,9 +292,14 @@ fn a_load_beyond_the_loaders_own_grants_is_refused() {
         misnamed["denied"],
         "capability `plugins` does not cover `other`"
     );
+    // A refused path says where paths start from, and nothing of what the grant covers.
     assert_eq!(
         unreadable["denied"],
-        "capability `fs-read` does not cover `/etc/hostname`"
+        format!(
+            "capability `fs-read` does not cover `/etc/hostname`: paths are relative to `{}`, \
+             and a relative path is the usual case",
+            work.display()
+        )
     );
     assert_eq!(
         ungranted["failed"],

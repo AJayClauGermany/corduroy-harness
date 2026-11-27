@@ -234,11 +234,14 @@ fn a_chatgpt_sign_in_is_the_token_a_provider_sends_and_its_absence_names_the_com
     );
     let sent = seen.lock().unwrap().first().cloned().unwrap();
     assert_eq!(sent.authorization, "Bearer plan-t0ken");
-    // The person is told whose account pays, and where to see what it has used.
+    // The person is told whose account pays, and where to see what it has used: progress,
+    // which is kept apart from the answer where the output is not a terminal.
+    let progress = text(&output.stderr);
     assert!(
-        stdout.contains("Using ChatGPT plan. Manage usage: https://chatgpt.com/settings/usage"),
-        "{stdout}"
+        progress.contains("Using ChatGPT plan. Manage usage: https://chatgpt.com/settings/usage"),
+        "{progress}"
     );
+    assert_eq!(stdout, "Hello.\n");
     let log = text(&corduroy(&workspace, &["log"], &env).unwrap().stdout);
     assert!(!log.contains("t0ken") && !stdout.contains("t0ken"));
 }

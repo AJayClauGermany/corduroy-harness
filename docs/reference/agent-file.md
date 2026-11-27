@@ -29,7 +29,13 @@ Every string in the file (paths, grants, configuration) may use:
 | `provider` | string | required | The provider the loop asks: the name of a `[providers.<name>]` entry. `--provider` overrides it. |
 | `model` | string | required | The model to ask that provider for. `--model` overrides it. |
 | `system` | string | none | The start of every system prompt. Plugins' prompt parts follow it. |
-| `max_turns` | integer | 25 (the default agent sets 50) | Model turns a run may take before it ends as `turn limit reached`. |
+| `max_turns` | integer | 25 (the default agent sets 50) | Model turns a run may take before it ends as `turn-limit`. |
+| `max_seconds` | integer | none: no limit | How long a run may go on before it ends as `time-limit`. Looked at before each request to the model, and a request still being answered when the time is up is dropped; a tool call under way is not cut short. Counted from when the command takes the run on, the sub-agents it runs included: time spent waiting for your answer is not counted, and `continue` gives a run its whole time again. |
+| `max_output_tokens` | integer | none: no limit | How many tokens the model may write in a run, thinking included, before it ends as `output-limit`. Looked at before each request, so the request that passes it is answered whole and its tools are called. Counted from your last prompt, as the provider reports them, so `continue` goes on from what the run had written. Not the same as a provider's [`max_tokens`](#providersname), which is the most *one answer* may take. |
+
+A run that reaches one of the three is not a failed run: what it did is done and recorded,
+and the next prompt goes on in the same conversation. The command says which it was, and
+[exits with a code of its own](cli.md#exit-codes) for each.
 | `log` | string | `{data}/log.jsonl` | The event log. A relative path is in the workspace. |
 
 ## `[providers.<name>]`
@@ -44,11 +50,22 @@ is what `provider` refers to.
 | `api_key_env` | string | The environment variable holding the key, read once when the agent starts. Defaults: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`; Ollama needs none. |
 | `secret` | string | The name of a [`[secrets.<name>]`](#secretsname) entry holding the key, in place of `api_key_env`. It is read for every request, so a value that changes while the agent runs is the one sent, and nothing is read from the environment unless that entry says so. For `anthropic`, `openai` and their `-compatible` kinds. |
 | `headers` | table | Extra headers sent with every request. |
-| `timeout_seconds` | integer | How long one request may take in all. |
-| `streaming` | boolean | Whether to stream responses. Each kind has a default. |
-| `max_tokens` | integer | The most one answer may take. Default: the model's own limit from oi-kit's catalogue, or 4096 for a model it does not know. A request to OpenAI's Responses API (the `openai` kinds asked for an o-series, GPT-5 or GPT-6 model, or given a `base_url` ending in `responses`) carries a limit only when this is set. |
+| `timeout_seconds` | integer | How long one attempt at a request may take in all, from sending it to the end of its answer, whether the answer is streamed or not. Default: 600. An attempt that runs out ends the request, and the run, as failed with the kind `timeout`; it is not tried again. A request tried again for another reason (a rate limit, a dropped connection) has the whole time for each attempt. |
+| `streaming` | boolean | Whether the provider's API is asked to stream its response. Each kind has a default. Either way the answer is shown as it comes where the API gives it in pieces, checkpointed in the log (`model/progress`), and bounded as a whole by `timeout_seconds`; an API that is not asked to stream gives the answer as one piece. |
+| `max_tokens` | integer | The most one answer may take. Default: what the model may write, as [`output_tokens`](#providersnamemodelsmodel) states it or as oi-kit's catalogue has it; for a model neither describes, a quarter of its stated `context_tokens` (at least 1024), or 4096. So a request always carries a limit, and a model served on this machine is not left to write until its context is full. A request to OpenAI's Responses API (the `openai` kinds asked for an o-series, GPT-5 or GPT-6 model, or given a `base_url` ending in `responses`) carries a limit only when this is set. |
 | `temperature` | float | Sampling temperature. Default: the model's own. |
 | `thinking` | string | `off`, `low`, `medium`, `high` or `max`, for a model that can think before it answers. |
+
+An entry that is wrong (an unknown kind, a missing key) stops the agent from being
+assembled, or leaves a spare provider out. A machine whose certificates cannot be loaded
+does not: the provider is built without its HTTP client, so `corduroy check` and whatever
+else asks no model still work, and the first request fails saying why, naming
+`SSL_CERT_FILE` or `SSL_CERT_DIR` where one is set and nothing could be read from it. That
+holds for a provider at `http://127.0.0.1` too, whose client is set up the same way.
+
+A request that fails in a way worth trying again (a rate limit, a server error, a dropped
+connection) is made again three times at most, each time recorded as
+[`model/retry`](events.md#the-run).
 
 A key the entry does not know is an error. Nothing here lists the models add-ons may ask:
 an add-on names a model as `<name>/<model>` (this entry's name, then the provider's own name
@@ -63,8 +80,8 @@ it holds. Every key is optional, and what is left out stays as the provider repo
 
 | Key | Type | Meaning |
 | --- | --- | --- |
-| `context_tokens` | integer | How many tokens the model holds at once. [`compact`](shipped-add-ons.md#compact) starts from three quarters of it. |
-| `output_tokens` | integer | The most it may write in one answer. |
+| `context_tokens` | integer | How many tokens the model holds at once. [`compact`](shipped-add-ons.md#compact) starts from three quarters of it, an answer may take a quarter of it where nothing else says how much the model may write (see `max_tokens`), and the harness holds one tool result to an eighth of it and the results of one step to a quarter ([Design](../design.md#keeping-within-what-the-model-holds)). Without it nothing bounds a step's results but each tool's own cap. |
+| `output_tokens` | integer | The most it may write in one answer: the default for the provider's `max_tokens`. |
 | `takes` | list of strings | The kinds of content it takes: `text`, `image`, `audio`, `video`, `pdf`, or another kind by name. A list given here replaces the provider's whole. |
 | `returns` | list of strings | The kinds of content it returns, named the same way. |
 | `tools` | boolean | Whether it can be offered tools. |
@@ -186,6 +203,7 @@ after every native plugin above.
 | `path` | string | required | The `.wasm` file: absolute, or found on the plugin path (below). |
 | `config` | any TOML value | none | Its configuration, handed to its `activate` as JSON. |
 | `grants` | table | none | Each capability it is granted, with its scope (below). |
+| `replaces` | list of strings | none | The tools it offers in the place of tools an add-on listed before it registered, by name. Without it, the second add-on to offer a name does not start. With it, each tool named takes the name over, and only if it can be taken for the tool it replaces: the same input schema (as JSON, spacing aside) and the same word on whether a call may be made again after a crash. A tool that differs, a name nothing has registered, or a name this add-on does not offer stops the add-on from starting, and says which. What it replaced is called again once this add-on is unloaded. See [Replace a shipped tool](../how-to/replace-a-shipped-tool.md). |
 | `enabled` | boolean | `true` | `false` keeps the entry without loading it. |
 
 **The plugin path.** A relative `path` is looked for, in order, in each directory in

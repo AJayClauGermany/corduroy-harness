@@ -204,6 +204,7 @@ same key, and a plugin calling its own service was refused rather than deadlocke
 | `state.get` with no value | `undefined` | `None` |
 | `tools.list()` | objects with `name`, `inputSchema`, `replaySafe`, `readOnly`, … | `types.ToolSpec` |
 | `tools.call()` | a list of content blocks; `Content.textOf(blocks)` for its text | a list of content blocks; `text_of(blocks)` for its text |
+| What a tool says of its results' size | `result: { tokens, keep }` on the tool, `keep` one of `head`, `tail`, `ends` | `result_tokens=`, `result_keep=` on `@plugin.tool` |
 | A tool's result | a string (one text block), or `Content.text(..)` / `Content.image(mimeType, bytes)`, alone or in an array | a string, or `Text(..)` / `Image(mime_type, data)`, alone or in a list |
 
 Names in the WIT met each language's own:

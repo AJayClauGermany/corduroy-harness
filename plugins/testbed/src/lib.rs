@@ -350,6 +350,7 @@ impl Plugin for Testbed {
                 "current": report(session::current().map(|current| json!(current))),
                 "call": report(session::call().map(|call| json!(call))),
                 "stopping": session::stopping(),
+                "budget": session::result_budget(),
             })
             .to_string()),
             "tools" => Ok(json!(

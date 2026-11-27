@@ -1,4 +1,5 @@
-//! Pure text handling for the tools: paging, tailing and exact replacement.
+//! Pure text handling for the file tools: paging and exact replacement. What `bash` does
+//! with a command's output is in the `shell-tool` crate, with the rest of its contract.
 
 use serde::Deserialize;
 
@@ -36,23 +37,6 @@ pub fn page(contents: &str, offset: usize, limit: usize, max_bytes: usize) -> Pa
         shown += 1;
     }
     Page { text, shown, total }
-}
-
-/// The end of `output`: at most `max_lines` lines and `max_bytes` bytes. Also reports
-/// whether anything was dropped.
-pub fn tail(output: &str, max_lines: usize, max_bytes: usize) -> (String, bool) {
-    let mut kept: Vec<&str> = Vec::new();
-    let mut bytes = 0;
-    for line in output.split_inclusive('\n').rev() {
-        if kept.len() == max_lines || (!kept.is_empty() && bytes + line.len() > max_bytes) {
-            break;
-        }
-        bytes += line.len();
-        kept.push(line);
-    }
-    let dropped = bytes < output.len();
-    kept.reverse();
-    (kept.concat(), dropped)
 }
 
 /// Apply every replacement to `original`. Each `old_text` must occur exactly once in
@@ -119,14 +103,6 @@ mod tests {
         // A single line over the limit is still returned.
         assert_eq!(page("aaaa", 1, 10, 2).shown, 1);
         assert_eq!(page("a", 5, 10, 10).shown, 0);
-    }
-
-    #[test]
-    fn tails_by_line_and_byte() {
-        assert_eq!(tail("a\nb\nc\n", 2, 1024), ("b\nc\n".to_owned(), true));
-        assert_eq!(tail("a\nb\n", 10, 1024), ("a\nb\n".to_owned(), false));
-        assert_eq!(tail("aaaa\nbb\n", 10, 4), ("bb\n".to_owned(), true));
-        assert_eq!(tail("", 10, 10), (String::new(), false));
     }
 
     #[test]

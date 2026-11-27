@@ -12,7 +12,9 @@ through these imports.
    one it was not granted does not start (`plugin/failed`, and `corduroy check` names it).
 2. **At each call.** The host resolves the resource (paths are made absolute and symbolic
    links followed) and checks it against the scope. A refusal comes back to the add-on as
-   `denied` and is recorded as `capability/denied`. Calls that list (`tools.list`,
+   `denied` and is recorded as `capability/denied`. A refused path says where paths are
+   relative to (the add-on's working directory) and nothing of what the grant covers: a
+   model that made up an absolute path is told where to start from. Calls that list (`tools.list`,
    `state.keys`, `log-read.read`) leave out what the scope does not reach rather than refuse.
 
 A scope is a set of allow patterns and deny patterns; deny wins. `*` matches any run of
@@ -38,7 +40,7 @@ through. See [Grants](agent-file.md#grants) for how to write one in the agent fi
 | `secret` | an opaque handle to a named credential, never its value | secret name | `"github"` |
 | `http` | an HTTP request through the host's client, which writes credentials in and follows no redirects | host name | `"api.github.com"` |
 | `log-read` | read events of any session, by topic, in pages of up to 1000 | `<session>:<topic>` (session percent-encodes `%` and `:`; empty for harness events) | `["*:message", "*:session/start"]` |
-| `session` | which session and tool call it is serving, and whether the run was asked to stop | session id | `"*"` |
+| `session` | which session and tool call it is serving, whether the run was asked to stop, and how much the call's result may take | session id | `"*"` |
 
 Whatever a grant says:
 

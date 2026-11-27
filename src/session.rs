@@ -16,14 +16,18 @@
 //! | `gate/decision` | `host` | `{"point", "id", "tool", "verdict", "reason", "gate", "caller"}`, caused by its `tool/call`: what the gates said |
 //! | `gate/answer` | `user` | `{"id", "tool", "allow", "reason"}`, caused by its `tool/call`: a person's answer to a gate that asked |
 //! | `tool/start` | `host` | `{"id", "tool"}`, caused by its `tool/call`: the tool is about to run |
-//! | `tool/result` | `environment` | `{"id", "tool", "ok", "output"}`, and `"content"` when the result is not one block of text, caused by its `tool/call` |
-//! | `model/request` | `host` | `{"provider", "model", "messages", "tools"}`: the model is about to be asked, with that many messages and tools; what follows it in the session (the model's `message`, or a `turn/end`) says when the answer came |
+//! | `tool/result` | `environment` | `{"id", "tool", "ok", "output", "bytes", "tokens"}`, and `"content"` when the result is not one block of text, caused by its `tool/call`; with `"signal"` where the call waited and this is what the signal of that name brought; `bytes` and `tokens` are the size of its text, and where the call had a bound `"budget"` is the tokens the model is shown at most and `"cut": true` says the result is longer |
+//! | `model/request` | `host` | `{"provider", "model", "messages", "tools", "estimated_tokens"}`: the model is about to be asked, with that many messages and tools, reckoned to take that many tokens; with `"system_hash"` and `"tools_hash"` naming what it carried (see `model/shown`), and `"max_tokens"`, `"temperature"`, `"thinking"` and `"timeout_ms"` where the provider says what it adds; what follows it in the session (the model's `message`, or a `turn/end`) says when the answer came |
+//! | `model/shown` | `host` | `{"hash", "kind"}` with `"text"` (`kind` `system`) or `"tools"` (`kind` `tools`): a system prompt or a set of tool declarations a model was shown, recorded once for a log under the hash the requests that carried it name; of no session |
+//! | `model/retry` | `host` | `{"provider", "model", "attempt", "kind", "reason", "delay_ms", "by"}`: an attempt at the request failed for `reason` (of `kind`, as a failed `turn/end` names them) and it is made again after `delay_ms`; `attempt` counts the retries from 1, and `by` says who retries (`provider`, or `client` for the HTTP client beneath it) |
+//! | `model/progress` | `host` | `{"provider", "model", "tokens", "elapsed_ms"}` with `"text"`, `"thinking"` and `"calls"` (each `{"id", "tool", "input"}`) where there is some: a checkpoint of an answer the model is still writing, holding what it wrote since the checkpoint before; `tokens` is what the attempt has written so far, with `"estimated": true` where that is reckoned from the length of the text; not part of the conversation |
+//! | `model/partial` | `host` | the same fields, holding the whole of what the model had written when its request ended without an answer, and `"why"`: `stopped`, `time-limit` or `failed` (with the `"kind"` a failed `turn/end` names); not part of the conversation, and nothing in it is run |
 //! | `usage` | `agent` | `{"model", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens", "stop"}`, each count only if the provider gave it; the cache counts are part of `input_tokens` and the reasoning count of `output_tokens`; `stop` is why the model stopped (`finished`, `limit`, `tool_calls` or `refused`), if the provider said |
-//! | `turn/end` | `host` | `{"status"}`: `finished`, `turn-limit`, `failed` (with `"reason"`), `stopped` or `yielded` |
+//! | `turn/end` | `host` | `{"status"}`: `finished`, `cut-off` (the answer stopped at the most the model may write), `turn-limit`, `time-limit`, `output-limit`, `failed` (with `"reason"`, and `"kind"` where the model gave no answer: `context-overflow`, `rate-limit`, `auth`, `timeout`, `unreachable` or `other`), `stopped` or `yielded` |
 //! | `run/restart` | `host` | `{"attempt"}`: an unfinished run was picked up again |
 //! | `run/stop` | `user` | `{}`: a person asked the run to stop |
 //! | `tool/wait` | `host` | `{"id", "tool", "signal"}`, caused by its `tool/call`: the call's result comes with the signal |
-//! | `signal` | `environment` | `{"name", "payload"}`: what a waiting call was waiting for |
+//! | `signal` | `environment` | `{"name", "payload"}`: what a waiting call was waiting for; the `tool/result` of each call that waited follows it in the same commit |
 //! | `compaction` | `host` | `{"summary", "keep_from", "by"}`: the messages before the `message` event `keep_from` are summarised |
 //!
 //! Two belong to no session: each process that opens the log records what it runs as, and a
@@ -62,7 +66,8 @@
 //! [`corduroy_core::call::wait_for`], that its result will come with a signal. The call
 //! gets a placeholder result and a `tool/wait`, and the run stops before the model is asked
 //! again; when a `signal` of that name is stored, its payload takes the placeholder's place
-//! and the run can go on. A child session's end is such a signal (`session/<id>/end`), so a
+//! and the run can go on. The call's `tool/result` is stored with the signal, so every
+//! call has one; a log from before that has the `signal` alone, and reads the same. A child session's end is such a signal (`session/<id>/end`), so a
 //! parent run waits for a child in the log, as it waits for a person's answer.
 //!
 //! A `compaction` stands a summary in for the messages before `keep_from`. They stay in the
@@ -88,13 +93,16 @@ use anyhow::{Context as _, Result};
 use corduroy_core::ModelRequest;
 use corduroy_core::sync::Lock;
 use corduroy_core::{
-    Decision, Draft, Event, EventId, EventStream, LogError, Message, Part, Query, Role, SessionId,
-    Source, StopReason, TOOL_CALL, ToolCall, ToolOutput, ToolResult, Usage, Verdict,
+    BYTES_PER_TOKEN, Content, Decision, Draft, Event, EventId, EventStream, LogError, Message,
+    Part, Pattern, Query, ResultBudget, Role, SessionId, Source, StopReason, TOOL_CALL, ToolCall,
+    ToolOutput, ToolResult, Usage, Verdict,
 };
 use serde_json::{Value, json};
 
+use crate::bound::text_bytes;
 use crate::harness::HarnessError;
 use crate::message::{decode, decode_content, encode, encode_content};
+use crate::provider::{Asking, ProviderError, ProviderErrorKind, Retry};
 
 /// Topic of the events that make up the conversation.
 pub const MESSAGE: &str = "message";
@@ -107,6 +115,20 @@ const USAGE: &str = "usage";
 
 /// Topic of the event that records a request going out to the model.
 pub const MODEL_REQUEST: &str = "model/request";
+
+/// Topic of the event that holds, once for a log, something a model was shown: a system
+/// prompt or a set of tool declarations, under the hash the requests that carried it name.
+pub const MODEL_SHOWN: &str = "model/shown";
+
+/// Topic of the event that records a model request being made again after a failed attempt.
+pub const MODEL_RETRY: &str = "model/retry";
+
+/// Topic of the event that checkpoints what a model has written while it is still writing.
+pub const MODEL_PROGRESS: &str = "model/progress";
+
+/// Topic of the event that keeps what a model had written when its request ended without
+/// an answer.
+pub const MODEL_PARTIAL: &str = "model/partial";
 
 /// Topic of the event that records an unfinished run being picked up again.
 const RESTART: &str = "run/restart";
@@ -363,6 +385,7 @@ struct Known {
 pub struct Sessions {
     events: Arc<EventStream>,
     known: Lock<BTreeMap<SessionId, Known>>,
+    shown: Shown,
 }
 
 impl core::fmt::Debug for Sessions {
@@ -371,7 +394,123 @@ impl core::fmt::Debug for Sessions {
     }
 }
 
+/// What models have been shown, so far as the log holds it: the hash of each system prompt
+/// and each set of tool declarations a `model/shown` event records.
+///
+/// A request names what it carried by hash, and the text is recorded the first time a hash
+/// is used in a log, whichever session used it. The hashes already recorded are read from
+/// the stream the first time one is needed, so a log that is picked up again does not
+/// record them twice.
+pub(crate) struct Shown {
+    recorded: Lock<Option<BTreeSet<String>>>,
+}
+
+impl Shown {
+    const fn new() -> Self {
+        Self {
+            recorded: Lock::new(None),
+        }
+    }
+
+    /// The hash of `text`, something of `kind` a model is about to be shown, and the event
+    /// that records it as `shown` (the payload's other fields), if the log `events` holds
+    /// does not have it yet. It is taken as recorded from now on.
+    fn name(
+        &self,
+        events: &EventStream,
+        kind: &str,
+        text: &str,
+        shown: Value,
+    ) -> (String, Option<Draft>) {
+        let hashed = hash(text);
+        let fresh = self.recorded.with(|recorded| {
+            recorded
+                .get_or_insert_with(|| recorded_in(events))
+                .insert(hashed.clone())
+        });
+        let draft = fresh.then(|| {
+            let mut payload = json!({"hash": hashed, "kind": kind});
+            if let (Some(fields), Value::Object(shown)) = (payload.as_object_mut(), shown) {
+                fields.extend(shown);
+            }
+            Draft::new(Source::Host, MODEL_SHOWN).payload(payload.to_string())
+        });
+        (hashed, draft)
+    }
+}
+
+/// The hashes the `model/shown` events of `events` record.
+fn recorded_in(events: &EventStream) -> BTreeSet<String> {
+    events
+        .matching(&Pattern::new(MODEL_SHOWN))
+        .iter()
+        .filter_map(|event| {
+            let payload: Value = serde_json::from_str(&event.payload).ok()?;
+            Some(payload.get("hash")?.as_str()?.to_owned())
+        })
+        .collect()
+}
+
+/// A name for `text` that the same text always gets: its 64-bit FNV-1a hash, as sixteen
+/// hexadecimal digits. It tells one prompt from another in a log. It is no protection:
+/// two texts with one hash can be made on purpose.
+fn hash(text: &str) -> String {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let hashed = text.bytes().fold(OFFSET, |hashed, byte| {
+        (hashed ^ u64::from(byte)).wrapping_mul(PRIME)
+    });
+    format!("{hashed:016x}")
+}
+
+/// What `asking` says a provider adds to a request, as the fields of `model/request` that
+/// record it: each only where the provider said.
+fn asked(asking: &Asking) -> serde_json::Map<String, Value> {
+    let mut fields = serde_json::Map::new();
+    if let Some(tokens) = asking.max_tokens {
+        fields.insert("max_tokens".to_owned(), json!(tokens));
+    }
+    // As it was written, not as the nearest binary fraction reads.
+    if let Some(temperature) = asking
+        .temperature
+        .and_then(|temperature| temperature.to_string().parse::<f64>().ok())
+    {
+        fields.insert("temperature".to_owned(), json!(temperature));
+    }
+    if let Some(thinking) = &asking.thinking {
+        fields.insert("thinking".to_owned(), json!(thinking));
+    }
+    if let Some(timeout) = asking.timeout {
+        let millis = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
+        fields.insert("timeout_ms".to_owned(), json!(millis));
+    }
+    fields
+}
+
+/// The tool declarations a request carries, as the log keeps them: each tool's name, what
+/// it says of itself, and the schema of its input (as JSON where it is JSON).
+fn declarations(request: &ModelRequest) -> Value {
+    request
+        .tools
+        .iter()
+        .map(|tool| {
+            let schema = serde_json::from_str::<Value>(&tool.input_schema)
+                .unwrap_or_else(|_| json!(tool.input_schema));
+            json!({
+                "name": tool.name,
+                "description": tool.description,
+                "input_schema": schema,
+            })
+        })
+        .collect()
+}
+
 impl Sessions {
+    /// What models have been shown, as this log records it.
+    pub(crate) const fn shown(&self) -> &Shown {
+        &self.shown
+    }
+
     /// The sessions `events` holds, with the session [`MAIN`] started if it is not among
     /// them.
     ///
@@ -399,6 +538,7 @@ impl Sessions {
         Ok(Self {
             events,
             known: Lock::new(known),
+            shown: Shown::new(),
         })
     }
 
@@ -492,6 +632,8 @@ pub struct Session {
     summary: Option<(String, usize)>,
     /// Why the model stopped the last time it answered, if its provider said.
     stopped: Option<StopReason>,
+    /// The output tokens of the current turn's model requests.
+    written: u64,
 }
 
 impl Session {
@@ -581,6 +723,14 @@ impl Session {
     #[must_use]
     pub const fn stopped(&self) -> Option<StopReason> {
         self.stopped
+    }
+
+    /// How many tokens the model has written in the current turn, thinking included, as
+    /// its provider counted them: what a run's
+    /// [output limit](crate::Harness::with_output_limit) is held against.
+    #[must_use]
+    pub const fn turn_output_tokens(&self) -> u64 {
+        self.written
     }
 
     /// The model's last answer, if the conversation ends with one that asks for nothing.
@@ -682,10 +832,21 @@ pub struct Wait {
 pub enum End {
     /// The model answered.
     Finished,
+    /// The model answered, and its answer was cut off at the most it may write.
+    CutOff,
     /// The model was still working when it ran out of turns.
     TurnLimit,
+    /// The model was still working when the run ran out of time
+    /// ([`Harness::with_time_limit`](crate::Harness::with_time_limit)).
+    TimeLimit,
+    /// The model was still working when the run had written all it may
+    /// ([`Harness::with_output_limit`](crate::Harness::with_output_limit)).
+    OutputLimit,
     /// The model, or the run, failed, for this reason.
     Failed(String),
+    /// The model gave no answer, for this reason. Recorded as a failed run, with the
+    /// error's [kind](crate::ProviderError::kind) beside its reason.
+    ModelFailed(ProviderError),
     /// A person stopped it.
     Stopped,
     /// It stopped with nothing left to do and no answer.
@@ -693,22 +854,39 @@ pub enum End {
 }
 
 impl End {
+    /// Whether the run ended because its request was more than the model holds.
+    pub(crate) fn overflowed(&self) -> bool {
+        matches!(
+            self,
+            Self::ModelFailed(error) if error.kind() == ProviderErrorKind::ContextOverflow
+        )
+    }
+
     /// How a run with nothing left to do ends: finished if the model has answered `session`,
-    /// yielded if not.
+    /// cut off if that answer stopped at the most the model may write, yielded if there is
+    /// none.
     #[must_use]
     pub fn settled(session: &Session) -> Self {
-        if session.answer().is_some() {
-            Self::Finished
-        } else {
-            Self::Yielded
+        match (session.answer(), session.stopped()) {
+            (Some(_), Some(StopReason::Limit)) => Self::CutOff,
+            (Some(_), _) => Self::Finished,
+            (None, _) => Self::Yielded,
         }
     }
 
     fn payload(&self) -> Value {
         match self {
             Self::Finished => json!({"status": "finished"}),
+            Self::CutOff => json!({"status": "cut-off"}),
             Self::TurnLimit => json!({"status": "turn-limit"}),
+            Self::TimeLimit => json!({"status": "time-limit"}),
+            Self::OutputLimit => json!({"status": "output-limit"}),
             Self::Failed(reason) => json!({"status": "failed", "reason": reason}),
+            Self::ModelFailed(error) => json!({
+                "status": "failed",
+                "reason": error.to_string(),
+                "kind": error.kind().name(),
+            }),
             Self::Stopped => json!({"status": "stopped"}),
             Self::Yielded => json!({"status": "yielded"}),
         }
@@ -720,14 +898,23 @@ impl End {
         let payload: Value = serde_json::from_str(payload).ok()?;
         Some(match payload.get("status")?.as_str()? {
             "finished" => Self::Finished,
+            "cut-off" => Self::CutOff,
             "turn-limit" => Self::TurnLimit,
-            "failed" => Self::Failed(
-                payload
+            "time-limit" => Self::TimeLimit,
+            "output-limit" => Self::OutputLimit,
+            "failed" => {
+                let reason = payload
                     .get("reason")
                     .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
-            ),
+                    .unwrap_or_default();
+                payload.get("kind").and_then(Value::as_str).map_or_else(
+                    || Self::Failed(reason.to_owned()),
+                    |kind| {
+                        let kind = ProviderErrorKind::named(kind);
+                        Self::ModelFailed(ProviderError::new(reason).of(kind))
+                    },
+                )
+            }
             "stopped" => Self::Stopped,
             _ => Self::Yielded,
         })
@@ -791,8 +978,17 @@ struct State {
     compaction: Option<(String, EventId)>,
     /// The input tokens of the last model request, unless a compaction came after it.
     input_tokens: u64,
+    /// The tokens the model wrote in answer to that request, which the next one sends back.
+    replied: u64,
+    /// The bytes of the messages added since that request was answered.
+    added: usize,
+    /// Whether the last run ended because its request was more than the model holds, and
+    /// nothing has been answered or summarised since.
+    overflowed: bool,
     /// Why the model stopped the last time it answered, if its provider said.
     stopped: Option<StopReason>,
+    /// The output tokens of the model requests since a person last wrote.
+    written: u64,
     /// Tool calls that waited for a signal, by tool-call id, with the payload once it came.
     waits: BTreeMap<String, Waited>,
     /// The tool calls waiting for a response, by tool-call id.
@@ -808,9 +1004,27 @@ struct State {
 /// A tool call that waited for a signal.
 struct Waited {
     tool: String,
+    /// The call's `tool/call` event, if the call was open when it began to wait.
+    event: Option<EventId>,
     signal: String,
     /// The signal's payload, once it came.
     payload: Option<String>,
+}
+
+impl Waited {
+    /// The `tool/result` of the call `call`, which waited for this: what its signal
+    /// brought as `payload`, caused by the call where that is known.
+    fn brought(&self, call: &str, payload: &str) -> Draft {
+        let mut result = result_payload(call, &self.tool, true, &ToolOutput::text(payload));
+        if let Some(fields) = result.as_object_mut() {
+            fields.insert("signal".to_owned(), json!(self.signal));
+        }
+        let draft = Draft::new(Source::Environment, "tool/result").payload(result.to_string());
+        match self.event {
+            Some(event) => draft.cause(event),
+            None => draft,
+        }
+    }
 }
 
 /// One step's worth of events, and what they change in the projection once stored.
@@ -827,8 +1041,18 @@ struct Batch {
     closed: Vec<String>,
     /// What the gates decided about tool calls, by tool-call id.
     gated: Vec<(String, Gated)>,
-    /// A model request recorded in this batch: its input tokens, and why the model stopped.
-    asked: Option<(u64, Option<StopReason>)>,
+    /// A model request recorded in this batch.
+    asked: Option<Asked>,
+}
+
+/// What a model request came to.
+struct Asked {
+    /// The tokens it read.
+    input: u64,
+    /// The tokens the model wrote.
+    output: u64,
+    /// Why the model stopped, if its provider said.
+    stopped: Option<StopReason>,
 }
 
 impl Batch {
@@ -872,7 +1096,11 @@ impl State {
             message_ids: Vec::new(),
             compaction: None,
             input_tokens: 0,
+            replied: 0,
+            added: 0,
+            overflowed: false,
             stopped: None,
+            written: 0,
             waits: BTreeMap::new(),
             calls: BTreeMap::new(),
             unfinished: false,
@@ -889,6 +1117,7 @@ impl State {
             call.to_owned(),
             Waited {
                 tool: tool.to_owned(),
+                event: self.calls.get(call).map(|open| open.event),
                 signal: signal.to_owned(),
                 payload: None,
             },
@@ -939,7 +1168,12 @@ impl State {
         for result in message.tool_results() {
             self.calls.remove(&result.id);
         }
+        // A person's message begins a turn, and what the model writes is counted from there.
+        if message.role == Role::User && !message.is_tool_results() {
+            self.written = 0;
+        }
         let message = self.resolved(message);
+        self.added = self.added.saturating_add(size(&message));
         self.messages.push(message);
         self.message_ids.push(id);
         self.unfinished = true;
@@ -964,6 +1198,13 @@ impl State {
             .or_else(|| usage.pointer("/usage/input_tokens"))
             .and_then(Value::as_u64)
             .unwrap_or(0);
+        let written = usage
+            .get("output_tokens")
+            .or_else(|| usage.pointer("/usage/output_tokens"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        self.written = self.written.saturating_add(written);
+        (self.replied, self.added, self.overflowed) = (written, 0, false);
         self.stopped = usage
             .get("stop")
             .and_then(Value::as_str)
@@ -980,7 +1221,21 @@ impl State {
             messages: self.messages.clone(),
             summary,
             stopped: self.stopped,
+            written: self.written,
         }
+    }
+
+    /// What the next model request is expected to take, in tokens, given the conversation
+    /// the model sees: what the last request took and was answered with, and an estimate
+    /// of what was added since; or an estimate of all of it, where no request was answered
+    /// since the last summary.
+    fn expected(&self, view: &[(Option<EventId>, Message)]) -> u64 {
+        if self.input_tokens == 0 {
+            return estimate(view.iter().map(|(_, message)| size(message)).sum());
+        }
+        self.input_tokens
+            .saturating_add(self.replied)
+            .saturating_add(estimate(self.added))
     }
 
     /// The conversation the model sees, before joining, each message with the event it
@@ -1028,11 +1283,12 @@ impl State {
                     .and_then(Value::as_u64)
                     .map_or(event.id, EventId::new);
                 self.compaction = Some((summary.to_owned(), keep_from));
-                self.input_tokens = 0;
+                (self.input_tokens, self.overflowed) = (0, false);
             }
             TURN_END => {
                 (self.unfinished, self.restarts) = (false, 0);
                 self.ended = End::read(&event.payload);
+                self.overflowed = self.ended.as_ref().is_some_and(End::overflowed);
             }
             RESTART => self.restarts = self.restarts.saturating_add(1),
             TOOL_WAIT | SIGNAL => {
@@ -1236,7 +1492,11 @@ impl Journal {
                     batch
                         .drafts
                         .push(Draft::new(Source::Agent, USAGE).payload(payload.to_string()));
-                    batch.asked = Some((usage.input_tokens.unwrap_or(0), stop));
+                    batch.asked = Some(Asked {
+                        input: usage.input_tokens.unwrap_or(0),
+                        output: usage.output_tokens.unwrap_or(0),
+                        stopped: stop,
+                    });
                 }
                 Effect::Compacted {
                     summary,
@@ -1307,23 +1567,50 @@ impl Journal {
         recorded
     }
 
-    /// What a compaction could summarise now: the messages the model sees from before the
-    /// current turn began. `None` if there is nothing but an earlier summary, or no turn yet.
+    /// What a compaction could summarise now. `None` if there is nothing but an earlier
+    /// summary, or no turn yet.
+    ///
+    /// The cut falls where a step begins, so that no tool call is parted from its result.
+    /// While a turn is under way and every call of its last step is answered, that is the
+    /// last step: the model keeps the calls it just made and their results, and everything
+    /// before them, the start of the turn included, gives way to the summary. Otherwise it
+    /// is where the turn began, and the turn is kept whole.
     pub(crate) fn compactable(&self) -> Option<Compactable> {
-        let (view, input_tokens) = self.state(|state| (state.model_view(), state.input_tokens));
+        let (view, expected, overflowed, open) = self.state(|state| {
+            let view = state.model_view();
+            let open =
+                !state.calls.is_empty() || state.waits.values().any(|wait| wait.payload.is_none());
+            let expected = state.expected(&view);
+            (view, expected, state.overflowed, open)
+        });
         // The turn began with the last message a person wrote that the model still sees.
         let kickoff = view.iter().rposition(|(id, message)| {
             id.is_some() && message.role == Role::User && !message.is_tool_results()
         })?;
-        let earlier = view.get(..kickoff)?;
-        // With nothing but an earlier summary before the turn, there is nothing new.
-        if !earlier.iter().any(|(id, _)| id.is_some()) {
+        let answered = view
+            .last()
+            .is_some_and(|(_, message)| message.is_tool_results());
+        let step = view
+            .iter()
+            .rposition(|(id, message)| id.is_some() && message.role == Role::Assistant)
+            .filter(|step| !open && answered && *step > kickoff);
+        let cut = step.unwrap_or(kickoff);
+        let earlier = view.get(..cut)?;
+        // With nothing but an earlier summary before the cut, there is nothing new.
+        let messages = earlier.iter().filter(|(id, _)| id.is_some()).count();
+        if messages == 0 {
             return None;
         }
+        // A cut inside the turn hides what the person asked for, so it is kept in words.
+        let request = step
+            .and_then(|_| view.get(kickoff))
+            .map(|(_, message)| message.text_content());
         Some(Compactable {
-            keep_from: view.get(kickoff)?.0?,
-            input_tokens,
-            messages: earlier.len(),
+            keep_from: view.get(cut)?.0?,
+            input_tokens: expected,
+            messages,
+            overflowed,
+            request,
         })
     }
 
@@ -1452,9 +1739,25 @@ impl Journal {
     ///
     /// `output` is what the tool returned, or the text of its error. It is stored whole,
     /// images included, so a run picked up later hands the model the same result.
-    pub(crate) fn finish_call(&self, call: &str, ok: bool, output: &ToolOutput) -> Result<()> {
+    ///
+    /// `budget` is what the model is to be shown of it at most, where the call has a bound:
+    /// the event says so (`budget`, in tokens), and that the result is `cut` for the model
+    /// where it is longer.
+    pub(crate) fn finish_call(
+        &self,
+        call: &str,
+        ok: bool,
+        output: &ToolOutput,
+        budget: Option<ResultBudget>,
+    ) -> Result<()> {
         let (draft, tool) = self.about_call(call, Source::Environment, "tool/result");
-        let payload = result_payload(call, &tool, ok, output);
+        let mut payload = result_payload(call, &tool, ok, output);
+        if let (Some(budget), Some(fields)) = (budget, payload.as_object_mut()) {
+            fields.insert("budget".to_owned(), json!(budget.tokens));
+            if text_bytes(output) > budget.bytes() {
+                fields.insert("cut".to_owned(), json!(true));
+            }
+        }
         self.events.emit(draft.payload(payload.to_string()))?;
         self.state(|state| {
             if let Some(open) = state.calls.get_mut(call) {
@@ -1477,18 +1780,30 @@ impl Journal {
     /// Store the signal `name`, bringing `payload` to whichever calls of this session wait
     /// for it. Returns whether any did; if none did, nothing is stored.
     ///
+    /// Each call that waited gets its `tool/result` in the same commit, caused by its
+    /// `tool/call`, so that every call has one whether or not it waited. The conversation
+    /// is still rebuilt from the `signal` alone, as a log written before this holds no
+    /// such result.
+    ///
     /// # Errors
     ///
     /// Fails if the signal cannot be stored.
     pub fn signal(&self, name: &str, payload: &str) -> Result<bool> {
-        let awaited = self.awaiting().iter().any(|wait| wait.signal == name);
-        if !awaited {
+        let results: Vec<Draft> = self.state(|state| {
+            state
+                .waits
+                .iter()
+                .filter(|(_, waited)| waited.signal == name && waited.payload.is_none())
+                .map(|(call, waited)| waited.brought(call, payload).session(self.id.clone()))
+                .collect()
+        });
+        if results.is_empty() {
             return Ok(false);
         }
         let draft = Draft::new(Source::Environment, SIGNAL)
             .session(self.id.clone())
             .payload(json!({"name": name, "payload": payload}).to_string());
-        self.events.emit(draft)?;
+        self.events.commit(core::iter::once(draft).chain(results))?;
         self.state(|state| state.resolve(name, payload));
         Ok(true)
     }
@@ -1527,17 +1842,90 @@ impl Journal {
         }
     }
 
-    /// Record that `request` is about to go to the model `provider` serves. This is its own
-    /// commit, so the log says when the model was asked, and that it was, even if no answer
-    /// ever comes.
-    pub(crate) fn ask_started(&self, provider: &str, request: &ModelRequest) -> Result<()> {
-        let payload = json!({
+    /// Record that `request` is about to go to the model `provider` serves, with what the
+    /// provider adds to it (`asking`). This is its own commit, so the log says when the
+    /// model was asked, and that it was, even if no answer ever comes.
+    ///
+    /// The request names its system prompt and its tool declarations by hash; whichever
+    /// of the two `shown` does not have yet is recorded in the same commit, before the
+    /// request, as a `model/shown` event of no session, since any session may name it.
+    pub(crate) fn ask_started(
+        &self,
+        provider: &str,
+        request: &ModelRequest,
+        asking: &Asking,
+        shown: &Shown,
+    ) -> Result<()> {
+        let mut payload = json!({
             "provider": provider,
             "model": request.model,
             "messages": request.messages.len(),
             "tools": request.tools.len(),
         });
-        let draft = Draft::new(Source::Host, MODEL_REQUEST)
+        let mut drafts = Vec::new();
+        let tools = declarations(request);
+        let declared = if request.tools.is_empty() {
+            String::new()
+        } else {
+            tools.to_string()
+        };
+        let bytes = request
+            .messages
+            .iter()
+            .map(size)
+            .sum::<usize>()
+            .saturating_add(request.system.len())
+            .saturating_add(declared.len());
+        let mut said = asked(asking);
+        said.insert("estimated_tokens".to_owned(), json!(estimate(bytes)));
+        if !request.system.is_empty() {
+            let text = json!({"text": request.system});
+            let (hashed, draft) = shown.name(&self.events, "system", &request.system, text);
+            drafts.extend(draft);
+            said.insert("system_hash".to_owned(), json!(hashed));
+        }
+        if !request.tools.is_empty() {
+            let (hashed, draft) =
+                shown.name(&self.events, "tools", &declared, json!({"tools": tools}));
+            drafts.extend(draft);
+            said.insert("tools_hash".to_owned(), json!(hashed));
+        }
+        if let Some(fields) = payload.as_object_mut() {
+            fields.extend(said);
+        }
+        drafts.push(
+            Draft::new(Source::Host, MODEL_REQUEST)
+                .session(self.id.clone())
+                .payload(payload.to_string()),
+        );
+        self.events.commit(drafts)?;
+        Ok(())
+    }
+
+    /// Record that the request to `model` of `provider` failed and is being made again:
+    /// which retry it is, why the attempt failed, how long is waited first, and who retries.
+    pub(crate) fn retried(&self, provider: &str, model: &str, retry: &Retry) -> Result<()> {
+        let payload = json!({
+            "provider": provider,
+            "model": model,
+            "attempt": retry.attempt,
+            "kind": retry.error.kind().name(),
+            "reason": retry.error.to_string(),
+            "delay_ms": u64::try_from(retry.delay.as_millis()).unwrap_or(u64::MAX),
+            "by": retry.by,
+        });
+        let draft = Draft::new(Source::Host, MODEL_RETRY)
+            .session(self.id.clone())
+            .payload(payload.to_string());
+        self.events.emit(draft)?;
+        Ok(())
+    }
+
+    /// Record `payload` under `topic` as something the host notes about a request to the
+    /// model: a checkpoint of what it is writing, or what it had written when it ended
+    /// without an answer. Neither is part of the conversation.
+    pub(crate) fn noted(&self, topic: &str, payload: &Value) -> Result<()> {
+        let draft = Draft::new(Source::Host, topic)
             .session(self.id.clone())
             .payload(payload.to_string());
         self.events.emit(draft)?;
@@ -1562,6 +1950,7 @@ impl Journal {
         self.events.emit(draft)?;
         self.state(|state| {
             (state.unfinished, state.restarts) = (false, 0);
+            state.overflowed = end.overflowed();
             state.ended = Some(end.clone());
         });
         Ok(())
@@ -1606,7 +1995,7 @@ impl State {
         for (position, summary, keep_from) in batch.compactions {
             if ids.get(position).is_some() {
                 self.compaction = Some((summary, keep_from));
-                self.input_tokens = 0;
+                (self.input_tokens, self.overflowed) = (0, false);
             }
         }
         for (call, (position, tool, input)) in batch.opened {
@@ -1631,8 +2020,10 @@ impl State {
         for call in batch.closed {
             self.calls.remove(&call);
         }
-        if let Some((tokens, stopped)) = batch.asked {
-            (self.input_tokens, self.stopped) = (tokens, stopped);
+        if let Some(asked) = batch.asked {
+            (self.input_tokens, self.stopped) = (asked.input, asked.stopped);
+            self.written = self.written.saturating_add(asked.output);
+            (self.replied, self.added, self.overflowed) = (asked.output, 0, false);
         }
     }
 }
@@ -1640,12 +2031,38 @@ impl State {
 /// What a compaction could summarise. See [`Journal::compactable`].
 #[derive(Debug, Clone)]
 pub(crate) struct Compactable {
-    /// The first message to keep: where the current turn began.
+    /// The first message to keep: where the current turn began, or its last step.
     pub(crate) keep_from: EventId,
-    /// The input tokens of the last model request since the last compaction, or zero.
+    /// What the next model request is expected to take, in tokens: the last request's
+    /// count and answer, and an estimate of what was added since.
     pub(crate) input_tokens: u64,
-    /// How many messages would be summarised.
+    /// How many messages would be summarised, an earlier summary not counted.
     pub(crate) messages: usize,
+    /// Whether the last run ended because its request was more than the model holds.
+    pub(crate) overflowed: bool,
+    /// What the person asked for in the turn under way, if the cut would hide it.
+    pub(crate) request: Option<String>,
+}
+
+/// The bytes of `message` that a model reads: its text, its tool calls and their results.
+fn size(message: &Message) -> usize {
+    message
+        .parts
+        .iter()
+        .map(|part| match part {
+            Part::Text(text) => text.len(),
+            Part::ToolCall(call) => call.name.len().saturating_add(call.input.len()),
+            Part::ToolResult(result) => text_bytes(&result.output),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// `bytes` of text as tokens, counted as the core counts them.
+fn estimate(bytes: usize) -> u64 {
+    u64::try_from(bytes)
+        .unwrap_or(u64::MAX)
+        .div_ceil(u64::from(BYTES_PER_TOKEN))
 }
 
 /// Longest part of a message a transcript keeps, in characters.
@@ -1702,9 +2119,16 @@ fn usage_payload(model: &str, usage: Usage, stop: Option<StopReason>) -> Value {
 /// The payload of the `tool/result` event for the call `id`: the result's text as `output`,
 /// and its blocks as `content` unless the result is one block of text, which `output`
 /// already is. [`recorded_output`] reads it back.
+///
+/// It says how large the result is as a model reads it: the `bytes` of its text, and the
+/// `tokens` those are counted as.
 fn result_payload(id: &str, tool: &str, ok: bool, output: &ToolOutput) -> Value {
-    let mut payload = json!({"id": id, "tool": tool, "ok": ok, "output": output.to_text()});
-    if !matches!(output.content(), [corduroy_core::Content::Text(_)])
+    let bytes = text_bytes(output);
+    let mut payload = json!({
+        "id": id, "tool": tool, "ok": ok, "output": output.to_text(),
+        "bytes": bytes, "tokens": estimate(bytes),
+    });
+    if !matches!(output.content(), [Content::Text(_)])
         && let Some(fields) = payload.as_object_mut()
     {
         fields.insert("content".to_owned(), encode_content(output));
@@ -1725,8 +2149,6 @@ fn recorded_output(id: EventId, payload: &Value) -> Result<ToolOutput> {
 #[cfg(test)]
 mod tests {
     use alloc::vec;
-
-    use corduroy_core::Content;
 
     use super::*;
 
@@ -1778,7 +2200,7 @@ mod tests {
     fn one_block_of_text_is_recorded_as_output_alone() {
         assert_eq!(
             result_payload("c1", "label", true, &ToolOutput::text("a view")).to_string(),
-            r#"{"id":"c1","tool":"label","ok":true,"output":"a view"}"#
+            r#"{"id":"c1","tool":"label","ok":true,"output":"a view","bytes":6,"tokens":2}"#
         );
         assert_eq!(
             result_payload(
@@ -1792,6 +2214,9 @@ mod tests {
                 "tool": "snap",
                 "ok": false,
                 "output": "[image: image/png, 8 bytes]",
+                // What a model reads of it as text: an image is not counted.
+                "bytes": 0,
+                "tokens": 0,
                 "content": [{"type": "image", "mime_type": "image/png", "data": "iVBORw0KGgo="}],
             })
         );
@@ -1826,11 +2251,28 @@ mod tests {
             End::Finished,
             End::TurnLimit,
             End::Failed("the model is down".into()),
+            End::ModelFailed(
+                ProviderError::new("too much to read").of(ProviderErrorKind::ContextOverflow),
+            ),
+            End::ModelFailed(ProviderError::new("who knows")),
             End::Stopped,
             End::Yielded,
         ] {
             assert_eq!(End::read(&end.payload().to_string()), Some(end));
         }
+        // A model's failure is a failed run to whoever reads the status alone, and a kind
+        // a later harness wrote is read as no particular one.
+        let overflow =
+            End::ModelFailed(ProviderError::new("too much").of(ProviderErrorKind::ContextOverflow));
+        assert_eq!(
+            overflow.payload(),
+            json!({"status": "failed", "reason": "too much", "kind": "context-overflow"})
+        );
+        let later = json!({"status": "failed", "reason": "new", "kind": "not-yet-known"});
+        assert_eq!(
+            End::read(&later.to_string()),
+            Some(End::ModelFailed(ProviderError::new("new")))
+        );
         // A `turn/end` written before runs said how they ended.
         assert_eq!(End::read(""), None);
     }
@@ -1849,6 +2291,7 @@ mod tests {
             ],
             summary: Some(("they talked".into(), 2)),
             stopped: None,
+            written: 0,
         };
 
         let view = session.for_model();

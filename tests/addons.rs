@@ -9,7 +9,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use corduroy_harness::Harness;
-use corduroy_harness::core::{HttpClient, HttpRequest, HttpResponse, Message, Pattern, Scope};
+use corduroy_harness::core::{
+    HttpClient, HttpRequest, HttpResponse, Keep, Message, Pattern, Scope,
+};
 use corduroy_harness::scripted::{ScriptedProvider, call, say};
 use corduroy_harness::wasm::{WasmPlugin, WasmRuntime};
 use corduroy_test_support::{plugin, scratch};
@@ -142,6 +144,34 @@ async fn grep_finds_lines_by_regular_expression_without_a_shell() {
     let specs = harness.tools().specs();
     let grep = specs.iter().find(|spec| spec.name == "grep").unwrap();
     assert!(grep.read_only && grep.replay_safe);
+    // And says how much one result should take, and that the first matches are kept.
+    let result = grep.result.unwrap();
+    assert_eq!((result.tokens, result.keep), (16_384, Keep::Head));
+}
+
+#[tokio::test]
+async fn a_search_outside_the_grant_is_refused_and_recorded_once() {
+    let work = scratch("addons-grep-outside");
+    project(&work).unwrap();
+    let Agent {
+        harness,
+        model: _model,
+    } = agent([
+        call("1", "grep", &json!({"pattern": "x", "path": "../outside"})),
+        say("refused"),
+    ])
+    .unwrap();
+    harness.plugin(load(&work, "search", &[("fs-read", within(&work))]).unwrap());
+
+    harness.run("look outside").await.unwrap();
+
+    let said = outputs(&harness);
+    assert!(said[0].contains("outside"), "{}", said[0]);
+    // Asked for as a directory and refused: it is not asked for again as a file.
+    let refused = harness
+        .events()
+        .matching(&Pattern::new("capability/denied"));
+    assert_eq!(refused.len(), 1, "{refused:?}");
 }
 
 #[tokio::test]
@@ -159,6 +189,7 @@ async fn find_lists_files_by_a_pattern_on_their_path() {
         call("5", "find", &json!({"pattern": "*.rs", "limit": 1})),
         call("6", "find", &json!({"pattern": "*.py"})),
         call("7", "find", &json!({"pattern": "*", "path": "../outside"})),
+        call("8", "find", &json!({"pattern": "src/[a-l]*.rs"})),
         say("found"),
     ])
     .unwrap();
@@ -179,6 +210,8 @@ async fn find_lists_files_by_a_pattern_on_their_path() {
     assert_eq!(said[5], "No file under `.` matches `*.py` (4 looked at).");
     // Outside the grant: refused, and said.
     assert!(said[6].contains("outside"), "{}", said[6]);
+    // Syntax it does not have is said, where matching it as written would find nothing.
+    assert!(said[7].contains("unsupported pattern"), "{}", said[7]);
 }
 
 /// What the fake web answers for `url`: a status, a content type or a place to go, a body.

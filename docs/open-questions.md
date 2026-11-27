@@ -154,16 +154,6 @@ than to one project. If it is ours alone, it is an internal boundary with good h
 home that is not one repository; an internal boundary needs neither, and should not carry
 the cost of pretending.
 
-### P13. Is independence from any one model part of the value?
-
-The agents most people use are made by model vendors and move with their models. An
-independent harness is neutral and always a little behind on what one model newly offers.
-The evals here already run against a 1.7-billion-parameter model on a laptop.
-
-*Direction.* Decide whether "works well with any model, small and local ones included" is a
-stated goal. It shapes the default prompts, the tool set, the loop and what counts as a
-regression.
-
 ### P14. How does it reach people?
 
 A new terminal agent asks someone to change a habit. The alternatives are to sit behind
@@ -469,21 +459,39 @@ shape has nowhere to record which shape a log holds.
 *Direction.* Decide before the log freezes, since the answer is a field on `state/set` or a
 convention inside the value.
 
-### B25. Whose job is a tool's input, and the size of its result?
+### B25. Whose job is a tool's input?
 
-Neither the core nor the loop checks a call's input against the tool's schema, or bounds
-what a result adds to the conversation. Each tool does, or does not.
+Neither the core nor the loop checks a call's input against the tool's schema. Each tool
+does, or does not. The size of a result is decided
+([Keeping within what the model holds](design.md#keeping-within-what-the-model-holds)): the
+tool says it, and the harness holds each call and each step to a share of the model's
+context.
 
-*Direction.* Say it is the tool's, or give the loop a bound: one runaway result can use up
-a session's context.
+*Direction.* Say it is the tool's, or have the loop refuse an input that does not fit the
+schema before the gates are asked.
 
 ### B26. How are tool names kept apart?
 
 There is one flat set of names. An MCP server's tools are `<server>__<tool>`; an add-on's
 are bare, and the second to register a name is refused.
 
-*Direction.* A naming rule before third-party add-ons exist, and a decision on what a clash
-does to the plugin that lost.
+How one tool replaces another is decided, and built
+([What an extension can reach](design.md#what-an-extension-can-reach)): where the agent
+file says so, and only by a tool with the same input schema and the same word on being
+repeated. Two things it showed are left. What a tool returns is not compared, because no
+tool declares the shape of its output: `lean-shell` and `pi-tools` agree on the form of
+`bash`'s result only because they share its code. And the loser of a clash that was not
+said to be a replacement does not start at all, its other tools with it, by the order of
+the agent file.
+
+*Direction.* A naming rule before third-party add-ons exist, and a decision on whether an
+add-on that lost one name should keep its others. Then whether a tool may declare its
+output's shape. The place for it is there already: a named value in the tail of
+`tool-spec` ([E2](#e2-can-what-a-guest-returns-grow)) and a builder method on the core's
+`ToolSpec`, so it can be added after 1.0. What is not settled is what it would mean: whether
+the harness holds a result to it, and what happens to one that does not fit; whether the
+model is told it; or whether it is only what a replacement is compared by. A tool like
+`bash` or `read` returns free text and would have nothing to declare.
 
 ### B27. Can code in a kernel call back into the agent?
 
@@ -551,13 +559,6 @@ person passed through to a shell is such a value as soon as the model prints it
 *Direction.* Decide whether the core offers a filter point, or whether a `Log` that wraps
 another is the answer (listeners would still see the value). Checkpoints of live output
 pass the same point, so one answer has to cover them.
-
-### C7. Is an event's payload JSON by contract or by convention?
-
-`Event::payload` is a `String`, "by convention JSON" (`core/event.rs:160`).
-
-*Direction.* Make it the contract for every topic the core and the loop define; say what an
-add-on's own topics may hold.
 
 ### C8. Who may emit which topics?
 
@@ -793,13 +794,14 @@ the engine checks types, so an add-on already built would stop loading
 
 ### E2. Can what a guest returns grow?
 
-`tool-spec` and `plugin-info` are fixed records, though the core's `ToolSpec` was made
-growable. `content` is text or an image. None of them gains a field or a case within 1.x
-([How the plugin world grows](design.md#how-the-plugin-world-grows)), so whatever is to
-grow has to be given its place before 1.0.
+`tool-spec` and `plugin-info` can: each ends in a list of named values
+([How the plugin world grows](design.md#how-the-plugin-world-grows)). `content` is still
+text or an image, and gains no case within 1.x, so whatever is to grow there has to be
+given its place before 1.0.
 
-*Direction.* An open tail on both records (a list of named values), and a general typed
-block (`mime-type`, `data`) beside `image`.
+*Direction.* A general typed block (`mime-type`, `data`) beside `image`. Say whether the
+core's `ToolSpec` keeps the named values it does not know, so that a gate or another
+plugin can read what a tool said that this host has no word for.
 
 ### E5. Can a header mix text and a secret?
 
@@ -1037,8 +1039,18 @@ A package's ask adds a case ([How people meet it](design.md#how-people-meet-it))
 one host, the person may want to allow that host or any, so an answer can be wider or
 narrower than what was asked.
 
+One thing waits on this. A small model refused a `write` by a person does the same thing
+with `bash`, and the second question shows a shell command with nothing to say that it
+follows a refusal ([what a small model does](local-model-findings.md)). That a question
+follows a refusal of the same target is to be said by the gate that asks, and not worked
+out by a front end, so that the terminal, the page and anything else show it alike. It is
+built together with the answers below, since a remembered refusal is the same mechanism as
+a remembered "always allow", pointing the other way.
+
 *Direction.* Decide with [D1](#d1-is-a-verdict-allow-ask-or-deny-for-good), and say whether
-an answer may change the scope that was asked for.
+an answer may change the scope that was asked for. Then the forms beyond allow and deny
+once ("always allow", "always deny", within a pattern), each kept by the gate's own memory,
+and with them the flag on a question that repeats what was refused.
 
 ### G7. Is `anyhow` part of the contract?
 
@@ -1053,28 +1065,30 @@ feature-gated.
 
 *Direction.* Decide what an extension that builds for both a desktop and a device may use.
 
-### G9. Does a provider stream?
+### G9. What of a streamed answer is still to settle?
 
-`Provider::complete` returns a whole reply (`src/provider.rs:171`). The `streaming` key of a
-provider entry only changes how the provider's own client reads the response; nothing
-reaches the terminal until the message is committed.
+A provider streams: it tells the pieces of its answer as the model writes them, the loop
+shows them to whoever watches a session and checkpoints them in the log, and a request that
+never answered leaves what it had written
+([What the record promises](design.md#what-the-record-promises)). That was tried against a
+streamed response on loopback and not yet against a provider over the network.
 
-Decided in [What the record promises](design.md#what-the-record-promises): a streaming
-method with a default on `Provider`, its pieces going to a live channel in the loop and, at
-a coarse grain, into checkpoints in the log.
-
-*Direction.* What is left is the shape, to be tried against a real provider: what a piece
-is (text, thinking, a tool call being written), how a display subscribes to the channel
-and for which session, and what a checkpoint's payload holds.
+*Direction.* Three things are left. Whether a tool call is told as it is written or only
+whole: the piece has room for either, and oi-kit gives it whole. Whether the checkpoint
+interval is a key of the agent file or stays the host's to set
+([H3](#h3-what-of-the-harness-can-the-agent-file-set)). And whether what a model thinks
+belongs in a checkpoint at all, or only its length: it is the larger part of what a small
+model writes, and a signed one is of no use to a reader.
 
 ### G10. Why did the model stop, and why did it fail?
 
 `ModelReply` says why the model stopped, when its provider does (`StopReason`: finished,
 cut off at its limit, asked for a tool, refused; the set can grow), and the reason is
 recorded. A session says how the model's last answer stopped (`Session::stopped`), and
-the terminal tells the person when it was cut off or declined. The loop acts on none of it:
-what to do (go on after a cut-off answer, ask the person after a refusal) is policy, for a
-step of the loop an extension adds. `ProviderError` is text, so a loop cannot tell a full
+the terminal tells the person when it was cut off or declined. A run whose answer was cut off
+ends as `cut-off`, not `finished`; beyond that the loop acts on none of it: what to do (go
+on after a cut-off answer, ask the person after a refusal) is policy, for a step of the
+loop an extension adds. `ProviderError` is text, so a loop cannot tell a full
 context from a rate limit or a bad key.
 
 *Direction.* What is left is whether those four are the reasons, and a kind on the error.
@@ -1100,14 +1114,6 @@ there is one an add-on can use too.
 carry images both ways; nothing puts one into a user's message.
 
 *Direction.* A way to run a `Message`, and a decision on how the command accepts a file.
-
-### G14. Can a long turn be compacted?
-
-Only what came before the current turn can be summarised (`src/session.rs:1109`). One long
-run from one prompt never compacts.
-
-*Direction.* Decide whether the cut may fall inside a turn, which constrains what a
-`compaction` event may hide.
 
 ### G15. Does the harness bound a tool call?
 
@@ -1143,30 +1149,40 @@ The loop sends the session's projection, which only a `compaction` event changes
 old tool results, trimming images, marking cache points and adding reminders are other ways
 to manage a context, and an extension can do none of them without writing to the log.
 
+What the model was shown can be read back: a request names its system prompt and its tool
+declarations by hash, and the log holds each once
+([What the record promises](design.md#what-the-record-promises)). That is the record of it,
+and says nothing on who may change it.
+
 *Direction.* Decide whether shaping the request is a contribution of its own (a step
 between the projection and the provider) or always means a custom `Loop`.
 
 ### G20. What limits a run besides the number of turns?
 
-`max_turns` and the restart limit. There is no budget of tokens, cost or time, for a run, a
-session or a child.
+Decided for the agent's own runs
+([What an extension can reach](design.md#what-an-extension-can-reach)): turns, the time a
+run is driven for and the tokens the model writes in it, the last two kept by the harness
+whichever loop runs, with cost to join them. They are settings of the harness today
+(`max_turns`, `max_seconds`, `max_output_tokens` in the agent file), the same for every
+session.
 
-Where a limit is written is decided: a session is started with a set of limits that can
-grow, turns being the first, counted as its loop counts them
-([What an extension can reach](design.md#what-an-extension-can-reach)).
-
-*Direction.* Decide which budgets join that set, and whether each is the loop's own to keep
-or policy asked at a decision point before each model request
-([D3](#d3-which-decision-points-exist-at-10)).
+*Direction.* What is left waits on sessions being started with limits of their own: how a
+child's budgets relate to its parent's (a share of what is left, or its own), whether what
+a child writes counts against the run that waits for it (today a child shares its parent's
+clock and has its own count of tokens), and the unit a budget of cost is written in
+([G17](#g17-where-is-usage-added-up)).
 
 ### G21. Who retries, and who falls back?
 
-Retries are inside the provider's adapter (`crates/corduroy-providers/src/adapter.rs:99`).
-A model that still fails ends the run as failed; there is no falling back to another model
-or provider.
+Retries are the provider's, made by one layer and each recorded with who made it
+(`model/retry`, `by`): see
+[What the record promises](design.md#what-the-record-promises). A model that still fails
+ends the run as failed; there is no falling back to another model or provider.
 
-*Direction.* Decide whether that is the provider's for good, or the loop's (which needs the
-error kinds of [G10](#g10-why-did-the-model-stop-and-why-did-it-fail)).
+*Direction.* Decide whether falling back is the provider's for good, or the loop's, which
+now has the error kinds to go by and would say `by` its own name. The client beneath the
+provider is heard, not told: ask oi-kit for a way to switch its retries off, so that
+hearing a log line is not what one layer of retries rests on.
 
 ### G22. Is the event stream the only way to observe a run?
 

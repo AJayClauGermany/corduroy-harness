@@ -296,7 +296,8 @@ class Trial:
             for event in value:
                 if not isinstance(event, dict):
                     continue
-                # A payload is JSON kept as text.
+                # A payload is the JSON itself (log schema 3). It is text where the store
+                # could not hold it so, and in every line an older build wrote.
                 payload = event.get("payload")
                 if isinstance(payload, str):
                     try:
@@ -428,9 +429,13 @@ class Trial:
 
 
 def tool_results(events: list[dict]) -> list[dict]:
-    """Every tool call's result. A call that waited (`delegate`) has no `tool/result`: its
-    result is the `signal` its `tool/wait` named, which says neither which call it answers
-    nor whether it worked, so it is paired by name and counted as working."""
+    """Every tool call's result. A call that waited (`delegate`) gets its `tool/result` with
+    the `signal` its `tool/wait` named. A log from before that has the signal alone, which
+    says neither which call it answers nor whether it worked: there it is paired by name
+    and counted as working."""
+    answered = {
+        event["payload"].get("id") for event in events if event.get("topic") == "tool/result"
+    }
     results = []
     waiting: dict[str, dict] = {}
     for event in events:
@@ -441,9 +446,10 @@ def tool_results(events: list[dict]) -> list[dict]:
             waiting[payload.get("signal")] = payload
         elif event.get("topic") == "signal" and payload.get("name") in waiting:
             call = waiting.pop(payload["name"])
-            results.append(
-                {"id": call.get("id"), "tool": call.get("tool"), "ok": True, "output": payload.get("payload")}
-            )
+            if call.get("id") not in answered:
+                results.append(
+                    {"id": call.get("id"), "tool": call.get("tool"), "ok": True, "output": payload.get("payload")}
+                )
     return results
 
 

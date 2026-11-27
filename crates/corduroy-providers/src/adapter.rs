@@ -1,8 +1,12 @@
 //! oi-kit's providers as the harness's: converting messages, tools and usage at the
 //! boundary, so that nothing past it depends on oi-kit's shapes.
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::future::poll_fn;
+use std::pin::Pin;
+use std::sync::{Arc, OnceLock};
+use std::task::{Context, Poll};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::Engine as _;
@@ -11,23 +15,28 @@ use corduroy_harness::core::{
     AUDIO, Content, IMAGE, Message, PDF, Part, Role, TEXT, ToolCall, ToolSpec, VIDEO,
 };
 use corduroy_harness::{
-    ModelInfo, ModelReply, ModelRequest, Provider, ProviderError, StopReason, Usage,
+    Asking, CallPiece, ModelInfo, ModelReply, ModelRequest, Piece, Provider, ProviderError,
+    ProviderErrorKind, Reports, Retry, StopReason, Usage,
 };
-use oi_kit_provider_types::base::Provider as OiKitProvider;
+use futures_core::Stream;
+use oi_kit_provider_types::base::{MessageStream, Provider as OiKitProvider, collect_stream};
 use oi_kit_provider_types::canonical::Modality;
 use oi_kit_provider_types::canonical::maybe_get_canonical_model;
 use oi_kit_provider_types::conversation::message::{
     Message as OiKitMessage, MessageContent, ToolRequest,
 };
+use oi_kit_provider_types::conversation::token_usage::ProviderUsage;
+use oi_kit_provider_types::errors::ProviderError as OiKitError;
 use oi_kit_provider_types::formats::openai::is_openai_responses_model;
 use oi_kit_provider_types::model::ModelConfig;
-use oi_kit_provider_types::retry::retry_operation;
+use oi_kit_provider_types::retry::should_retry;
 use oi_kit_provider_types::thinking::ThinkingEffort;
 use oi_kit_providers::openai::OPEN_AI_DEFAULT_BASE_PATH;
 use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock, JsonObject, Tool};
 use serde_json::Value;
 
 use crate::Thinking;
+use crate::heard::{ClientRetry, Heard};
 
 /// What every request to a provider asks for, from its [`ProviderSpec`](crate::ProviderSpec).
 #[derive(Debug, Clone, PartialEq)]
@@ -42,9 +51,38 @@ pub(crate) struct Settings {
     pub(crate) max_tokens: Option<u32>,
     pub(crate) temperature: Option<f32>,
     pub(crate) thinking: Option<Thinking>,
+    /// How long one attempt at a request may take in all, streamed or not.
+    pub(crate) timeout: Duration,
+    /// What the host states about models of this provider, by the provider's name for each.
+    pub(crate) stated: BTreeMap<String, ModelInfo>,
 }
 
+/// The most an answer may take from a model nobody has described.
+const UNKNOWN_MAX_TOKENS: u64 = 4096;
+
+/// The least a default taken from a model's stated context allows an answer.
+const LEAST_MAX_TOKENS: u64 = 1024;
+
 impl Settings {
+    /// The most `model` may write in one answer where the provider's entry sets no
+    /// `max_tokens`: what the host states it may write, else what oi-kit's catalog says,
+    /// else a quarter of the context the host states (and at least
+    /// [`LEAST_MAX_TOKENS`]), else [`UNKNOWN_MAX_TOKENS`]. There is always one, so a model
+    /// served on this machine is not left to write until its context is full.
+    fn default_max_tokens(&self, model: &str) -> i32 {
+        let stated = self.stated.get(model);
+        let tokens = |tokens: u64| i32::try_from(tokens).unwrap_or(i32::MAX);
+        stated
+            .and_then(|stated| stated.output_tokens)
+            .map(tokens)
+            .or_else(|| catalog_max_tokens(&self.provider, model))
+            .or_else(|| {
+                let context = stated.and_then(|stated| stated.context_tokens)?;
+                Some(tokens((context / 4).max(LEAST_MAX_TOKENS)))
+            })
+            .unwrap_or_else(|| tokens(UNKNOWN_MAX_TOKENS))
+    }
+
     /// The configuration oi-kit is asked to answer `model` with.
     fn model_config(&self, model: &str) -> ModelConfig {
         let mut config = ModelConfig::new(model)
@@ -52,7 +90,7 @@ impl Settings {
                 self.max_tokens
                     .and_then(|tokens| i32::try_from(tokens).ok()),
             )
-            .with_default_max_tokens(catalog_max_tokens(&self.provider, model))
+            .with_default_max_tokens(Some(self.default_max_tokens(model)))
             .with_temperature(self.temperature);
         if let Some(thinking) = self.thinking {
             let effort = match thinking {
@@ -74,6 +112,36 @@ impl Settings {
 }
 
 impl Settings {
+    /// What a request for `model` is sent with, for whoever records the request: the limit
+    /// on its answer as the request carries it (none, for a request to the Responses API
+    /// whose entry sets none), the temperature and thinking the entry sets, and the time
+    /// one attempt has.
+    fn said(&self, model: &str) -> Asking {
+        let limit = if self.responses(model) {
+            self.max_tokens.map(u64::from)
+        } else {
+            let default = u64::try_from(self.default_max_tokens(model)).ok();
+            self.max_tokens.map(u64::from).or(default)
+        };
+        let mut said = Asking::new().timeout(self.timeout);
+        if let Some(limit) = limit {
+            said = said.max_tokens(limit);
+        }
+        if let Some(temperature) = self.temperature {
+            said = said.temperature(temperature);
+        }
+        if let Some(thinking) = self.thinking {
+            said = said.thinking(match thinking {
+                Thinking::Off => "off",
+                Thinking::Low => "low",
+                Thinking::Medium => "medium",
+                Thinking::High => "high",
+                Thinking::Max => "max",
+            });
+        }
+        said
+    }
+
     /// Whether a request for `model` goes to the Responses API, by oi-kit's own rule: a path
     /// that names an API decides, and the standard chat-completions path leaves it to the
     /// model's name.
@@ -129,22 +197,174 @@ fn catalog_max_tokens(provider: &str, model: &str) -> Option<i32> {
         .and_then(|output| i32::try_from(output).ok())
 }
 
+/// Makes the oi-kit provider, or says why it cannot be made.
+pub(crate) type Make = Box<dyn Fn() -> Result<Arc<dyn OiKitProvider>, String> + Send + Sync>;
+
+/// The oi-kit provider behind an [`Adapted`]: made already, or made when first asked.
+pub(crate) enum Source {
+    /// Made when the provider was built.
+    Built(Arc<dyn OiKitProvider>),
+    /// Not made yet: its HTTP client could not be set up when the provider was built, which
+    /// is tried again at each request until it can.
+    Later {
+        /// Makes it.
+        make: Make,
+        /// The provider, once made.
+        made: OnceLock<Arc<dyn OiKitProvider>>,
+    },
+}
+
+impl Source {
+    /// A provider to be made by `make` when first asked.
+    pub(crate) fn later(make: Make) -> Self {
+        Self::Later {
+            make,
+            made: OnceLock::new(),
+        }
+    }
+
+    /// The provider, made now if it was not.
+    fn get(&self) -> Result<&Arc<dyn OiKitProvider>, ProviderError> {
+        match self {
+            Self::Built(provider) => Ok(provider),
+            Self::Later { make, made } => {
+                if let Some(provider) = made.get() {
+                    return Ok(provider);
+                }
+                let provider = make().map_err(ProviderError::new)?;
+                Ok(made.get_or_init(|| provider))
+            }
+        }
+    }
+}
+
 /// An oi-kit provider, speaking the harness's messages.
 pub(crate) struct Adapted {
-    provider: Arc<dyn OiKitProvider>,
+    provider: Source,
     settings: Settings,
 }
 
 impl Adapted {
     /// `provider`, asked with `settings`.
-    pub(crate) fn new(provider: Arc<dyn OiKitProvider>, settings: Settings) -> Self {
+    pub(crate) const fn new(provider: Source, settings: Settings) -> Self {
         Self { provider, settings }
+    }
+}
+
+/// Who retried, where oi-kit's own HTTP client made a request again inside one attempt of
+/// the provider's: see [`Retry::by`].
+pub const BY_CLIENT: &str = "client";
+
+/// Where an attempt at a request failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// While the request was sent: the part oi-kit's client tries again by itself.
+    Sending,
+    /// While the answer was read.
+    Reading,
+}
+
+/// A request as oi-kit takes it.
+struct Asked<'request> {
+    config: &'request ModelConfig,
+    system: &'request str,
+    messages: &'request [OiKitMessage],
+    tools: &'request [Tool],
+}
+
+impl Adapted {
+    /// The answer oi-kit gives to a request, tried again as its policy says.
+    async fn answer(
+        &self,
+        asked: &Asked<'_>,
+        reports: &dyn Reports,
+    ) -> Result<(OiKitMessage, ProviderUsage), ProviderError> {
+        let provider = self.provider.get()?;
+        let bound = self.settings.timeout;
+        // The answer is read as oi-kit's stream of it, each piece told as it comes, whether
+        // or not the provider's API streams: one that does not gives the whole as one piece.
+        // Each attempt has the whole of the bound, whether its answer is streamed or not:
+        // oi-kit bounds only the gap between two pieces of a stream, which a model that
+        // never stops writing never exceeds. An attempt that runs out is dropped, which
+        // closes its connection, and is not tried again.
+        //
+        // A request is made again by one layer. oi-kit's client tries a refused request
+        // again by itself, inside the call that sends it; each such retry is heard and told
+        // (`BY_CLIENT`), and a failure it gave up on is not tried again here. What the
+        // client does not retry (an answer that breaks off while it is read, or a provider
+        // whose client retries nothing) is tried again here, by the same policy (oi-kit's
+        // `should_retry` and its delays), and told as the provider's own. The retries of
+        // both count against the policy's one limit. A retry is told before the next
+        // attempt writes anything, so whoever heard pieces of the failed one knows they are
+        // void.
+        let policy = provider.retry_config();
+        let mut retries: usize = 0;
+        loop {
+            let before = retries;
+            let attempt = async {
+                let stream = provider
+                    .stream(asked.config, asked.system, asked.messages, asked.tools)
+                    .await
+                    .map_err(|error| (Phase::Sending, error))?;
+                read(stream, reports)
+                    .await
+                    .map_err(|error| (Phase::Reading, error))
+            };
+            let mut heard: usize = 0;
+            let listened = Heard::new(attempt, |retry: ClientRetry| {
+                heard += 1;
+                let delay = retry
+                    .asked
+                    .unwrap_or_else(|| policy.delay_for_attempt(retry.attempt));
+                let attempt = u32::try_from(before + heard).unwrap_or(u32::MAX);
+                reports.retry(&Retry::new(attempt, retry.error, delay).by(BY_CLIENT));
+            });
+            let (phase, error, by_client) = match tokio::time::timeout(bound, listened).await {
+                Ok((Ok(answer), _)) => return Ok(answer),
+                Ok((Err((phase, error)), by_client)) => (phase, error, by_client),
+                Err(_elapsed) => {
+                    return Err(ProviderError::new(format!(
+                        "the model had not finished answering after {} seconds (the \
+                         provider's timeout_seconds)",
+                        bound.as_secs()
+                    ))
+                    .of(ProviderErrorKind::Timeout));
+                }
+            };
+            retries += by_client;
+            let said = ProviderError::new(error.to_string()).of(kind_of_error(&error));
+            // The client made this request again and still failed: it is not made again.
+            let given_up = phase == Phase::Sending && by_client > 0;
+            if given_up || !should_retry(&error, &policy) || retries >= policy.max_retries() {
+                return Err(said);
+            }
+            retries += 1;
+            // The provider's own word on how long to wait comes first.
+            let delay = match &error {
+                OiKitError::RateLimitExceeded {
+                    retry_delay: Some(delay),
+                    ..
+                } => *delay,
+                _ => policy.delay_for_attempt(retries),
+            };
+            let attempt = u32::try_from(retries).unwrap_or(u32::MAX);
+            reports.retry(&Retry::new(attempt, said, delay));
+            tokio::time::sleep(delay).await;
+        }
     }
 }
 
 #[async_trait]
 impl Provider for Adapted {
     async fn complete(&self, request: &ModelRequest) -> Result<ModelReply, ProviderError> {
+        self.complete_reporting(request, &()).await
+    }
+
+    async fn complete_reporting(
+        &self,
+        request: &ModelRequest,
+        reports: &dyn Reports,
+    ) -> Result<ModelReply, ProviderError> {
         let (config, system) = self.settings.asking(&request.model, &request.system);
         let messages: Vec<OiKitMessage> = request.messages.iter().map(to_oi_kit).collect();
         let tools = request
@@ -152,14 +372,17 @@ impl Provider for Adapted {
             .iter()
             .map(tool_of)
             .collect::<Result<Vec<Tool>, ProviderError>>()?;
-        let provider = &self.provider;
-        // Rate limits, server errors and dropped connections are tried again, as the
-        // provider's own policy says.
-        let (message, usage) = retry_operation(&provider.retry_config(), || {
-            provider.complete(&config, system, &messages, &tools)
-        })
-        .await
-        .map_err(|error| ProviderError::new(error.to_string()))?;
+        let (message, usage) = self
+            .answer(
+                &Asked {
+                    config: &config,
+                    system,
+                    messages: &messages,
+                    tools: &tools,
+                },
+                reports,
+            )
+            .await?;
         if let Some(error) = message.error() {
             return Err(ProviderError::new(error.message.clone()));
         }
@@ -172,6 +395,78 @@ impl Provider for Adapted {
 
     fn describe(&self, model: &str) -> ModelInfo {
         describe(&self.settings.provider, model)
+    }
+
+    fn asking(&self, model: &str) -> Asking {
+        self.settings.said(model)
+    }
+}
+
+/// One piece of an answer as oi-kit streams it: more of the message, what it has cost so
+/// far, or both.
+type Chunk = Result<(Option<OiKitMessage>, Option<ProviderUsage>), OiKitError>;
+
+/// Pieces of an answer already read, handed to oi-kit again to be put together as it
+/// puts any stream together.
+struct Replay(VecDeque<Chunk>);
+
+impl Stream for Replay {
+    type Item = Chunk;
+
+    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Chunk>> {
+        Poll::Ready(self.0.pop_front())
+    }
+}
+
+/// The answer oi-kit streams, each piece told to `reports` as it comes, and the whole put
+/// together by oi-kit's own rule.
+async fn read(
+    mut stream: MessageStream,
+    reports: &dyn Reports,
+) -> Result<(OiKitMessage, ProviderUsage), OiKitError> {
+    let mut read = VecDeque::new();
+    while let Some(chunk) = poll_fn(|cx| stream.as_mut().poll_next(cx)).await {
+        let (message, usage) = chunk?;
+        for piece in message.iter().flat_map(pieces_in) {
+            reports.piece(&piece);
+        }
+        if let Some(usage) = &usage {
+            reports.piece(&Piece::Usage(usage_of(&usage.usage)));
+        }
+        read.push_back(Ok((message, usage)));
+    }
+    collect_stream(Box::pin(Replay(read))).await
+}
+
+/// What a piece of oi-kit's stream says the model wrote: text and thinking as they come,
+/// and a tool call once oi-kit has the whole of it.
+fn pieces_in(message: &OiKitMessage) -> Vec<Piece> {
+    message
+        .content
+        .iter()
+        .filter_map(|content| match content {
+            MessageContent::Text(text) => Some(Piece::Text(text.text.clone())),
+            MessageContent::Thinking(thinking) => Some(Piece::Thinking(thinking.thinking.clone())),
+            MessageContent::ToolRequest(request) => {
+                let call = call_of(request);
+                Some(Piece::Call(CallPiece::new(call.id, call.name, call.input)))
+            }
+            _ => None,
+        })
+        .filter(
+            |piece| !matches!(piece, Piece::Text(text) | Piece::Thinking(text) if text.is_empty()),
+        )
+        .collect()
+}
+
+/// Which sort of failure oi-kit says `error` was.
+const fn kind_of_error(error: &OiKitError) -> ProviderErrorKind {
+    match error {
+        OiKitError::ContextLengthExceeded(_) => ProviderErrorKind::ContextOverflow,
+        OiKitError::RateLimitExceeded { .. } => ProviderErrorKind::RateLimit,
+        OiKitError::Authentication(_) | OiKitError::NotConfigured => ProviderErrorKind::Auth,
+        OiKitError::NetworkError(_) => ProviderErrorKind::Unreachable,
+        _ => ProviderErrorKind::Other,
     }
 }
 
@@ -404,6 +699,8 @@ mod tests {
             max_tokens: None,
             temperature: None,
             thinking: None,
+            timeout: Duration::from_secs(600),
+            stated: BTreeMap::new(),
         }
     }
 
@@ -412,10 +709,62 @@ mod tests {
         let known = settings("anthropic").model_config("claude-sonnet-4-5");
         let limit = catalog_max_tokens("anthropic", "claude-sonnet-4-5").unwrap();
         assert!(limit > 4096, "{limit}");
-        assert_eq!(known.max_output_tokens(), limit);
+        assert_eq!(known.max_tokens, Some(limit));
+    }
 
-        let unknown = settings("openai_compatible").model_config("local");
-        assert_eq!(unknown.max_output_tokens(), 4096);
+    #[test]
+    fn an_unknown_model_is_given_a_limit_all_the_same() {
+        let stating = |info: ModelInfo| Settings {
+            stated: BTreeMap::from([("local".to_owned(), info)]),
+            ..settings("openai_compatible")
+        };
+        let limit = |settings: &Settings, model: &str| settings.model_config(model).max_tokens;
+        assert_eq!(limit(&settings("openai_compatible"), "local"), Some(4096));
+
+        // A quarter of the context the agent file states, and never a sliver.
+        let mut info = ModelInfo::unknown();
+        info.context_tokens = Some(32_768);
+        assert_eq!(limit(&stating(info.clone()), "local"), Some(8192));
+        assert_eq!(limit(&stating(info.clone()), "another"), Some(4096));
+        info.context_tokens = Some(2048);
+        assert_eq!(limit(&stating(info.clone()), "local"), Some(1024));
+
+        // What the file says the model may write is the limit, the catalog's or not.
+        info.output_tokens = Some(3000);
+        assert_eq!(limit(&stating(info.clone()), "local"), Some(3000));
+        let known = Settings {
+            stated: BTreeMap::from([("claude-sonnet-4-5".to_owned(), info)]),
+            ..settings("anthropic")
+        };
+        assert_eq!(limit(&known, "claude-sonnet-4-5"), Some(3000));
+    }
+
+    #[test]
+    fn oi_kit_s_errors_are_told_apart() {
+        let kind = |error: OiKitError| kind_of_error(&error);
+        assert_eq!(
+            kind(OiKitError::ContextLengthExceeded(String::new())),
+            ProviderErrorKind::ContextOverflow
+        );
+        assert_eq!(
+            kind(OiKitError::RateLimitExceeded {
+                details: String::new(),
+                retry_delay: None
+            }),
+            ProviderErrorKind::RateLimit
+        );
+        assert_eq!(
+            kind(OiKitError::Authentication(String::new())),
+            ProviderErrorKind::Auth
+        );
+        assert_eq!(
+            kind(OiKitError::NetworkError(String::new())),
+            ProviderErrorKind::Unreachable
+        );
+        assert_eq!(
+            kind(OiKitError::ServerError(String::new())),
+            ProviderErrorKind::Other
+        );
     }
 
     fn openai(path: &str) -> Settings {

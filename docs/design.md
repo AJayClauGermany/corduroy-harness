@@ -47,6 +47,20 @@ The same tokens then go further, and a smaller model can do more, because less i
 it each time. So "the agent extends itself" is a claim of 1.0, and the first thing to be
 demonstrated.
 
+**Any model, small and local ones included.** A working goal, not yet a promise: the
+harness is meant to work well with whatever model it is given, and to make up for what a
+small one lacks instead of leaving it to work things out itself. A larger model can do more
+and recover from more; a small one should not be left behind for want of something the
+harness could have done (a bound on what a tool returns, a limit on an answer, a refusal
+that says what would have worked). It is the other side of growth: the more of the work is
+structure the harness keeps, the less of it has to be thought through each time, and the
+smaller the model that can do it. What it means in practice is that a change is weighed
+against a small model on this machine as well as a large one elsewhere, and
+[`scripts/model-bench`](../scripts/model-bench/README.md) is the regression suite for
+that: tasks done several times against a local model, judged by outcome
+([what the first pass found](local-model-findings.md)). One model has been through it so
+far, so what is that model's and what is any small model's is not yet told apart.
+
 **Which property leads.** Three properties serve that, and the value is in having them
 together:
 
@@ -381,10 +395,10 @@ Everything else is a plugin, and a plugin may itself offer primitives to other p
 | Services | built | A fifth registry, `Services`: calls between plugins in JSON text, with the caller's name, across the WebAssembly boundary in both directions. See [Plugins extending plugins](#plugins-extending-plugins). |
 | Capabilities | sixteen | The mechanism is settled; the set grows (below). |
 | Kernels | built | The trait and registry, and `Kernel::spawn` for long-lived processes with pipes (MCP servers). `ShellKernel` is an implementation, not a primitive, and lives in `corduroy-shell`. |
-| Conversation projection | built | Messages, and the `compaction` event: the messages before `keep_from` stay in the log and the conversation but are hidden from the model, which sees the summary in their place. The harness cuts only before the current turn; when, and the summary, come from the plugin providing the `compaction` service, asked by a loop step (`CompactOperation`). |
+| Conversation projection | built | Messages, and the `compaction` event: the messages before `keep_from` stay in the log and the conversation but are hidden from the model, which sees the summary in their place. The harness cuts where a step begins, inside the current turn too ([Keeping within what the model holds](#keeping-within-what-the-model-holds)); when, and the summary, come from the plugin providing the `compaction` service, asked by a loop step (`CompactOperation`). |
 | Model access | built | The loop asks the provider registered under a name in `Providers`, on every request, so a plugin supplies the model and unloading it takes the model away. `Harness::new` registers its argument there for convenience. For plugins, the core's `Models` registry: one completion, synchronously, of a model named `<provider>/<model>`; a `provider` plugin serves its provider's models there. The loop and plugins fill in one request and read one reply, the core's (`ModelRequest`, `ModelReply`, with `Usage` and `StopReason`), and a model describes itself (`ModelInfo`). *Planned:* the general typed part, a cost on the usage, and listing models through `llm` ([What the core is made of](#what-the-core-is-made-of)). |
 | Secrets and outbound requests | built | `Secrets` and `HttpClients` registries. The core checks and records; native plugins hold the values and send the requests, so an HTTP client is a plugin like a kernel is. |
-| Versioning | WIT package version, log schema version | Built: a schema version in each log's header (2, which added the time; 1 is still read), and the rule for the world in [What is stable](#what-is-stable). and the check of the world's version when an add-on is loaded ([How the plugin world grows](#how-the-plugin-world-grows)). Still to do: a version on each plugin's stored state. |
+| Versioning | WIT package version, log schema version | Built: a schema version in each log's header (3, which holds a payload as JSON; 2 added the time; 1 and 2 are still read), and the rule for the world in [What is stable](#what-is-stable). and the check of the world's version when an add-on is loaded ([How the plugin world grows](#how-the-plugin-world-grows)). Still to do: a version on each plugin's stored state. |
 
 **Child sessions, a service rather than a capability (built).** The plan was a `session`
 capability to start a child session and await it. It became a service the harness
@@ -779,6 +793,54 @@ once without tools, plan before acting, review before answering.
 An `Operation` is still how one step is added to the standard loop; a `Loop` is how the order
 itself is replaced.
 
+### Keeping within what the model holds
+
+A model holds so many tokens at once, and a run that is sent more fails. Three things keep
+a conversation inside that, each with one owner. All three start from what the model's
+description says it holds (`ModelInfo::context_tokens`, which a provider reports or the
+agent file states); where nothing says, only a tool's own budget applies. Sizes are in
+tokens counted as three bytes of text, since only the model's own tokenizer knows the real
+count: the same 50 KB was 13 700 tokens of prose and 33 000 of a server's log.
+
+**A tool owns the size and the cut of its results.** A tool says, in its `ToolSpec`, the
+most one result should take (`ResultBudget`) and which part of a longer one is kept
+(`Keep`): the start for a file or a list, the end for a command's output, where the error
+is, or both ends with the middle left out. It is a property of the tool, so another tool
+under the same name (a shell that condenses its output first, say) brings its own. An
+add-on says it through the named values of its `tool-spec` (`result-tokens`,
+`result-keep`), the open tail that record was given for what a tool says of itself later
+([How the plugin world grows](#how-the-plugin-world-grows)).
+
+**The harness tells each call its bound, and holds it to it.** A call may take its tool's
+budget, and at most an eighth of the model's context. Whoever serves the call can ask what
+that comes to (`call::budget`; `result-budget` of the `session` capability, which answers
+questions about the call being served) and choose what to leave out. A result still longer
+is cut by the harness, by the tool's own `Keep`, and says in its text how much was shown.
+That happens in `Run::call_tools`, so it holds for every tool, native, from an add-on or
+from an MCP server, and for whichever loop runs the calls.
+
+**The results of one step are held together to a quarter of the context.** Eight reads
+asked for in one message are one step. The room is shared so that small results are kept
+whole and the long ones give way equally.
+
+What is cut is what the model is shown: the `message` that carries the results. Each
+`tool/result` holds what its tool returned, whole, so nothing is lost to a person or a
+review, and the conversation is still rebuilt from `message` events alone. A result handed
+over from the log after a crash is cut the same way. Images are not counted, and the
+payload of a signal (a child session's answer) is not bounded.
+
+**Compaction may cut inside a turn.** The cut falls where a step begins, so a tool call is
+never parted from its result. While a turn is under way and the calls of its last step are
+answered, the model keeps that step, and everything before it gives way to the summary,
+the start of the turn included; the person's request is then added to the summary in their
+own words, since the model no longer sees their message. One long run from one prompt is
+summarised as it goes. A `compaction` event may therefore name any message a step begins
+with as `keep_from`; one that named the start of a turn, as every earlier log's does,
+reads as before. The service is told what the next request is expected to take (the last
+request's count and answer, and an estimate of what was added since), and that a session
+`overflowed`: its last run ended because the request was more than the model holds. Such a
+session is due whatever the counts say, which is what lets it be used again.
+
 ## What an extension can reach
 
 Five things are decided here: what a session is started with and held to, what something
@@ -808,6 +870,19 @@ which files, which hosts, which models, which tools. It is the
 - *The tools offered are the session's `tools` grant.* The model is offered, and may call,
   only the tools that scope reaches. The registry stays one flat set, and a tool is in a
   session by its name.
+- *A tool is replaced only where that is said, and only by one that can be taken for it.*
+  A name belongs to one plugin, and the second to register it is refused. One plugin's
+  tool stands in for another's when whoever loads it says so (`replaces` on an add-on's
+  entry in the agent file; `Tools::stand_in` for an extension): from then on a call of
+  that name is a call of the replacement, which is what an alias is. The core lets it
+  only if the two declare the same input schema (as JSON text, spacing aside) and the same
+  word on whether a call may be made again after a crash, and says which differs when it
+  refuses. What a tool says of itself to the model, whether it only reads and how much of
+  a result it keeps are its own. The tool that was replaced stays registered beneath, and
+  is the one called again when the replacement is unloaded: the replacement is an effect
+  like any registration. What a tool returns is not checked, since no tool declares it
+  ([Open questions](open-questions.md), B26). Built, and tried with `lean-shell` in
+  `pi-tools`' place (`tests/replacement.rs`).
 - *The record is among what a session sees.* `log-read` is narrowed like the rest, so one
   agent of a pair does not read the other's session.
 - *A tool from an extension or an MCP server is offered or not.* It is code the grants do
@@ -865,11 +940,24 @@ log says what each session ran as:
 | Loop | A name in `Loops`. |
 | Instructions | The text its system prompt starts with. Plugins' prompt parts follow it, rendered for the session and so under its grants. |
 | Grants | As above. |
-| Limits | A set that can grow. Turns are its first entry, counted as the session's loop counts them. A budget of time, tokens or cost has a place to go (G20). |
+| Limits | A set that can grow. Turns are its first entry, counted as the session's loop counts them. Time and what the model writes are the next two, and cost has a place to go once usage carries one (see below). |
 
 Gates are not on the list. They hold for every session, since taking a guard away widens
 what an agent may do. A gate is told the session, and may treat sessions differently.
 
+- *What bounds a run.* Three budgets: turns, the time the run is driven for, and the
+  tokens the model writes in it. Turns are the loop's to count, since only it knows what a
+  turn is. Time and output are the harness's, kept whichever loop takes the steps (they
+  are looked at wherever a loop asks the model, and a request still being answered when
+  the time is up is dropped), because a limit that holds only while a certain plugin is
+  loaded is not a limit. Each ends the run with an ending of its own (`turn-limit`,
+  `time-limit`, `output-limit`), none of them a failure: what the run did is done, and the
+  next message goes on. Time is a budget of the clock and the other two of fuel; cost is
+  fuel too, and joins them when usage states one. A gate may also end a run, for a reason
+  no budget expresses (a run about to read what it must not), but that is a guard someone
+  adds, never the default. Time is counted while a host drives the run, so waiting for a
+  person costs nothing and a run picked up again has all of it; what the model wrote is
+  read from the log, so it carries over.
 - *The values are recorded, not a name for them.* A session picked up after its agent file
   changed runs as it started. A `session/start` that says none of this, as every log written
   so far does, runs as the agent is configured.
@@ -1199,6 +1287,10 @@ it now allows.
   function beside the old one. The same holds for the types add-ons share with the host: a
   record gains no field and a variant no case within 1.x, so what must grow is marked
   before 1.0 or is JSON text (E1, E2 and E13 in [Open questions](open-questions.md)).
+  `tool-spec` and `plugin-info` are marked: each ends in a list of named values, which a
+  host reads the names it knows from and passes over the rest, so a later world says more
+  about a tool without a new record. The first names are a tool's `result-tokens` and
+  `result-keep`.
 - *The cases already known go in before 1.0.* Progress from a running tool and a tool call
   that waits for a signal are interfaces of the 1.0 world, so that the set is as complete
   as it can be made when it is fixed. Their shapes are still open (E14, E6). Reading bytes
@@ -1353,6 +1445,48 @@ included. What follows is decided; which parts are built is said for each.
 answer here is read against. What should be kept *out* (a private value in a prompt or a
 tool call) is not decided, and stays in [Open questions](open-questions.md) (C6).
 
+**A payload is JSON.** An event's payload is text in the core, which has no parser, and
+by contract JSON for every topic the core and the loop define: an object that gains fields
+and loses none. An add-on's own topics may hold any text; JSON is the convention there and
+nothing checks it. A store keeps the text as it likes. The JSON Lines file holds a payload
+as the JSON it is (schema version 3), so that a reader of the file decodes a line once, and
+as a string wherever nesting it would not give the same text back: what is read from a log
+is byte for byte what was committed (built).
+
+**Every tool call has a result, and every retry is said.** A call that waited gets its
+`tool/result` with the signal that brings it, so a reader has one rule for calls. A model
+request made again after a failed attempt is recorded as `model/retry`, with why, how long
+was waited and who retried: a provider tells the harness, which records it, and never
+writes to the stream itself (`Provider::complete_reporting`; built).
+
+**A request is made again by one layer.** oi-kit's client makes a refused request again by
+itself, inside the call that sends it, and has no setting that stops it and no way to be
+told of it but a line it logs. The provider listens for that line while it waits for an
+attempt and tells each such retry as the `client`'s, so it is recorded like any other; and
+what the client gave up on is not tried again above it. The provider's own retries are for
+what the client does not retry (an answer that breaks off while it is read, a provider
+whose client retries nothing), and both count against the one limit of the provider's
+policy. An endpoint that keeps refusing is asked four times, not sixteen (built; a test
+counts them). Should the client stop writing that line, nothing is heard and the provider
+retries as if the client made none: the retries are then two layers deep again, and the
+test says so. The right end of this is a client that can be told not to retry, which is
+oi-kit's to offer.
+
+**What a request asked for and what the model was shown.** `model/request` says what the
+provider adds on the way, where the provider says (`Provider::asking`: the limit on the
+answer as the request carries it, the temperature, the thinking, the time one attempt
+has), and what the request is reckoned to take, which is the only size a request that
+fails ever has. It names the system prompt and the tool declarations it carried by hash,
+and each distinct one is recorded once for a log, as `model/shown`, the first time a
+request carries it: in the same log, so there is no second file to keep in step, and of no
+session, so removing a session leaves what other sessions' requests still name. The hash
+is 64-bit FNV-1a, which the loop can compute without the standard library or a dependency;
+it tells one prompt from another and protects nothing. A system prompt holds whatever the
+prompt parts hold, and recording it records nothing the provider was not sent, in a log
+that already holds every message (built). A `tool/result` says how large the result is,
+and where its call had a bound, what the model is shown of it at most and whether it was
+cut; a `capability/denied` names the tool call that was being served (built).
+
 **How it is read.** By session, filtered, in order: the tool calls, the asks and their
 answers, where a run stopped. A reader wants the shape of a run first (search, reproduce,
 fix) and the single steps under it on request. That outline is a view a reader builds from
@@ -1380,15 +1514,17 @@ someone needs it, since it is also something to keep private).
 
 **Live output is a preview; checkpoints are the record of it.** Text from a model as it
 arrives, and output from a tool while it runs, reach the terminal as they come. It is
-expected of a harness and is part of 1.0, and it is not the core's (*planned*):
+expected of a harness and is part of 1.0, and it is not the core's (built for a model's
+answer; *planned* for a tool's output):
 
 - *A live channel in the loop.* Fragments go to whoever displays them, at whatever grain
   the provider or the tool gives, and are not events. The core's rule keeps no exception:
   every event is in the log.
 - *Checkpoints in the log.* While a reply or a long tool call is under way, the loop
   commits what has arrived since the last checkpoint as an ordinary event, at a coarse
-  grain, and always when the run is stopped or fails. A crash loses at most what came after
-  the last checkpoint, and the log shows how far the reply or the command got.
+  grain. A crash loses at most what came after the last checkpoint, and the log shows how
+  far the reply or the command got. A reply that never became whole, because the run was
+  stopped or ran out of time or the model failed, is recorded once more, whole.
 - *The whole is still committed.* The finished message or result is one event, as now.
   Nobody reconstructs anything from checkpoints: a reader, the model and other agents use
   the whole one, and checkpoints matter only where no whole one exists. A view of a session
@@ -1400,11 +1536,49 @@ How often to checkpoint is a setting: off, every fragment, or an interval in bet
 few seconds by default. Streamed text is then stored at most about twice, and the number of
 events is bounded by time and not by tokens. A reply cut off part-way is not continued from
 its checkpoint, because providers differ on whether they can: on resume the partial text is
-evidence for the reader and the request is made again. This needs a streaming method with
-a default on `Provider`, a way for a running tool to report output through the call scope
-(the one piece in the core, to be marked before the freeze) and topics for the checkpoints.
-The split between channel and checkpoints is the decision; the mechanism is confirmed
-against a real provider before it is fixed.
+evidence for the reader and the request is made again.
+
+The shape, as built for a model's answer and tried against a streamed response on loopback
+(`crates/corduroy-providers/tests/wire.rs`):
+
+- *A piece* (`corduroy_harness::Piece`) is more text, more thinking, more of a tool call
+  (its id, its tool's name, more of its input's text) or what the request has cost so far.
+  The set can grow. Pieces are a preview: the reply still comes back whole.
+- *A provider tells pieces through what it is already handed.* `Provider::complete_reporting`
+  is the one thing the loop calls, and `Reports`, which it is given, has `piece` beside
+  `retry`. The default tells a whole reply as one piece for each of its parts, so a watcher
+  is told the same things by a provider that streams and by one that does not. oi-kit gives
+  text and thinking as they come and a tool call once it is whole, so that is what the
+  shipped providers tell; the `streaming` key of a provider's entry still says only how the
+  provider's client reads the response.
+- *A retry voids what was told.* The harness hears the retry before the next attempt writes
+  anything: it forgets what the failed attempt wrote and the channel says the answer starts
+  over (`Seen::Restarted`).
+- *A display subscribes by session* (`Harness::watch`, and `Outside::watch` for a front
+  end; for one session or for all). It gets a queue of its own and reads it from its own
+  task or thread: `take`, an awaited `next`, or a wait on a thread. Telling a piece never
+  waits. Text that follows text is joined in the queue, and a watcher that has not read
+  64 KiB of it loses the oldest and is told so (`Seen::Missed`). The channel is not in
+  the `Services` registry: what a model is writing is for the person, and nothing is to act
+  on it.
+- *A checkpoint is `model/progress`*: the text, thinking and calls written since the one
+  before, the tokens written so far (the provider's count, or an estimate from the length
+  of the text, marked as one) and the time since the request went out. It is written when
+  a piece arrives and the last one is at least the interval old (`Harness::with_checkpoints`,
+  five seconds unless said). The first piece starts the clock, so an answer that comes
+  whole, or within one interval, has none. Where there is no clock, one is written for
+  every 2048 tokens.
+- *What a request that never answered had written is `model/partial`*, once and whole, with
+  why: `stopped`, `time-limit` or `failed` and the failure's kind. Neither topic is part of
+  the conversation: the model is never shown them, and a tool call in one is never asked
+  about or run.
+- *The terminal* shows the text as it comes where a person reads answers and progress in
+  one place, and does not say an answer again when it is committed; it says once, quietly,
+  that the model is thinking. A program reading the output gets each answer whole, once.
+
+Still to do: a way for a running tool to report output through the call scope (the one
+piece in the core, to be marked before the freeze), the interval as a key of the agent
+file, and pieces on the page (`corduroy-page` shows committed events only).
 
 **Whole sessions may leave the log, and nothing smaller.** The stream never removes or
 rewrites an event: while a program runs, the log only grows. A store may remove a whole
@@ -2297,7 +2471,7 @@ the step it waits on is done.
      it summarises from the model (`Session::for_model`), keeping it in
      the log and the conversation. `CompactOperation`, before the prompt step, asks the
      plugin providing the `compaction` service whether a session is due and for a summary
-     of what came before the current turn; the `compact` plugin answers with a model of its
+     of what came before the cut (the current turn, or its last step); the `compact` plugin answers with a model of its
      own through `llm`.
    - *Done:* sub-agents. The general form of waits and signals (a tool call that waits
      for a named signal, in the log), child sessions started through the harness's

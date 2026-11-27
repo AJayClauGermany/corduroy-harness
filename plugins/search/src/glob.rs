@@ -7,6 +7,10 @@
 //! | `?` | one character of a name |
 //! | `{a,b}` | either `a` or `b` |
 //!
+//! Nothing else is syntax. A `[`, which other tools read as the start of a set of characters
+//! (`[0-9]`), is refused with what to write instead, where matching it as itself would
+//! find nothing and say nothing.
+//!
 //! A pattern with no `/` in it is matched against a file's name alone, so `*.rs` finds
 //! Rust files at any depth; one with a `/` is matched against the whole path.
 
@@ -39,12 +43,20 @@ impl Glob {
     ///
     /// # Errors
     ///
-    /// Says what is wrong with it: it is empty, a brace is not closed, or its braces expand
-    /// to too many alternatives.
+    /// Says what is wrong with it: it is empty, it uses a set of characters (`[a-z]`), which
+    /// is not supported, a brace is not closed, or its braces expand to too many
+    /// alternatives.
     pub fn new(text: &str) -> Result<Self, String> {
         let text = text.trim().trim_start_matches("./");
         if text.is_empty() {
             return Err("the pattern is empty".to_owned());
+        }
+        if text.contains('[') {
+            return Err(format!(
+                "unsupported pattern `{text}`: sets of characters such as `[0-9]` are not \
+                 supported. A pattern takes `*`, `**`, `?` and `{{a,b}}`: write `?` for any \
+                 one character, or each case out, as in `file{{1,2,3}}.txt`"
+            ));
         }
         let alternatives = expand(text)?
             .iter()
@@ -209,6 +221,10 @@ mod tests {
     fn a_pattern_that_cannot_be_read_says_why() {
         assert!(Glob::new(" ").unwrap_err().contains("empty"));
         assert!(Glob::new("*.{rs").unwrap_err().contains("never closed"));
+        // A set of characters would match nothing as written, and say nothing.
+        let set = Glob::new("chapter[1-8].md").unwrap_err();
+        assert!(set.starts_with("unsupported pattern `chapter[1-8].md`"));
+        assert!(set.contains("`?`") && set.contains("{a,b}"), "{set}");
         let many = "{a,b,c,d,e,f,g,h,i}{a,b,c,d,e,f,g,h,i}";
         assert!(Glob::new(many).unwrap_err().contains("more than 64"));
     }

@@ -77,7 +77,7 @@ async fn the_model_calls_a_tool_and_answers() {
     assert_eq!(outcome.status.to_string(), "finished: the total is 9");
     assert_eq!(
         tool_results(&harness),
-        [r#"{"id":"c1","tool":"add","ok":true,"output":"9"}"#]
+        [r#"{"id":"c1","tool":"add","ok":true,"output":"9","bytes":1,"tokens":1}"#]
     );
     let requests = model.requests();
     assert_eq!(requests.len(), 2);
@@ -109,22 +109,24 @@ async fn every_event_records_its_source_and_cause() {
             )
         })
         .collect();
-    // Events of the run name its session; the plugin tree's own events name none.
+    // Events of the run name its session; the plugin tree's own events name none, and nor
+    // does what the model was shown, which any session's request may name.
     assert_eq!(
         trace,
         [
             "#1 host session/start in main",
             "#2 host plugin/activated",
             "#3 user message in main",
-            "#4 host model/request in main",
-            "#5 agent message in main",
-            "#6 agent tool/call in main <- #5",
-            "#8 host tool/start in main <- #6",
-            "#9 environment tool/result in main <- #6",
-            "#10 environment message in main",
-            "#11 host model/request in main",
-            "#12 agent message in main",
-            "#14 host turn/end in main",
+            "#4 host model/shown",
+            "#5 host model/request in main",
+            "#6 agent message in main",
+            "#7 agent tool/call in main <- #6",
+            "#9 host tool/start in main <- #7",
+            "#10 environment tool/result in main <- #7",
+            "#11 environment message in main",
+            "#12 host model/request in main",
+            "#13 agent message in main",
+            "#15 host turn/end in main",
         ]
     );
 }
@@ -145,9 +147,9 @@ async fn tool_failures_go_back_to_the_model_as_data() {
     assert_eq!(
         tool_results(&harness),
         [
-            r#"{"id":"c1","tool":"calculator","ok":false,"output":"unknown tool `calculator`"}"#,
-            r#"{"id":"c2","tool":"add","ok":false,"output":"invalid input: `terms` must be a list"}"#,
-            r#"{"id":"c3","tool":"add","ok":true,"output":"5"}"#,
+            r#"{"id":"c1","tool":"calculator","ok":false,"output":"unknown tool `calculator`","bytes":25,"tokens":9}"#,
+            r#"{"id":"c2","tool":"add","ok":false,"output":"invalid input: `terms` must be a list","bytes":37,"tokens":13}"#,
+            r#"{"id":"c3","tool":"add","ok":true,"output":"5","bytes":1,"tokens":1}"#,
         ]
     );
 }
@@ -184,7 +186,7 @@ async fn a_failing_model_ends_the_run_with_the_error_recorded() {
     let ends = harness.events().matching(&Pattern::new("turn/end"));
     assert_eq!(
         ends[0].payload,
-        r#"{"status":"failed","reason":"the script ran out"}"#
+        r#"{"status":"failed","reason":"the script ran out","kind":"other"}"#
     );
 }
 
@@ -235,7 +237,9 @@ async fn a_custom_operation_can_step_in_before_tools_run() {
 
     assert_eq!(
         tool_results(&harness),
-        [r#"{"id":"c1","tool":"add","ok":false,"output":"not allowed here"}"#]
+        [
+            r#"{"id":"c1","tool":"add","ok":false,"output":"not allowed here","bytes":16,"tokens":6}"#
+        ]
     );
 }
 
@@ -263,8 +267,8 @@ async fn a_native_plugin_contributes_a_step_that_leaves_with_it() {
     assert_eq!(
         tool_results(&harness),
         [
-            r#"{"id":"c1","tool":"add","ok":false,"output":"not allowed here"}"#,
-            r#"{"id":"c2","tool":"add","ok":true,"output":"4"}"#
+            r#"{"id":"c1","tool":"add","ok":false,"output":"not allowed here","bytes":16,"tokens":6}"#,
+            r#"{"id":"c2","tool":"add","ok":true,"output":"4","bytes":1,"tokens":1}"#
         ]
     );
 }

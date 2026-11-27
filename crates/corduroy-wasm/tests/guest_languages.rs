@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use corduroy_core::{
-    App, Content, Draft, EventStream, FiberState, GATES, Gates, HTTP, HttpClients, KERNELS,
+    App, Content, Draft, EventStream, FiberState, GATES, Gates, HTTP, HttpClients, KERNELS, Keep,
     Kernels, MODELS, Models, PROMPTS, Pattern, Prompts, SECRETS, SERVICES, Scope, Secrets,
     Services, Source, TOOLS, ToolError, ToolOutput, ToolSpec, Tools, tool_fn,
 };
@@ -111,6 +111,9 @@ macro_rules! notes_plugin_works {
                     ("note_remove".to_owned(), false, false)
                 ]
             );
+            // And what the list said of the size of its results, by name.
+            let listing = host.tools.get("note_list").unwrap().spec().result.unwrap();
+            assert_eq!((listing.tokens, listing.keep), (4096, Keep::Head));
             assert!(host.prompts.render().is_empty(), "no notes, no prompt part");
 
             // Ids come from the host's random source, so two differ; times from its clock.

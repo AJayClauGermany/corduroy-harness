@@ -82,8 +82,23 @@ A waiting run survives the process. Answer whenever you like:
 corduroy continue
 ```
 
-A run that waits with no terminal (`corduroy run … < /dev/null`) exits with status 1 and
-`waiting for 1 answer(s)`. To abandon it instead:
+A run that waits with no terminal (`corduroy run … < /dev/null`) exits with status 7 and
+`waiting for 1 answer(s), about <id>`.
+
+A program that answers for you should say which question each answer is for. An answer
+piped in as `y` goes to whatever question comes next, which may not be the one it was
+meant for. A line that begins `@<id>` answers the question about that tool call and no
+other, and is given to nobody if that question is not waiting:
+
+```bash
+printf '@call_1 y\n' | corduroy continue
+```
+
+The id is in the question (`approval asks (call_1): …`), in the line that ends a waiting
+run, and in the log as the `id` of the `gate/decision` that asked
+([reference](../reference/cli.md#answering-a-question-by-its-id)).
+
+To abandon a waiting run instead:
 
 ```bash
 corduroy stop
