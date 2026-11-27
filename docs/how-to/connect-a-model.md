@@ -209,6 +209,40 @@ kind = "ollama"
 corduroy --provider local --model qwen3 run "summarise README.md"
 ```
 
+One file with both is easier to keep right than a file for each: what you turn on (an
+add-on, the page) is then turned on whichever model you ask. `provider` and `model` at the
+top are what a plain `corduroy` asks; `--provider` and `--model` ask another for that one
+command, and the two go together, since each provider has its own names for its models.
+A ChatGPT plan beside an API key is two such entries:
+
+```toml
+provider = "main"
+model = "claude-sonnet-5-5"
+
+[providers.main]
+kind = "anthropic"
+secret = "anthropic"
+
+[providers.plan]
+kind = "openai"
+secret = "chatgpt"
+
+[secrets.anthropic]
+
+[secrets.chatgpt]
+kind = "chatgpt"
+```
+
+```bash
+corduroy --provider plan --model gpt-6-luna
+```
+
+Two things stay as the file says whichever you ask. Add-ons that ask a model of their own
+(`summarize`, `compact`, `review`) ask the one their entry names. And nothing changes over
+by itself: when a provider refuses (a plan's limit is reached, say) the run fails and says
+so, and asking the other is yours to do. `corduroy check` says which file was read and
+which model it asks.
+
 ## Let add-ons ask a model
 
 Add-ons such as `summarize` and `compact` ask a model of their own through the `llm`

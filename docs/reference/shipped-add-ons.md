@@ -23,6 +23,48 @@ from Goose.
 Output is capped at 2000 lines or 50 KB. Config: `kernel`, the kernel `bash` runs in (`shell`).
 Grants: `fs-read`, `fs-write`, `kernel`.
 
+## search
+
+Searching the workspace without a shell, after Pi's `grep` and `find`. Both only look, so
+`approval` in `smart` mode lets them through, where the same search run in `bash` is a
+command it asks about.
+
+| Tool | Input | Read-only |
+| --- | --- | --- |
+| `grep` | `pattern` (a regular expression, matched against each line), `path` (a directory, searched all the way down, or one file; `.`), `glob` (only files matching it), `ignore_case`, `context` (lines around each match), `limit` (most matching lines, 100), `files_only` | yes |
+| `find` | `pattern` (on the path: `*.rs` is that name at any depth, `src/**/*.toml`, `*.{ts,tsx}`; `*` stays within one name, `**` crosses directories, `?` is one character), `path` (`.`), `limit` (200) | yes |
+
+`grep` answers as `path:line:text`, with `--` between runs of context. Both pass over `.git`,
+`node_modules`, `target`, `.corduroy` and `.venv`; `grep` also passes over files that are
+not text or that the grant does not reach, and the agent file in the working directory. A
+result is capped at 50 KB and 20 000 files.
+
+Config: `max_bytes`, the most text one `grep` reads (16 MB). A call into an add-on is
+metered, so a search stops there and says so; the model narrows it. Grants: `fs-read`.
+
+## fetch
+
+A page on the web, as text.
+
+Tool: `web_fetch` (`url`, a whole `http` or `https` address; `offset`, bytes of the text to
+pass over; `raw`, the HTML itself). HTML comes back as text with its headings, lists and
+links, the links as `[words](address)` worked out against the page; text and JSON as they
+are; anything else as its kind and size. An answer of 400 or more is an error with its
+status. Scripts are not run, so a page built by them has little to read. One call returns at
+most `max_bytes` and says the `offset` to read on from.
+
+The host's client follows no redirect. The add-on follows up to five itself, each a request
+of its own, so a redirect to a host outside the grant is refused like any request there.
+
+It is **not** marked read-only: an address is something sent out, and a model that has read
+a hostile page can be told to put what it knows in one. So `approval` in `smart` mode asks
+about each fetch. Add `web_fetch` to its `allow` list to stop that, or keep the grant to the
+hosts you mean (`http = ["docs.rs", "github.com"]`). Every request is on the log as
+`http/request` and `http/response`.
+
+Config: `max_bytes` (50 000), `user_agent`. Grants: `http`, by host; the default agent
+grants every host.
+
 ## skills
 
 Skills the agent writes for itself, after Hermes: `<dir>/<name>/SKILL.md` with `name` and
@@ -71,6 +113,15 @@ Context files in the system prompt, read again before every request.
 Config: `files` (`AGENTS.md`, `.goosehints`, `CLAUDE.md`; relative paths are in the
 workspace), `max_bytes` (32 KiB in all). Grants: `fs-read` on those files; a file the grant
 does not reach is skipped.
+
+## today
+
+Today's date in the system prompt, read from the host's clock. A model otherwise takes the
+date from its training, and is a year or two behind.
+
+Tool: `now` (the date and the time; read-only). Config: `utc_offset`, how far your clock is
+from UTC, as `+01:00` or `-08:00`. An add-on cannot see the machine's time zone, so without
+it dates and times are UTC, and say so. Grants: `clock` on `wall`.
 
 ## todo
 
@@ -132,6 +183,41 @@ session's model holds, as its [description](agent-file.md#providersnamemodelsmod
 Tool: `delegate`: start a child session for a task, with the same model, tools and gates and
 an empty conversation. The parent's run waits, in the log, until the child ends; the child's
 answer is the call's result. Grants: `service` on `sessions`.
+
+## viewer
+
+The log as a page in a browser, as files: `<dir>/index.html`. An add-on cannot listen on a
+port, so nothing is served: the page is files, opened as files, and it follows a run as it
+goes by loading them again every two seconds. The [`page` extension](agent-file.md#extensionsname)
+serves the same page while `corduroy` runs, where a gate's question can be answered; this
+one is there when it does not.
+
+| View | Shows |
+| --- | --- |
+| a session | what you said and the agent answered; each tool call with its input, its result, how long it took, and what a gate asked or refused and what you answered; each request to the model with its time and tokens; how each run ended. A sub-agent's session is linked from the call that started it |
+| Problems | failed runs, tools and model calls, what a gate refused, calls outside a grant, add-ons that failed, trapped or were stopped, runs cut short and turn limits, each linked to where it happened |
+| What it has and used | what wrote the log, the plugins started (and those that did not, with why), the models asked with their tokens, the tools called with how often they failed |
+| Every event | the log as `corduroy log` prints it, filtered as you type |
+
+It only shows, and says so along its foot, with how to turn on the page that answers.
+While a gate's question waits, a bar over every view says which session waits, about what,
+and where to answer: in the terminal, or on the page the `page` extension serves. A page that takes an answer listens on a socket, and so is an extension
+([How people meet it](../design.md#how-people-meet-it)).
+
+- **It holds a copy of the log**, a payload over 256 KB cut short. Whatever can read `dir`
+  can read what was said in every session. Set `enabled = false` if nothing should hold one.
+- **A removed session leaves it at the next start.** After `corduroy sessions remove`, the
+  copy still holds the session until an agent with the add-on starts in that workspace;
+  then all of it is written again without it. The same goes for a session a narrowed
+  `log-read` grant no longer reaches. Delete `dir` to have it gone at once.
+- **The page trusts nothing it shows.** What a model or a tool wrote is put on it as text,
+  and its content policy lets it load only the files beside it and reach nothing else. The
+  page's own files are written again at every start.
+
+Config: `dir` (`viewer`, in the
+workspace; the default agent uses `{data}/viewer`). Grants: `log-read` on everything it
+should show (`"*"`, or narrower to keep sessions or topics off the page), `fs-read` and
+`fs-write` on `dir`, `log`.
 
 ## plugin-manager
 

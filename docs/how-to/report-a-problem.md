@@ -53,6 +53,8 @@ send it.
 
 ## When the report is not enough
 
+- The [page in a browser](watch-a-run-in-a-browser.md) shows every session with its tool
+  calls and timings, and gathers what failed under **Problems**.
 - `corduroy --session <name> log` prints every event of one session, whole.
 - The log itself, `<workspace>/.corduroy/log.jsonl`, is plain text, one commit per line, and
   is the complete record. [Events](../reference/events.md) says how to read it.

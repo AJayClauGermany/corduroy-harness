@@ -1912,31 +1912,65 @@ is supported are still open (A11), as is whether a review from outside is a cond
 Five things are decided here: what a person reaches the agent through, what the standard set
 holds at 1.0, where a credential comes from, which parts of a provider's entry are ours, and
 what an add-on is as something kept and passed on. Most of it is *planned*; the keychain is
-built. The code is as [Three tiers](#three-tiers-core-extensions-add-ons) and the
+built, and so is the page: it shows the record, answers a gate's question, takes a prompt
+and stops a run. The code is as [Three tiers](#three-tiers-core-extensions-add-ons) and the
 [reference](README.md#reference) pages describe it, and [Order of work](#order-of-work)
 lists what is built and what changes.
 
-**The terminal is the front end of 1.0.** The command ships no server and speaks no
-protocol, so no wire format freezes with 1.0. Driving the harness from another program
-still means linking it.
+**The terminal is the front end of 1.0.** The command itself speaks no protocol, and what
+the page extension speaks is promised to nobody, so no wire format freezes with 1.0.
+Driving the harness from another program still means linking it.
 
 - *The first thing beyond the terminal is a page in a browser,* served on this machine by
   the command. A page comes before an editor's protocol because it travels: the same page
   sits inside a desktop shell (Tauri, Electron), and can later be reached from a phone. An
   editor, through a protocol editors and agents share, may follow it.
+- *The record can also be looked at as a page of files.* The `viewer` add-on (built) writes
+  what it reads through `log-read` into a directory, and a browser opens it as files. It
+  shows and cannot be answered through, so it is no front end, promises no format, and
+  needs nothing the plugin world does not already give. It is what is there when nothing
+  is running.
 - *A front end is an extension.* It listens on a socket, which no capability gives an
   add-on, so it is native and compiled into the command, and the core and the loop learn
   nothing of it. What it speaks is its own. That becomes a [stable](#what-is-stable)
-  contract when the extension ships, as any standard extension's configuration is, and
-  nothing about it is promised before then.
+  contract only when it is said to be, as any standard extension's configuration is, and
+  nothing about it is promised before then. *Built:* the `page` extension
+  (`crates/corduroy-page`, `[extensions.<name>] kind = "page"`) serves the viewer's page
+  on the loopback interface and takes three things back: an answer to a gate's question,
+  a message for a session, and a stop. It is not in the default agent: a person turns it
+  on, since a terminal interface may come to stand where it does. Its one promise is its
+  entry in the agent file; the scripts it serves and what it is posted are the page's own
+  and may change with it.
 - *It drives through the handle every extension has.*
   [What an extension can reach](#what-an-extension-can-reach) gives an extension four
   things: start a session, send one a message, raise a signal, and read. A front end also
-  has to answer an ask and stop a run, which only the host's `Harness` does today. The
-  handle gains both, so that a front end can be written without the command changing.
+  has to answer an ask and stop a run, which only the host's `Harness` did. The handle
+  gains both, so that a front end can be written without the command changing. *Built:*
+  `Outside`, which a native plugin is handed by name. It reads the questions that wait,
+  records an answer to one, records a message said to a session, and asks a run to stop.
+  It only records, and the host, which drives, takes the run on (`Harness::take_on`), as
+  [the host takes the run on](#what-an-extension-can-reach) says: no loop runs on a front
+  end's thread. It is not in the `Services` registry, so no add-on reaches it: a gate's
+  question is the person's to answer. Each event says what it was given through (`via`).
+  Two limits stand until the rest of the handle is built. A message is taken only for a
+  session that is doing nothing, since the queue that would keep one for a busy session is
+  not there. And it is taken only from a host that said it takes them
+  (`Harness::takes_messages`): the command does in a conversation and does not when it
+  runs one prompt and leaves, where a message would be recorded and run by nobody.
+  Starting a session, raising a signal and reading as the design has them are still to
+  come.
+- *The host opens a front end when it is about to drive.* *Built:* a front end registers
+  in `Fronts` and does nothing until the host opens it, which the command does before a
+  run and not when an agent is put together only to be looked at (`check`, `log`). What
+  it says on opening is shown to the person and not recorded.
 - *It answers for who reaches it.* Any program on the machine can open a local port, and a
   phone is not on the machine at all. A front end lets nobody in without a token. That is
-  asked of the extension when it is built, and not of 1.0.
+  asked of the extension when it is built, and not of 1.0. *Built:* the page listens on
+  `127.0.0.1` only; its address holds a token made anew each time it opens, without which
+  every request is refused alike; a request has to name this machine by its own address
+  and an answer has to come from the page itself. The address is never recorded, because
+  the record is within reach of the agent's own tools, and an agent that read it there
+  could answer its own questions.
 - *What two connected harnesses speak is their plugins' own.* The
   [proof](#what-the-freeze-waits-on) that connects another harness has to put something on
   the wire before 1.0. It tests the core, and promises no format: what the two plugins say
@@ -1956,8 +1990,9 @@ list is short, and what is left out is said.
 | The log | The [folder store](#what-the-record-promises), which is the default once its proof has passed. The single file stays, as the simple store. |
 | Add-ons | The WebAssembly host, and the add-ons shipped with the command, which keep changing as before. |
 
-Not in it, and not promised by 1.0: a scheduler; a front end other than the terminal; code
-mode; snapshots of a kernel; and any source of secrets but those two.
+Not in it, and not promised by 1.0: a scheduler; a front end other than the terminal (the
+page extension ships with the command, and nothing of it is frozen); code mode; snapshots
+of a kernel; and any source of secrets but those two.
 
 - *The folder store is the default because sessions multiply.* One file is read whole at
   start and grows with every agent that ever ran. With a file for each session, starting

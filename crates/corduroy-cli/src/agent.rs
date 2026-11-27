@@ -420,9 +420,9 @@ impl AgentFile {
 
     /// The default agent for a workspace with no agent file: a model served on this machine
     /// by Ollama, which needs no key, the Pi toolset on a shell in the workspace (PowerShell
-    /// on Windows, told to the model, `sh` elsewhere), the approval and inspect gates, the
-    /// Goose-baseline plugins (skills, hints, todo, memory, recall, summarize, compact,
-    /// subagents) and `review`.
+    /// on Windows, told to the model, `sh` elsewhere), `search` and `fetch`, the approval and
+    /// inspect gates, the Goose-baseline plugins (skills, hints, todo, memory, recall,
+    /// summarize, compact, subagents), `today`, `review` and the `viewer` page.
     ///
     /// It reads nothing from the environment: no key is looked for, and none decides whose
     /// model is asked. An agent for a vendor that takes a key is what `corduroy init` writes
@@ -682,6 +682,14 @@ kind = "{{kind}}"   # anthropic, openai, ollama, *-compatible, or a provider oi-
 [kernels.shell]
 kind = "{{shell}}"      # a persistent shell in {workspace}: shell (sh) or powershell
 
+# The agent's page in a browser, served on this machine while corduroy runs: what the agent
+# does as it does it, Allow and Refuse for what a gate asks, a box to type a prompt in and
+# a button that stops a run. Take the # off the two lines below to turn it on. corduroy
+# then says the address when it starts: a new one each time, which lets in whoever has it.
+# A third line, port = 4747, keeps the port the same.
+# [extensions.page]
+# kind = "page"
+
 # read, write, edit and bash, within the workspace. The agent file and the log are out of
 # reach whatever this says.
 [[plugins]]
@@ -692,6 +700,22 @@ config = { kernel = "shell" }
 fs-read = ["{workspace}", "{workspace}/*"]
 fs-write = { allow = ["{workspace}", "{workspace}/*"], deny = ["{workspace}/.git/*"] }
 kernel = "shell"
+
+# grep and find: searching the workspace without a command. They only look, so the approval
+# gate below does not ask about them as it does about a grep run in the shell.
+[[plugins]]
+name = "search"
+path = "search.wasm"
+grants = { fs-read = ["{workspace}", "{workspace}/*"] }
+
+# web_fetch: a page on the web, as text. It may ask any host, and the approval gate asks you
+# about each fetch, since an address is something sent out. To stop the asking, add
+# "web_fetch" to approval's allow list; to keep it to some hosts, name them here in place
+# of "*" (http = ["docs.rs", "github.com"]).
+[[plugins]]
+name = "fetch"
+path = "fetch.wasm"
+grants = { http = "*" }
 
 # Procedures the agent saves for itself.
 [[plugins]]
@@ -722,6 +746,14 @@ name = "hints"
 path = "hints.wasm"
 config = { files = ["{workspace}/AGENTS.md", "{workspace}/.goosehints", "{workspace}/CLAUDE.md"] }
 grants = { fs-read = ["{workspace}/AGENTS.md", "{workspace}/.goosehints", "{workspace}/CLAUDE.md"] }
+
+# Today's date in the system prompt, which a model otherwise takes from its training. It is
+# the date in UTC unless you say how far your clock is from it:
+# config = { utc_offset = "+01:00" }.
+[[plugins]]
+name = "today"
+path = "today.wasm"
+grants = { clock = "wall" }
 
 # A todo list for each session, kept across turns and restarts.
 [[plugins]]
@@ -775,6 +807,20 @@ path = "compact.wasm"
 config = { model = "main/{{model}}" }
 grants = { llm = "main/{{model}}" }
 
+# The log as a page, written as files: open {data}/viewer/index.html in a browser to see
+# each session's conversation, tool calls, timings, tokens and what went wrong, following a
+# run as it goes. It shows and cannot be answered on: for that, turn on the page above. The
+# directory holds a copy of the log, so set enabled = false if nothing should hold one.
+[[plugins]]
+name = "viewer"
+path = "viewer.wasm"
+config = { dir = "{data}/viewer" }
+[plugins.grants]
+log-read = "*"
+fs-read = ["{data}/viewer", "{data}/viewer/*"]
+fs-write = ["{data}/viewer", "{data}/viewer/*"]
+log = "*"
+
 # Lets the model load more plugins from the plugin directory, never granting more than this
 # entry holds. Off by default.
 [[plugins]]
@@ -819,6 +865,8 @@ pub struct Agent {
     pub harness: Harness,
     /// What it was put together from.
     pub file: AgentFile,
+    /// The agent file that was read, if it came from one and is not the default agent.
+    pub source: Option<PathBuf>,
     /// Where the event log is.
     pub log: PathBuf,
     /// Plugins that did not start.
@@ -907,6 +955,7 @@ pub fn assemble_from(
     Ok(Agent {
         harness,
         file: file.clone(),
+        source: places.file.clone(),
         log,
         failed,
     })
@@ -1152,10 +1201,10 @@ mod tests {
     fn the_default_agent_parses() {
         let file = AgentFile::parse(&AgentFile::default_text()).unwrap();
         assert_eq!(file.provider, "main");
-        assert_eq!(file.plugins.len(), 13);
+        assert_eq!(file.plugins.len(), 17);
         assert_eq!(
             file.plugins.iter().filter(|plugin| plugin.enabled).count(),
-            12
+            16
         );
         assert!(file.plugins[0].grants.contains_key("kernel"));
     }
@@ -1396,8 +1445,8 @@ mod tests {
         assert_eq!(
             error,
             "extension `box`: this command has no extension kind `docker-kernel` (it has: \
-             chatgpt-secret, env-secret, http-client, keychain-secret, mcp, powershell-kernel, \
-             shell-kernel)"
+             chatgpt-secret, env-secret, http-client, keychain-secret, mcp, page, \
+             powershell-kernel, shell-kernel)"
         );
 
         let refusing = Extensions::none().kind("picky", |_| Err("`image` is required".into()));

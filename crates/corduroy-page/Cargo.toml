@@ -1,0 +1,25 @@
+[package]
+name = "corduroy-page"
+description = "The corduroy agent as a page in a browser, served on this machine: the log as it grows, and a gate's question answered there."
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+corduroy-harness = { workspace = true, features = ["std"] }
+# The token that lets a browser in.
+getrandom = { workspace = true }
+serde_json = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+corduroy-harness = { workspace = true, features = ["std", "tokio"] }
+tokio = { workspace = true }

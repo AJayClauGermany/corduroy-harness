@@ -44,6 +44,9 @@ Using the `corduroy` command:
   deny lists, unattended runs.
 - [Stop, resume and recover runs](how-to/recover-runs.md): Ctrl-C, `continue`, `stop`,
   sessions.
+- [Watch a run in a browser, and answer it there](how-to/watch-a-run-in-a-browser.md): the
+  log as a page, with what went wrong in one place, and, turned on, the page the agent
+  serves while it runs: allow or refuse what a gate asks, type a prompt, stop a run.
 - [Report a problem](how-to/report-a-problem.md): `corduroy doctor`, which tries the agent
   part by part, and `corduroy report`, what a run did and how long each part took, in one
   piece to hand over.

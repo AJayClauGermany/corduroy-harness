@@ -209,6 +209,194 @@ fn a_prompt_runs_through_a_real_provider_tools_and_a_person_answering_the_gate()
     }
 }
 
+/// Start `corduroy` in `workspace` with `args` and somebody at its terminal: what they
+/// type and what it says are the child's pipes.
+fn attended(workspace: &Path, args: &[&str]) -> std::io::Result<std::process::Child> {
+    Command::new(env!("CARGO_BIN_EXE_corduroy"))
+        .arg("--workspace")
+        .arg(workspace)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+}
+
+/// Where `line` says the agent's page is: `127.0.0.1:<port>`, and the token of its address.
+fn page_at(line: &str) -> Option<(String, String)> {
+    let address = line
+        .split_whitespace()
+        .find_map(|word| word.strip_prefix("http://"))?;
+    let mut parts = address.split('/');
+    Some((parts.next()?.to_owned(), parts.next()?.to_owned()))
+}
+
+/// Post `body` to `what` of the page at `host`, as its browser would, and return the status
+/// line of the answer.
+fn post_to_page(host: &str, token: &str, what: &str, body: &Value) -> std::io::Result<String> {
+    let body = body.to_string();
+    let mut stream = TcpStream::connect(host)?;
+    write!(
+        stream,
+        "POST /{token}/{what} HTTP/1.1\r\nHost: {host}\r\nOrigin: http://{host}\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )?;
+    let mut answered = String::new();
+    stream.read_to_string(&mut answered)?;
+    Ok(answered.lines().next().unwrap_or_default().to_owned())
+}
+
+/// Allow the call `call_1` of the session `main` on the page at `host`.
+fn allow_on_page(host: &str, token: &str) -> std::io::Result<String> {
+    let allow = json!({"session": "main", "call": "call_1", "allow": true});
+    post_to_page(host, token, "answer", &allow)
+}
+
+/// Say `text` to the session `main` on the page at `host`, once the session is free: a run
+/// that has said its last word has not quite ended. Returns the status line of the answer.
+fn say_on_page(host: &str, token: &str, text: &str) -> std::io::Result<String> {
+    let said = json!({"session": "main", "text": text});
+    let mut answered = String::new();
+    for _ in 0..100 {
+        answered = post_to_page(host, token, "say", &said)?;
+        if !answered.contains("409") {
+            break;
+        }
+        thread::sleep(std::time::Duration::from_millis(50));
+    }
+    Ok(answered)
+}
+
+/// The lines `lines` gives up to and including the first for which `last` holds.
+fn said_until(
+    lines: &mut impl Iterator<Item = std::io::Result<String>>,
+    last: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    let mut said = Vec::new();
+    for line in lines.map_while(Result::ok) {
+        let done = last(&line);
+        said.push(line);
+        if done {
+            break;
+        }
+    }
+    said
+}
+
+#[test]
+fn a_prompt_typed_on_the_page_runs_in_the_conversation_and_a_stop_ends_what_waits() {
+    let workspace = scratch("cli-page-say");
+    let plugins = plugin("pi-tools").parent().unwrap().to_owned();
+    let target = workspace.join("hello.txt");
+    let (address, _seen) = model(vec![
+        answer("hello from the model"),
+        tool_call("write", &json!({"path": target, "content": "hi\n"})),
+    ])
+    .unwrap();
+    let agent = format!(
+        "{}\n[extensions.page]\nkind = \"page\"\n",
+        agent_file(address, &plugins)
+    );
+    fs::write(workspace.join("corduroy.toml"), agent).unwrap();
+    // A conversation, with somebody at the terminal who types nothing.
+    let mut child = attended(&workspace, &[]).unwrap();
+    let terminal = child.stdin.take().unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let mut said = said_until(&mut lines, |line| line.contains("type a prompt"));
+    let (host, token) = said.iter().find_map(|line| page_at(line)).unwrap();
+
+    let sent = say_on_page(&host, &token, "say hello").unwrap();
+    assert!(sent.contains("200"), "{sent}");
+    said.extend(said_until(&mut lines, |line| {
+        line.contains("hello from the model")
+    }));
+    let sent = say_on_page(&host, &token, "write a file").unwrap();
+    assert!(sent.contains("200"), "{sent}");
+    said.extend(said_until(&mut lines, |line| line.contains("allow?")));
+    // While the question waits the session takes no prompt, and the run can be stopped.
+    let hello = json!({"session": "main", "text": "hello?"});
+    let busy = post_to_page(&host, &token, "say", &hello).unwrap();
+    assert!(busy.contains("409"), "{busy}");
+    let stop = json!({"session": "main"});
+    let stopped = post_to_page(&host, &token, "stop", &stop).unwrap();
+    assert!(stopped.contains("200"), "{stopped}");
+    // The terminal, which was waiting for an answer, says the run has ended, with nothing
+    // typed at it: this line comes while its input is still open.
+    said.extend(said_until(&mut lines, |line| line == "stopped"));
+
+    // The person leaves: the end of what they type.
+    drop(terminal);
+    said.extend(lines.map_while(Result::ok));
+    assert!(child.wait().unwrap().success(), "{said:?}");
+    let said = said.join("\n");
+    for line in [
+        "say hello (typed on page)",
+        "write a file (typed on page)",
+        "■ stopping, as asked on page",
+    ] {
+        assert!(said.contains(line), "{line} missing from\n{said}");
+    }
+    assert!(!target.exists(), "the call that was asked about ran");
+    let log = text(&corduroy(&workspace, &["log"], "").unwrap().stdout);
+    assert!(
+        log.contains(r#""status":"stopped""#) && !log.contains(&token),
+        "{log}"
+    );
+}
+
+#[test]
+fn a_gates_question_is_answered_on_the_page_while_the_terminal_waits() {
+    let workspace = scratch("cli-page");
+    let plugins = plugin("pi-tools").parent().unwrap().to_owned();
+    let target = workspace.join("hello.txt");
+    let (address, _seen) = model(vec![
+        tool_call("write", &json!({"path": target, "content": "hi\n"})),
+        answer("I wrote hello.txt."),
+    ])
+    .unwrap();
+    let agent = format!(
+        "{}\n[extensions.page]\nkind = \"page\"\n",
+        agent_file(address, &plugins)
+    );
+    fs::write(workspace.join("corduroy.toml"), agent).unwrap();
+    let mut child = attended(&workspace, &["run", "say", "hi", "in", "a", "file"]).unwrap();
+    // Somebody is at the terminal, and types nothing.
+    let terminal = child.stdin.take().unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let mut said = Vec::new();
+    for line in lines.by_ref().map_while(Result::ok) {
+        let asked = line.contains("allow?");
+        said.push(line);
+        if asked {
+            break;
+        }
+    }
+    let (host, token) = said.iter().find_map(|line| page_at(line)).unwrap();
+
+    let answered = allow_on_page(&host, &token).unwrap();
+
+    assert!(answered.contains("200"), "{answered}");
+    said.extend(lines.map_while(Result::ok));
+    assert!(child.wait().unwrap().success(), "{said:?}");
+    drop(terminal);
+    let said = said.join("\n");
+    assert!(said.contains("✓ allowed on page"), "{said}");
+    assert!(said.contains("✓ Wrote 3 bytes"), "{said}");
+    assert!(said.contains("I wrote hello.txt."), "{said}");
+    assert_eq!(fs::read_to_string(&target).unwrap(), "hi\n");
+    // The answer is in the log as given through the page. The address is not: it lets in
+    // whoever has it, and the log is something the agent's tools can read.
+    let log = text(&corduroy(&workspace, &["log"], "").unwrap().stdout);
+    assert!(
+        log.contains(r#""allow":true"#) && log.contains(r#""via":"page""#),
+        "{log}"
+    );
+    assert!(
+        !log.contains(&token) && !log.contains("the agent's page"),
+        "{log}"
+    );
+}
+
 #[test]
 fn a_report_says_what_a_run_waited_on_and_a_session_has_its_part_of_the_log() {
     let workspace = scratch("cli-report");
@@ -470,6 +658,32 @@ fn check_says_what_the_agent_has_and_a_plugin_cannot_read_the_agent_file() {
     assert!(check.status.success(), "{report}\n{}", text(&check.stderr));
     assert!(report.contains("tool      read (read-only)"), "{report}");
     assert!(report.contains("gates     approval"), "{report}");
+    // Which file it read, since a person may keep several, and that no page is turned on.
+    let read = format!("agent     {}", agent.display());
+    assert!(report.starts_with(&read), "{report}");
+    assert!(
+        report.contains("fronts    none (the terminal alone)"),
+        "{report}"
+    );
+    // A provider asked for by a name the file does not have is refused at once.
+    let unknown = corduroy(&workspace, &["--provider", "elsewhere", "check"], "").unwrap();
+    assert!(!unknown.status.success());
+    let refused = text(&unknown.stderr);
+    assert!(
+        refused.contains("`--provider elsewhere` names no [providers.elsewhere] entry")
+            && refused.contains("this agent has fake"),
+        "{refused}"
+    );
+    // With the page turned on, `check` says so, and serves nothing to say it.
+    let with_page = format!(
+        "{}\n[extensions.page]\nkind = \"page\"\n",
+        agent_file(address, &plugins)
+    );
+    fs::write(&agent, with_page).unwrap();
+    let report = text(&corduroy(&workspace, &["check"], "").unwrap().stdout);
+    assert!(report.contains("fronts    page"), "{report}");
+    assert!(!report.contains("http://"), "{report}");
+    fs::write(&agent, agent_file(address, &plugins)).unwrap();
 
     // `read` only reads, so smart mode lets it run; the host still refuses the agent file.
     let output = corduroy(&workspace, &["run", "read", "your", "grants"], "").unwrap();

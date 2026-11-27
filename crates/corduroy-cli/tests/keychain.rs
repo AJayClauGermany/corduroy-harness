@@ -45,9 +45,8 @@ impl Ran {
 /// Run the command in `workspace` with `args`, a person typing `typed`, and `standard`.
 fn corduroy(standard: &Standard, workspace: &Path, args: &[&str], typed: &str) -> Ran {
     let written = Arc::new(Mutex::new(Vec::new()));
-    let mut input = Cursor::new(typed.as_bytes().to_vec());
     let console = Console {
-        input: &mut input,
+        input: Box::new(Cursor::new(typed.as_bytes().to_vec())),
         out: Arc::<Mutex<Vec<u8>>>::clone(&written),
         // Nobody is at a terminal: a value is a line of what was typed.
         hidden: false,

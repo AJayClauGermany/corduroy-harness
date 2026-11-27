@@ -49,7 +49,7 @@ use corduroy_std::{SignIn, Standard};
 use crate::agent::{AGENT_FILE, Agent, AgentFile, Places, assemble_from};
 use crate::extension::Extensions;
 use crate::report::{below, report, stamp};
-use crate::terminal::{self, Out, say};
+use crate::terminal::{self, Lines, Out, say};
 
 const USAGE: &str = "usage: corduroy [--agent FILE] [--workspace DIR] [--session NAME] \
                      [--model NAME] [--provider NAME] [--version] [run PROMPT | continue | stop | check | sessions | \
@@ -116,9 +116,8 @@ pub fn main_with(extensions: &Extensions) -> ExitCode {
 /// Run the `corduroy` command on this process's arguments, putting agents together from the
 /// parts in `standard`. Returns the process's exit code.
 pub fn main_standard(standard: &Standard) -> ExitCode {
-    let mut input = io::BufReader::new(io::stdin());
     let console = Console {
-        input: &mut input,
+        input: Box::new(io::BufReader::new(io::stdin())),
         out: Arc::new(Mutex::new(io::stdout())),
         hidden: io::stdin().is_terminal(),
     };
@@ -132,9 +131,9 @@ pub fn main_standard(standard: &Standard) -> ExitCode {
 }
 
 /// Where the command reads what a person types and writes what it says.
-pub struct Console<'a> {
+pub struct Console {
     /// What the person types: prompts, answers to a gate, and a secret's value.
-    pub input: &'a mut (dyn BufRead + Send),
+    pub input: Box<dyn BufRead + Send>,
     /// Where the command writes.
     pub out: Out,
     /// Whether a person is typing at a terminal, so that a secret's value is read from it
@@ -142,7 +141,7 @@ pub struct Console<'a> {
     pub hidden: bool,
 }
 
-impl std::fmt::Debug for Console<'_> {
+impl std::fmt::Debug for Console {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Console")
             .field("hidden", &self.hidden)
@@ -150,7 +149,7 @@ impl std::fmt::Debug for Console<'_> {
     }
 }
 
-impl Console<'_> {
+impl Console {
     /// A value the person types after `prompt`, not shown as it is typed at a terminal. The
     /// spaces and the line end around it are dropped.
     fn secret(&mut self, prompt: &str) -> Result<String, Box<dyn Error>> {
@@ -179,7 +178,7 @@ impl Console<'_> {
 pub fn run_on(
     standard: &Standard,
     args: impl Iterator<Item = String>,
-    mut console: Console<'_>,
+    mut console: Console,
 ) -> Result<ExitCode, String> {
     let options = options(args)?;
     if options.version {
@@ -245,6 +244,17 @@ fn agent_file(options: &Options, workspace: PathBuf) -> Result<Described, Box<dy
         file.model.clone_from(model);
     }
     if let Some(provider) = &options.provider {
+        // Said now, as a provider the file itself names wrongly is, and not by the first
+        // request that finds nobody to ask.
+        if !file.providers.contains_key(provider) {
+            let has: Vec<&str> = file.providers.keys().map(String::as_str).collect();
+            return Err(format!(
+                "`--provider {provider}` names no [providers.{provider}] entry: this agent \
+                 has {}",
+                has.join(", ")
+            )
+            .into());
+        }
         file.provider.clone_from(provider);
     }
     let file_path = file_path.map(|path| path.canonicalize()).transpose()?;
@@ -282,7 +292,7 @@ fn between_runs(
     options: &Options,
     workspace: &Path,
     standard: &Standard,
-    console: &mut Console<'_>,
+    console: &mut Console,
 ) -> Option<Done> {
     let described = || agent_file(options, workspace.to_owned());
     let out = Arc::clone(&console.out);
@@ -314,7 +324,7 @@ fn between_runs(
 async fn run(
     options: Options,
     standard: &Standard,
-    console: &mut Console<'_>,
+    console: &mut Console,
 ) -> Result<ExitCode, Box<dyn Error>> {
     let workspace = match &options.workspace {
         Some(dir) => dir.clone(),
@@ -326,7 +336,6 @@ async fn run(
         return done;
     }
     let out = &Arc::clone(&console.out);
-    let input = &mut *console.input;
     let Loaded { agent, places } = load(&options, workspace, standard, out)?;
     let harness = &agent.harness;
     let session = SessionId::new(options.session.as_deref().unwrap_or(MAIN));
@@ -335,8 +344,13 @@ async fn run(
     }
     let paid = paid_by(&agent.file, standard);
     let unfiled = places.file.is_none();
+    // What is typed from here on is prompts and answers, read so that a question put here
+    // can be answered somewhere else first.
+    let typed = std::mem::replace(&mut console.input, Box::new(io::empty()));
+    let input = &mut Lines::new(typed);
     if let [] | ["run" | "continue", ..] = command.as_slice() {
         announce(&agent.file, unfiled, paid.as_deref(), out);
+        open_fronts(harness, out);
     }
     let paid = paid.as_deref();
     let shown = Shown { out, paid, unfiled };
@@ -532,18 +546,32 @@ fn finish(status: &Status, shown: &Shown<'_>) -> ExitCode {
     }
 }
 
-/// What the agent has, a line each: its model, log, registries, tools and the plugins that
-/// did not start.
+/// What the agent has, a line each: the file it was read from, its model, log, registries,
+/// tools and the plugins that did not start.
 fn described(agent: &Agent) -> Vec<String> {
     let harness = &agent.harness;
     let file = &agent.file;
+    // Which file, since a person may keep several and edit the one that is not read.
+    let source = agent.source.as_ref().map_or_else(
+        || format!("the default agent: no {AGENT_FILE} here"),
+        |source| source.display().to_string(),
+    );
+    // What a person reaches it through besides this terminal: a page, if one is turned on.
+    let fronts = harness.fronts().names();
+    let fronts = if fronts.is_empty() {
+        "none (the terminal alone)".to_owned()
+    } else {
+        fronts.join(", ")
+    };
     let mut lines = vec![
+        format!("agent     {source}"),
         format!("model     {} from {}", file.model, file.provider),
         format!("log       {}", agent.log.display()),
         format!("providers {}", harness.providers().names().join(", ")),
         format!("kernels   {}", harness.kernels().names().join(", ")),
         format!("gates     {}", harness.gates().names().join(", ")),
         format!("points    {}", harness.gates().points().join(", ")),
+        format!("fronts    {fronts}"),
     ];
     // What extensions added to the loop, if any did.
     let steps = harness.operations().names();
@@ -637,11 +665,22 @@ fn typed<'a>(line: &'a str, harness: &Harness, session: &SessionId, out: &Out) -
     }
 }
 
+/// Open what a person reaches the agent through besides this terminal, now that runs are
+/// about to be driven, and say where each is. What is said is not recorded: an address may
+/// be what lets someone in.
+fn open_fronts(harness: &Harness, out: &Out) {
+    let fronts = harness.fronts();
+    for front in fronts.names().iter().filter_map(|name| fronts.get(name)) {
+        let (Ok(line) | Err(line)) = front.open();
+        say(out, &line);
+    }
+}
+
 /// Talk to the agent until the input ends or `/exit`.
 async fn chat(
     harness: &Harness,
     mut session: SessionId,
-    input: &mut (dyn BufRead + Send),
+    input: &mut Lines,
     ends: &Shown<'_>,
 ) -> Result<ExitCode, Box<dyn Error>> {
     let out = ends.out;
@@ -655,15 +694,35 @@ async fn chat(
     if started {
         ends.end(&outcome.status);
     }
+    // What is typed on the agent's page, say, begins a run as what is typed here does.
+    let said = terminal::Said::listen(harness);
     loop {
         say_prompt(out);
-        let mut line = String::new();
-        if input.read_line(&mut line)? == 0 {
-            return Ok(ExitCode::SUCCESS);
-        }
+        let line = tokio::select! {
+            line = input.next() => Ok(line),
+            message = said.next() => Err(message),
+        };
+        let line = match line {
+            Ok(Some(line)) => line,
+            Ok(None) => break,
+            Err(message) => {
+                let within = if message.session == session {
+                    String::new()
+                } else {
+                    format!("[{}] ", message.session)
+                };
+                say(
+                    out,
+                    &format!("{within}{} (typed on {})", message.text, message.via),
+                );
+                let outcome = terminal::taken_on(harness, &message.session, input, out).await?;
+                ends.end(&outcome.status);
+                continue;
+            }
+        };
         match typed(line.trim(), harness, &session, out) {
             Typed::Nothing => {}
-            Typed::Exit => return Ok(ExitCode::SUCCESS),
+            Typed::Exit => break,
             Typed::Switch(name) => {
                 let next = SessionId::new(name);
                 if !harness.session_list().iter().any(|info| info.id == next) {
@@ -679,6 +738,8 @@ async fn chat(
             }
         }
     }
+    said.close(harness);
+    Ok(ExitCode::SUCCESS)
 }
 
 fn say_prompt(out: &Out) {

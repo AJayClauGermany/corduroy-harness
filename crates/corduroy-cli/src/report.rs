@@ -291,15 +291,34 @@ fn line(event: &Event, start: u64, before: u64) -> String {
     if let Some(cause) = event.cause {
         parts.push(format!("(after {cause})"));
     }
-    let length = event.payload.chars().count();
+    let payload = readable(event);
+    let length = payload.chars().count();
     if length > SHOWN {
-        let shown: String = event.payload.chars().take(SHOWN).collect();
+        let shown: String = payload.chars().take(SHOWN).collect();
         let cut = length - SHOWN;
         parts.push(format!("{shown}… (+{cut} characters, whole in the log)"));
     } else if length > 0 {
-        parts.push(event.payload.clone());
+        parts.push(payload);
     }
     parts.join(" ")
+}
+
+/// The payload of `event` as a person reads it: a `message` without the signature a
+/// model's thinking carries, which is long, says nothing to a reader, and would take the
+/// room the thinking itself is shown in.
+fn readable(event: &Event) -> String {
+    let unsigned = (event.topic == "message")
+        .then(|| payload(event))
+        .and_then(|mut message| {
+            let parts = message.get_mut("parts")?.as_array_mut()?;
+            let signed = parts
+                .iter_mut()
+                .filter_map(Value::as_object_mut)
+                .filter_map(|part| part.remove("signature"))
+                .count();
+            (signed > 0).then(|| message.to_string())
+        });
+    unsigned.unwrap_or_else(|| event.payload.clone())
 }
 
 /// The last `count` runs of `session` in `events` (the whole log, in order), as text: for
@@ -390,6 +409,45 @@ mod tests {
             .session(SessionId::new(session))
             .payload(payload);
         stream.emit(draft).unwrap();
+    }
+
+    #[test]
+    fn a_models_thinking_is_shown_without_its_signature() {
+        let stream = ticking();
+        let signed = format!(
+            r#"{{"role":"assistant","parts":[{{"type":"thinking","text":"hm","signature":"{}"}},{{"type":"text","text":"done"}}]}}"#,
+            "A".repeat(SHOWN * 3)
+        );
+        put(
+            &stream,
+            "main",
+            Source::User,
+            "message",
+            r#"{"role":"user","parts":[]}"#,
+        );
+        put(&stream, "main", Source::Agent, "message", &signed);
+        put(
+            &stream,
+            "main",
+            Source::Host,
+            "turn/end",
+            r#"{"status":"finished"}"#,
+        );
+
+        let said = report(&stream.events(), &SessionId::new("main"), 1);
+
+        // The thinking and the answer are there, whole; the signature is in the log alone.
+        assert!(
+            said.contains(r#"{"type":"thinking","text":"hm"}"#),
+            "{said}"
+        );
+        assert!(said.contains(r#"{"type":"text","text":"done"}"#), "{said}");
+        assert!(
+            !said.contains("AAAA") && !said.contains("signature"),
+            "{said}"
+        );
+        // A message that carries none is shown as it was stored.
+        assert!(said.contains(r#"{"role":"user","parts":[]}"#), "{said}");
     }
 
     #[test]

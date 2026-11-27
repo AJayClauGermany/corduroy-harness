@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- The page shows what a model and its tools wrote, which is not to be trusted: it loads
+     only the files beside it and reaches nothing else. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' file:; style-src 'self' file:; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<title>corduroy</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <a class="brand" href="#">corduroy</a>
+  <span id="build" class="quiet"></span>
+  <span class="grow"></span>
+  <span id="status" class="status" role="status">reading…</span>
+</header>
+<div id="asks" class="asks" role="alert" hidden></div>
+<div class="layout">
+  <nav id="nav" aria-label="Sessions and views"></nav>
+  <div class="column">
+    <main id="main"></main>
+    <div id="composer" class="composer" hidden></div>
+  </div>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

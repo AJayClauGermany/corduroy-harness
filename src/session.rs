@@ -1134,6 +1134,12 @@ fn note(call: &mut OpenCall, topic: &str, payload: &Value, output: Option<ToolOu
     }
 }
 
+/// Where the answer to the question a gate asked about `call` is kept, if one asked.
+fn answer_slot<'a>(state: &'a mut State, call: &str) -> Option<&'a mut Option<Answer>> {
+    let gated = state.calls.get_mut(call)?.gated.as_mut()?;
+    matches!(gated.verdict, Verdict::Ask(_)).then_some(&mut gated.answer)
+}
+
 /// Records a session's effects on the event stream and rebuilds the session from it.
 ///
 /// The effects of one step of the loop become one commit: they are stored together or not
@@ -1192,8 +1198,21 @@ impl Journal {
     ///
     /// Fails if the commit cannot be stored.
     pub fn record(&self, message: &Message) -> Result<EventId> {
+        self.record_from(message, None)
+    }
+
+    /// As [`record`](Self::record), saying which plugin the message was given through, if
+    /// it was not given to the host itself: the event's payload names it under `via`.
+    pub(crate) fn record_from(&self, message: &Message, via: Option<&str>) -> Result<EventId> {
         let mut batch = Batch::default();
         let position = self.draft_message(&mut batch, message);
+        if let (Some(via), Some(draft)) = (via, batch.drafts.get_mut(position)) {
+            let mut payload = encode(message);
+            if let Some(fields) = payload.as_object_mut() {
+                fields.insert("via".to_owned(), json!(via));
+            }
+            *draft = Draft::new(Source::User, MESSAGE).payload(payload.to_string());
+        }
         let ids = self.commit(batch)?;
         ids.get(position)
             .copied()
@@ -1379,10 +1398,22 @@ impl Journal {
         })
     }
 
-    /// Record a person's answer to the gate that asked about `call`. Returns `false`, and
-    /// records nothing, if no gate is waiting for an answer about `call`.
-    pub(crate) fn answer(&self, call: &str, answer: &Answer) -> Result<bool> {
-        if !self.waiting().iter().any(|ask| ask.call == call) {
+    /// Record a person's answer to the gate that asked about `call`, given through the
+    /// plugin `via` if it was not given to the host itself. Returns `false`, and records
+    /// nothing, if no gate is waiting for an answer about `call`.
+    ///
+    /// Two answers to one question may come at once, from a terminal and from a page. The
+    /// first takes it: the question is marked answered before the answer is stored, so the
+    /// second finds nothing waiting.
+    pub(crate) fn answer(&self, call: &str, answer: &Answer, via: Option<&str>) -> Result<bool> {
+        let taken = self.state(|state| match answer_slot(state, call) {
+            Some(slot @ None) => {
+                *slot = Some(answer.clone());
+                true
+            }
+            _ => false,
+        });
+        if !taken {
             return Ok(false);
         }
         let (draft, tool) = self.about_call(call, Source::User, GATE_ANSWER);
@@ -1390,17 +1421,15 @@ impl Journal {
             Answer::Allow => (true, ""),
             Answer::Deny(reason) => (false, reason.as_str()),
         };
-        let payload = json!({"id": call, "tool": tool, "allow": allow, "reason": reason});
-        self.events.emit(draft.payload(payload.to_string()))?;
-        self.state(|state| {
-            if let Some(gated) = state
-                .calls
-                .get_mut(call)
-                .and_then(|open| open.gated.as_mut())
-            {
-                gated.answer = Some(answer.clone());
-            }
-        });
+        let mut payload = json!({"id": call, "tool": tool, "allow": allow, "reason": reason});
+        if let (Some(via), Some(fields)) = (via, payload.as_object_mut()) {
+            fields.insert("via".to_owned(), json!(via));
+        }
+        if let Err(error) = self.events.emit(draft.payload(payload.to_string())) {
+            // Not stored, so not answered.
+            self.state(|state| answer_slot(state, call).map(Option::take));
+            return Err(error.into());
+        }
         Ok(true)
     }
 
@@ -1516,10 +1545,11 @@ impl Journal {
     }
 
     /// Record that a person asked the run to stop.
-    pub(crate) fn stop_asked(&self) -> Result<()> {
+    pub(crate) fn stop_asked(&self, via: Option<&str>) -> Result<()> {
+        let payload = via.map_or_else(|| json!({}), |via| json!({"via": via}));
         let draft = Draft::new(Source::User, STOP)
             .session(self.id.clone())
-            .payload("{}");
+            .payload(payload.to_string());
         self.events.emit(draft)?;
         Ok(())
     }

@@ -56,10 +56,11 @@ pub use corduroy_jsonl as jsonl;
 pub use corduroy_keychain as keychain;
 use corduroy_keychain::Keychain;
 pub use corduroy_mcp as mcp;
+pub use corduroy_page as page;
 pub use corduroy_providers as providers;
 pub use corduroy_shell as shell;
 pub use extension::{
-    Asked, Built, CHATGPT_SECRET, ENV_SECRET, Extensions, KEYCHAIN_SECRET, MCP, kernel_kind,
+    Asked, Built, CHATGPT_SECRET, ENV_SECRET, Extensions, KEYCHAIN_SECRET, MCP, PAGE, kernel_kind,
     secret_kind,
 };
 pub use places::{DATA_DIR, Places};

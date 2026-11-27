@@ -23,7 +23,9 @@ The conversation the model sees is rebuilt from these events alone.
      time                id  session source topic       cause         payload
 ```
 
-A step's events are one **commit**: stored together, or not at all.
+A step's events are one **commit**: stored together, or not at all. In the file a commit is
+one line, an array of its events. A line that is `[]` is a commit of nothing, which builds
+before this one wrote; it reads as nothing.
 
 ## The run
 
@@ -32,10 +34,10 @@ Source: the table in [`src/session.rs`](../../src/session.rs).
 | Topic | Source | Payload |
 | --- | --- | --- |
 | `session/start` | host | `{"parent", "task"}`, each only if there is one |
-| `message` | user, agent or environment | the message: `{"role", "parts"}` |
+| `message` | user, agent or environment | the message: `{"role", "parts"}`; with `"via"`, the plugin a person's message was given through (the page), where it was not typed at the terminal |
 | `tool/call` | agent | `{"id", "tool", "input"}`, caused by its `message` |
 | `gate/decision` | host | `{"point", "id", "tool", "verdict", "reason", "gate", "caller"}`, caused by its `tool/call` |
-| `gate/answer` | user | `{"id", "tool", "allow", "reason"}`: a person's answer to a gate that asked |
+| `gate/answer` | user | `{"id", "tool", "allow", "reason"}`: a person's answer to a gate that asked; with `"via"`, the plugin it was given through (the page), where it was not typed at the terminal |
 | `tool/start` | host | `{"id", "tool"}`: the tool is about to run |
 | `tool/result` | environment | `{"id", "tool", "ok", "output"}`, plus `"content"` when the result is not one block of text |
 | `tool/wait` | host | `{"id", "tool", "signal"}`: the call's result comes with that signal |
@@ -44,7 +46,7 @@ Source: the table in [`src/session.rs`](../../src/session.rs).
 | `usage` | agent | `{"model", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens", "stop"}`, each count only if the provider gave it; `stop` is why the model stopped (`finished`, `limit`: cut off at the most it may write, `tool_calls` or `refused`), if the provider said |
 | `compaction` | host | `{"summary", "keep_from", "by"}`: the messages before `keep_from` are summarised |
 | `run/restart` | host | `{"attempt"}`: an unfinished run was picked up again |
-| `run/stop` | user | `{}`: a person asked the run to stop |
+| `run/stop` | user | `{}`: a person asked the run to stop; `{"via"}` where they asked through a plugin (the page) |
 | `turn/end` | host | `{"status"}`: `finished`, `turn-limit`, `failed` (with `"reason"`), `stopped` or `yielded` |
 
 A run is **unfinished** from its first `message` to its `turn/end`. One that has no

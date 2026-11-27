@@ -6,7 +6,7 @@ native library, add a step to the loop or declare a decision point of its own. O
 write an [add-on](../tutorials/first-add-on.md); it needs no rebuild and is sandboxed.
 
 Extensions get into an agent by **kind**. The shipped command has the kinds `shell-kernel`,
-`powershell-kernel`, `mcp`, `env-secret`, `chatgpt-secret` and `http-client`. A new kind means a command of
+`powershell-kernel`, `mcp`, `page`, `env-secret`, `chatgpt-secret` and `http-client`. A new kind means a command of
 your own: the shipped command with more kinds, rebuilt. The agent file then turns it on.
 
 ## 1. Make a binary crate

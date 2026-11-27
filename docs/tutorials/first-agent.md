@@ -129,16 +129,19 @@ corduroy check
 ```
 
 ```text
+agent     /home/you/corduroy-tutorial/corduroy.toml
 model     claude-sonnet-5-5 from main
 log       /home/you/corduroy-tutorial/.corduroy/log.jsonl
 providers main
 kernels   shell
 gates     approval, inspect
 points    plugin/load, tool/call
+fronts    none (the terminal alone)
 tool      bash
 tool      delegate
 tool      edit
-tool      read (read-only)
+tool      find (read-only)
+tool      grep (read-only)
 …
 tool      write
 ```
@@ -233,6 +236,12 @@ came from in brackets, what caused it, its topic and its payload. The gate's dec
 stored before the tool could start, your answer is there with the time you gave it, and
 the conversation the model sees is rebuilt from these events alone. Nothing about a run lives
 anywhere else.
+
+The same record is a page. Open `.corduroy/viewer/index.html` in a browser: your prompt,
+each tool call with what `approval` asked and what you answered, and how long each part
+took. Leave it open and it follows the next run as it goes. To answer `approval` on the
+page, type prompts there and stop a run from it, turn on the `page` extension, two lines
+in your agent file: see [Watch a run in a browser](../how-to/watch-a-run-in-a-browser.md).
 
 ## 9. Talk to it
 

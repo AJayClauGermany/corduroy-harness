@@ -145,7 +145,7 @@ pub(super) fn change(
     named: Option<&str>,
     described: &Described,
     standard: &Standard,
-    console: &mut Console<'_>,
+    console: &mut Console,
 ) -> Done {
     let kept = those(described, |kind| standard.keep(kind).is_some());
     let name = chosen(named, &kept, ADD_KEPT)?;
@@ -204,7 +204,7 @@ pub(super) fn sign(
     named: Option<&str>,
     described: &Described,
     standard: &Standard,
-    console: &Console<'_>,
+    console: &Console,
 ) -> Done {
     let name = signed(named, described, standard)?;
     let SecretAsked { kind, config } = described.secret(&name)?;

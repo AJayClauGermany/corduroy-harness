@@ -1,8 +1,10 @@
 //! Gates deciding whether the model's tool calls run, and runs that wait for a person.
 //! No WebAssembly, network or LLM.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, mpsc};
+use std::thread;
+use std::time::Duration;
 
 use corduroy_harness::core::{
     EventStream, GATES, Gate, Gates, Pattern, Plugin, SessionId, TOOL_CALL, TOOLS, ToolSpec, Tools,
@@ -10,7 +12,7 @@ use corduroy_harness::core::{
 };
 use corduroy_harness::core::{Message, ToolCall};
 use corduroy_harness::scripted::{ScriptedProvider, call, say};
-use corduroy_harness::{Answer, Harness, HarnessError, MAIN, Status};
+use corduroy_harness::{Answer, FRONTS, Harness, HarnessError, MAIN, OUTSIDE, Outside, Status};
 use corduroy_jsonl as jsonl;
 use corduroy_test_support::scratch;
 use serde_json::{Value, json};
@@ -185,6 +187,243 @@ async fn an_ask_waits_for_a_person_and_runs_once_allowed() {
     assert_eq!(payloads(&harness, "gate/answer")[0]["allow"], true);
     // The gate was asked once, not again after the answer.
     assert_eq!(payloads(&harness, "gate/decision").len(), 1);
+}
+
+#[tokio::test]
+async fn an_answer_recorded_from_outside_is_taken_on_by_the_host() {
+    let runs = Arc::new(AtomicUsize::new(0));
+    let replies = [call("c1", "poke", &json!({})), say("poked")];
+    let harness = harness(EventStream::new(), replies, &runs).unwrap();
+    let main = SessionId::new(MAIN);
+    // What an extension is handed, by name.
+    let outside = harness.app().service::<Outside>(OUTSIDE).unwrap();
+    harness.run("poke it").await.unwrap();
+    assert_eq!(outside.asks().len(), 1);
+    assert_eq!(outside.asks()[0].call, "c1");
+
+    outside.answer("page", &main, "c1", &Answer::Allow).unwrap();
+
+    // Recorded, with who it came through, and nothing run: that is the host's to do.
+    assert_eq!(runs.load(Ordering::SeqCst), 0);
+    let recorded = &payloads(&harness, "gate/answer")[0];
+    assert_eq!(
+        (&recorded["allow"], &recorded["via"]),
+        (&json!(true), &json!("page"))
+    );
+    assert_eq!(outside.asks(), []);
+    // The question is answered once: a second answer, from anywhere, finds nothing waiting.
+    let again = outside.answer("page", &main, "c1", &Answer::Deny("no".into()));
+    assert!(matches!(again, Err(HarnessError::NotAsked { .. })));
+    let typed = harness.answer(&main, "c1", Answer::Allow).await;
+    assert!(matches!(typed, Err(HarnessError::NotAsked { .. })));
+
+    let outcome = harness.take_on(&main).await.unwrap();
+
+    assert_eq!(
+        outcome.status,
+        Status::Finished {
+            answer: "poked".into()
+        }
+    );
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+    assert_eq!(payloads(&harness, "gate/answer").len(), 1);
+    assert_eq!(payloads(&harness, "run/restart"), Vec::<Value>::new());
+    // Taking on a run that has ended runs nothing more.
+    let asked = payloads(&harness, "model/request").len();
+    let ended = harness.take_on(&main).await.unwrap();
+    assert_eq!(ended.status, outcome.status);
+    assert_eq!(payloads(&harness, "model/request").len(), asked);
+}
+
+#[tokio::test]
+async fn a_run_is_not_taken_on_while_another_of_its_questions_waits() {
+    let runs = Arc::new(AtomicUsize::new(0));
+    let both = Message::assistant()
+        .call(ToolCall::new("c1", "poke", "{}"))
+        .call(ToolCall::new("c2", "poke", "{}"));
+    let harness = harness(EventStream::new(), [both, say("poked twice")], &runs).unwrap();
+    let main = SessionId::new(MAIN);
+    let outside = harness.app().service::<Outside>(OUTSIDE).unwrap();
+    harness.run("poke it twice").await.unwrap();
+
+    outside
+        .answer("page", &main, "c2", &Answer::Deny("not that one".into()))
+        .unwrap();
+    let waiting = harness.take_on(&main).await.unwrap();
+
+    let Status::Waiting { asks, .. } = &waiting.status else {
+        panic!("expected to wait, got {:?}", waiting.status);
+    };
+    assert_eq!(asks.len(), 1);
+    assert_eq!(asks[0].call, "c1");
+    assert_eq!(runs.load(Ordering::SeqCst), 0);
+    // The other answered at the terminal: the run goes on, one call made and one refused.
+    let outcome = harness.answer(&main, "c1", Answer::Allow).await.unwrap();
+    assert!(matches!(outcome.status, Status::Finished { .. }));
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_message_said_from_outside_begins_a_run_the_host_takes_on() {
+    let runs = Arc::new(AtomicUsize::new(0));
+    let replies = [say("hello"), call("c1", "poke", &json!({})), say("poked")];
+    let harness = harness(EventStream::new(), replies, &runs).unwrap();
+    let main = SessionId::new(MAIN);
+    let outside = harness.app().service::<Outside>(OUTSIDE).unwrap();
+
+    // A host that runs one prompt and leaves would record it and run it never.
+    let unheard = outside.say("page", &main, "say hello").unwrap_err();
+    assert!(unheard.to_string().contains("nobody is here"), "{unheard}");
+    harness.takes_messages(true);
+    assert!(outside.say("page", &main, "  ").is_err());
+    assert!(
+        outside
+            .say("page", &SessionId::new("nowhere"), "hi")
+            .is_err()
+    );
+    assert_eq!(payloads(&harness, "message"), Vec::<Value>::new());
+
+    outside.say("page", &main, "say hello").unwrap();
+
+    // Recorded as the person's, with what it came through, and nothing asked of the model.
+    let said = &payloads(&harness, "message")[0];
+    assert_eq!(
+        (&said["role"], &said["via"]),
+        (&json!("user"), &json!("page"))
+    );
+    assert_eq!(payloads(&harness, "model/request"), Vec::<Value>::new());
+    // A run is under way from that moment: a second message has to wait for its end.
+    let busy = outside.say("page", &main, "and again");
+    assert!(matches!(busy, Err(HarnessError::Unfinished(_))), "{busy:?}");
+
+    let outcome = harness.take_on(&main).await.unwrap();
+
+    assert_eq!(
+        outcome.status,
+        Status::Finished {
+            answer: "hello".into()
+        }
+    );
+    assert_eq!(payloads(&harness, "run/restart"), Vec::<Value>::new());
+    // While a question waits, the session takes no message either.
+    outside.say("page", &main, "poke it").unwrap();
+    harness.take_on(&main).await.unwrap();
+    let waiting = outside.say("page", &main, "hurry");
+    assert!(
+        matches!(waiting, Err(HarnessError::Waiting(_))),
+        "{waiting:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_stop_asked_from_outside_ends_a_run_that_waits() {
+    let runs = Arc::new(AtomicUsize::new(0));
+    let replies = [call("c1", "poke", &json!({})), say("after the stop")];
+    let harness = harness(EventStream::new(), replies, &runs).unwrap();
+    let main = SessionId::new(MAIN);
+    let outside = harness.app().service::<Outside>(OUTSIDE).unwrap();
+    assert!(!outside.stop("page", &main).unwrap());
+    harness.run("poke it").await.unwrap();
+
+    assert!(outside.stop("page", &main).unwrap());
+
+    // Ended as stopped, by the record alone: the call never ran, and nothing waits.
+    assert_eq!(payloads(&harness, "run/stop")[0]["via"], json!("page"));
+    assert_eq!(
+        payloads(&harness, "turn/end")[0]["status"],
+        json!("stopped")
+    );
+    assert_eq!(runs.load(Ordering::SeqCst), 0);
+    assert_eq!(outside.asks(), []);
+    let outcome = harness.take_on(&main).await.unwrap();
+    assert_eq!(outcome.status, Status::Stopped);
+    assert!(!outside.stop("page", &main).unwrap());
+    // The session takes a new prompt.
+    let next = harness.run("and now?").await.unwrap();
+    assert!(matches!(next.status, Status::Finished { .. }));
+}
+
+/// Run `work` to its end on a runtime of this thread's own.
+fn block<T>(work: impl Future<Output = T>) -> std::io::Result<T> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    Ok(runtime.block_on(work))
+}
+
+/// A host that hears `topic` and takes the main session's run on from another thread, at
+/// once, while whatever recorded the event is held up inside the listener: the worst a
+/// host can time it. Returns where the status it ends with arrives.
+fn hasty_host(harness: &Arc<Harness>, topic: &str) -> mpsc::Receiver<Status> {
+    let (done, status) = mpsc::channel();
+    let (host, woken) = (Arc::clone(harness), AtomicUsize::new(0));
+    harness.events().subscribe(topic, move |_| {
+        if woken.fetch_add(1, Ordering::SeqCst) > 0 {
+            return;
+        }
+        let (host, done) = (Arc::clone(&host), done.clone());
+        thread::spawn(move || {
+            let taken = block(host.take_on(&SessionId::new(MAIN)));
+            if let Ok(Ok(outcome)) = taken {
+                drop(done.send(outcome.status));
+            }
+        });
+        // Long enough for that thread to have read the session, were it not made to wait.
+        thread::sleep(Duration::from_millis(200));
+    });
+    status
+}
+
+#[test]
+fn a_host_woken_while_a_message_is_being_recorded_still_runs_it() {
+    let runs = Arc::new(AtomicUsize::new(0));
+    let harness = Arc::new(harness(EventStream::new(), [say("hello")], &runs).unwrap());
+    let outside = harness.app().service::<Outside>(OUTSIDE).unwrap();
+    harness.takes_messages(true);
+    let taken = hasty_host(&harness, "message");
+
+    outside
+        .say("page", &SessionId::new(MAIN), "say hello")
+        .unwrap();
+
+    // It waited for the message to be recorded whole, and so found a run to take on.
+    let status = taken.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(
+        status,
+        Status::Finished {
+            answer: "hello".into()
+        }
+    );
+}
+
+#[test]
+fn a_host_woken_while_a_stop_is_being_recorded_does_not_run_what_was_stopped() {
+    let runs = Arc::new(AtomicUsize::new(0));
+    let replies = [call("c1", "poke", &json!({})), say("never asked for")];
+    let harness = Arc::new(harness(EventStream::new(), replies, &runs).unwrap());
+    let outside = harness.app().service::<Outside>(OUTSIDE).unwrap();
+    block(harness.run("poke it")).unwrap().unwrap();
+    let taken = hasty_host(&harness, "turn/end");
+
+    assert!(outside.stop("page", &SessionId::new(MAIN)).unwrap());
+
+    // It waited for the run to be ended whole, and so found nothing to drive: the model
+    // was asked the once, before the stop.
+    let status = taken.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(status, Status::Stopped);
+    assert_eq!(payloads(&harness, "model/request").len(), 1);
+    assert_eq!(runs.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn what_acts_from_outside_is_out_of_reach_of_add_ons() {
+    let runs = Arc::new(AtomicUsize::new(0));
+    let harness = harness(EventStream::new(), [], &runs).unwrap();
+    // An add-on reaches services through the `Services` registry alone, and neither is
+    // there: a gate's question is the person's to answer.
+    assert!(harness.services().get(OUTSIDE).is_none());
+    assert!(harness.services().get(FRONTS).is_none());
+    assert_eq!(harness.fronts().names(), Vec::<String>::new());
 }
 
 #[tokio::test]
