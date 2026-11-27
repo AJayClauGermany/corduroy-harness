@@ -166,6 +166,9 @@ timeout_seconds = 300
 
 The server answers to any model name. `scripts/local-model.sh stop` stops it.
 
+The script knows a few other small models by name (`scripts/local-model.sh models`):
+`CORDUROY_LOCAL_MODEL=qwen3-1.7b scripts/local-model.sh start` serves that one instead.
+
 A model served on this machine reports nothing about itself. State what it holds, under the
 name you gave as `model`, so that `compact` condenses a long conversation before the context
 fills (it starts at three quarters of it):

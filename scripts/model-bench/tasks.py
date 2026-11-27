@@ -5,6 +5,12 @@ Tier 1  one ability each: does the model reach every part of the agent?
 Tier 2  gates, grants and what the harness must hold whatever the model does
 Tier 3  being driven: interrupted, stopped, continued, limited
 Tier 4  real work, as far as the model can be pushed
+Tier 5  past what tier 4 asks, to find where it stops
+Tier 6  where the shell and the tools themselves get awkward, and larger programs
+
+Tiers 1, 4, 5 and 6 are the ladder (`LADDER`): each asks more of the model than the one
+before, and how far up a model gets is what one model is compared with another by. Tiers 0,
+2 and 3 ask about the harness, and should hold whatever the model is.
 
 A task takes a `Trial` (bench.py), sets up, drives, and says what it `expect`s. It checks
 outcomes, never phrasing, except where the outcome *is* what the model says (it must not
@@ -27,6 +33,17 @@ import subprocess
 import time
 
 TASKS: list[dict] = []
+
+TIERS = {
+    0: "the command itself",
+    1: "one ability each",
+    2: "gates and grants",
+    3: "being driven",
+    4: "real work",
+    5: "past that",
+    6: "awkward tools, larger programs",
+}
+LADDER = (1, 4, 5, 6)
 
 
 def task(tier: int, about: str):
@@ -152,7 +169,13 @@ def bash(t):
     content = t.token(64)
     t.write("data.txt", content)
     digest = hashlib.sha256(content.encode()).hexdigest()
-    finished(t, t.run("What is the SHA-256 of data.txt? Use sha256sum and give me the full hash."))
+    finished(
+        t,
+        t.run(
+            "What is the SHA-256 of data.txt? Use sha256sum (or `shasum -a 256`, where there "
+            "is no sha256sum) and give me the full hash."
+        ),
+    )
     t.expect(digest in t.answer(), f"the answer lacks the hash: {t.answer()[:200]!r}")
     t.expect(t.used("bash"), "bash never ran successfully")
 

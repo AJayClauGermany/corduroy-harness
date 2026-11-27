@@ -2,19 +2,22 @@
 """Drive `corduroy` from outside, as another harness would, through a list of tasks against a
 real (small, local) model, several times each, and write down what happened.
 
+    scripts/model-bench/run.sh --models all                         # every known model, unattended
     scripts/local-model.sh start
     cargo build --release -p corduroy-cli && cargo plugins
-    sudo python3 scripts/model-bench/bench.py --trials 3            # everything
+    sudo python3 scripts/model-bench/bench.py --trials 3            # everything, one model
     sudo python3 scripts/model-bench/bench.py --only read,edit      # some tasks
     python3 scripts/model-bench/bench.py --summary RESULTS.jsonl    # the table again
+    python3 scripts/model-bench/bench.py --compare OUT              # the models side by side
 
 The tasks are in `tasks.py`. Each one sets a workspace up, runs the command (`run`, `continue`,
 `stop`, a signal) and then checks the outcome from outside: files, exit codes, the event log.
 
 **The agent must not be able to read its own exam.** Its shell kernel is not a sandbox, so run
-as root this drops the agent to an unprivileged user (`--user`, made if missing) and keeps
-this directory, every expected value and every hidden test where that user cannot read them.
-Run as anyone else there is no such wall, and the summary says so.
+as root on Linux this drops the agent to an unprivileged user (`--user`, made if missing) and
+keeps this directory, every expected value and every hidden test where that user cannot read
+them. On macOS the agent runs under `sandbox-exec` with those places denied, which needs no
+root. Where neither is to be had there is no such wall, and the summary says so.
 
 Nothing here is a test of the repository (`cargo t` never runs it): it needs a model and
 takes hours. Standard library only.
@@ -25,6 +28,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import pwd
 import re
 import secrets
@@ -34,11 +38,15 @@ import subprocess
 import sys
 import time
 import traceback
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 DEFAULT_URL = "http://127.0.0.1:8080/v1/chat/completions"
+LOCAL_MODEL = ROOT / "scripts/local-model.sh"
+MACOS = platform.system() == "Darwin"
 
 # What the default agent has beyond the local-model example: searching without a shell, and
 # the date. `corduroy init` writes both.
@@ -68,7 +76,12 @@ class Config:
         self.home = None
         self.binary = Path(args.binary).resolve()
         self.plugins = Path(args.plugins).resolve()
-        if os.geteuid() == 0:
+        self.model: str = args.label
+        self.platform = f"{platform.system()} {platform.machine()}"
+        # macOS: no user to drop to without an administrator's tools, but a sandbox profile
+        # that denies the same places, for which nobody has to be root.
+        self.sandbox = MACOS and shutil.which("sandbox-exec") is not None
+        if os.geteuid() == 0 and not MACOS:
             try:
                 entry = pwd.getpwnam(args.user)
             except KeyError:
@@ -97,6 +110,21 @@ class Config:
             os.chmod(HERE, 0o700)
             for path in [self.out, stage, stage / "plugins"]:
                 os.chmod(path, 0o755)
+
+    @property
+    def isolated(self) -> bool:
+        return bool(self.user) or self.sandbox
+
+    def wall(self, *hidden: Path) -> list[str]:
+        """What goes before a command on macOS so that it cannot read the checks, the results
+        or the `hidden` directories. Empty elsewhere, where `demote` does it."""
+        if not self.sandbox:
+            return []
+        denied = " ".join(
+            f'(subpath "{path}")' for path in (HERE, self.out / "private", *hidden)
+        )
+        profile = f"(version 1)(allow default)(deny file-read* file-write* {denied})"
+        return ["sandbox-exec", "-p", profile]
 
     def demote(self) -> dict:
         """Arguments for `subprocess` that run a child as the agent's user."""
@@ -186,17 +214,24 @@ class Trial:
             self.agent_text = self.agent_text.replace(old, new)
         self.agent_text += append
 
-    def sh(self, command: str, cwd: Path | None = None, timeout: int = 60) -> Ran:
+    def sh(
+        self, command: str, cwd: Path | None = None, timeout: int = 60, private: bool = False
+    ) -> Ran:
         """A command in the workspace, as the agent's user (for setting up, and for running
         what the model wrote: never as root)."""
-        return self._spawn(["sh", "-c", command], cwd or self.ws, None, timeout, {})
+        return self._spawn(["sh", "-c", command], cwd or self.ws, None, timeout, {}, private)
+
+    def walled(self, argv: list[str], private: bool = False) -> list[str]:
+        """`argv` behind the macOS wall; the trial's own private directory is behind it too
+        unless `private` says the command is a check that runs there."""
+        return self.config.wall(*([] if private else [self.private])) + argv
 
     # -- driving ------------------------------------------------------------------------
 
-    def _spawn(self, argv, cwd, stdin, timeout, env) -> Ran:
+    def _spawn(self, argv, cwd, stdin, timeout, env, private=False) -> Ran:
         started = time.monotonic()
         process = subprocess.Popen(
-            argv,
+            self.walled(argv, private),
             cwd=cwd,
             stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -259,7 +294,7 @@ class Trial:
     def start(self, prompt: str, session: str = "main", env=None) -> subprocess.Popen:
         """Start a run and return at once, for the tasks that interrupt it."""
         return subprocess.Popen(
-            self.argv("run", prompt, session=session),
+            self.walled(self.argv("run", prompt, session=session)),
             cwd=self.ws,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -354,7 +389,7 @@ class Trial:
             os.chmod(self.private, 0o711)
             subprocess.run(["chown", "-R", f"{self.config.uid}:{self.config.gid}", copy], check=True)
         try:
-            return self.sh(command, cwd=copy, timeout=timeout)
+            return self.sh(command, cwd=copy, timeout=timeout, private=True)
         finally:
             os.chmod(self.private, 0o700)
 
@@ -387,6 +422,8 @@ class Trial:
             "task": task["name"],
             "tier": task["tier"],
             "trial": number,
+            "model": self.config.model,
+            "platform": self.config.platform,
             "passed": not self.failures and not crashed,
             "failures": self.failures + ([f"the bench itself failed: {crashed}"] if crashed else []),
             "notes": self.notes,
@@ -500,6 +537,182 @@ def summarize(path: Path, isolated: bool | None = None) -> str:
     return "\n".join(lines)
 
 
+def read_results(path: Path) -> list[dict]:
+    try:
+        return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    except OSError:
+        return []
+
+
+def compare(out: Path, tiers: dict[int, str], ladder: tuple[int, ...]) -> str:
+    """The models under `out` side by side: for each tier, the trials each passed, and how
+    far up the ladder each got."""
+    models = {
+        path.parent.parent.name: read_results(path)
+        for path in sorted(out.glob("*/private/results.jsonl"))
+    }
+    models = {name: records for name, records in models.items() if records}
+    if not models:
+        return f"no results under {out}"
+    lines = []
+    platforms = sorted({record.get("platform", "?") for rs in models.values() for record in rs})
+    lines.append(f"Platform: {', '.join(platforms)}.")
+    if any(not record.get("isolated") for records in models.values() for record in records):
+        lines.append("NOT ISOLATED in at least one trial: an agent could read the checks.")
+    lines.append("")
+    lines.append("| Tier | " + " | ".join(models) + " |")
+    lines.append("| --- |" + " --- |" * len(models))
+    reached: dict[str, int | None] = dict.fromkeys(models)
+    for tier in sorted(tiers):
+        cells = []
+        for name, records in models.items():
+            mine = [record for record in records if record["tier"] == tier]
+            if not mine:
+                cells.append("not tried")
+                continue
+            passed = sum(record["passed"] for record in mine)
+            by_task: dict[str, list[bool]] = {}
+            for record in mine:
+                by_task.setdefault(record["task"], []).append(record["passed"])
+            always = sum(all(results) for results in by_task.values())
+            cells.append(f"{passed}/{len(mine)} trials, {always}/{len(by_task)} tasks every time")
+            if tier in ladder and passed * 2 >= len(mine):
+                reached[name] = tier
+        mark = "" if tier in ladder else " (the harness)"
+        lines.append(f"| {tier}: {tiers[tier]}{mark} | " + " | ".join(cells) + " |")
+    lines.append(
+        "| **Highest ladder tier with half its trials passed** | "
+        + " | ".join("none" if tier is None else str(tier) for tier in reached.values())
+        + " |"
+    )
+    seconds = {name: sum(record["seconds"] for record in rs) for name, rs in models.items()}
+    lines.append(
+        "| Hours spent | " + " | ".join(f"{value / 3600:.1f}" for value in seconds.values()) + " |"
+    )
+    return "\n".join(lines)
+
+
+def local_model(action: str, model: str, check: bool = True) -> str:
+    """Run `scripts/local-model.sh` for one of the models it knows by name."""
+    done = subprocess.run(
+        [str(LOCAL_MODEL), action],
+        env={**os.environ, "CORDUROY_LOCAL_MODEL": model},
+        stdout=subprocess.PIPE,
+        # Stopping what may not be running is said to nobody.
+        stderr=None if check else subprocess.DEVNULL,
+        text=True,
+        check=check,
+    )
+    return done.stdout.strip()
+
+
+def healthy(url: str) -> bool:
+    """Whether the model's server answers (llama-server's `/health`; any answer from another)."""
+    base = url.split("/v1/")[0]
+    try:
+        with urllib.request.urlopen(base + "/health", timeout=5):  # noqa: S310 (loopback)
+            return True
+    except urllib.error.HTTPError as error:
+        return error.code != 503  # 503 is llama-server still loading its model
+    except OSError:
+        return False
+
+
+def run_model(args, chosen: list[dict], tasks, model: str | None) -> Path:
+    """Every chosen task, `--trials` times, against one model; returns the results file.
+    With `model`, the bench serves it itself and results go under `<out>/<model>`."""
+    if model:
+        args.label = model
+        args.out = str(Path(args.base) / model)
+        local_model("stop", model, check=False)
+        local_model("start", model)
+        args.url = local_model("url", model)
+    config = Config(args)
+    config.out.mkdir(parents=True, exist_ok=True)
+    config.stage()
+    results = Path(args.results) if args.results else config.out / "private" / "results.jsonl"
+    results.parent.mkdir(parents=True, exist_ok=True)
+    if config.user and not args.results:
+        os.chmod(results.parent, 0o700)
+    if config.isolated:
+        probe = subprocess.run(
+            [*config.wall(), "ls", str(HERE)], capture_output=True, check=False, **config.demote()
+        )
+        if probe.returncode == 0 and config.user:
+            raise SystemExit(f"{config.user} can read {HERE}: the checks are not hidden")
+        if probe.returncode == 0:
+            sys.stderr.write("sandbox-exec does not hide the checks: running without a wall\n")
+            config.sandbox = False
+    if not config.isolated:
+        sys.stderr.write("no wall: the agent runs as you and could read the checks\n")
+    if args.fresh and results.exists():
+        results.unlink()
+    done = {(record["task"], record["trial"]) for record in read_results(results)}
+
+    # Trial by trial, so that a run cut short has tried everything once. Climbing goes tier
+    # by tier instead, and stops going up the ladder at the first tier the model mostly fails.
+    schedule = [(task, number) for number in range(1, args.trials + 1) for task in chosen]
+    if args.climb is not None:
+        schedule.sort(key=lambda entry: entry[0]["tier"])
+    stopped_at = None
+    for task, number in schedule:
+        if (task["name"], number) in done:
+            continue
+        if stopped_at is not None and task["tier"] in tasks.LADDER and task["tier"] > stopped_at:
+            continue
+        if args.climb is not None and stopped_at is None and task["tier"] in tasks.LADDER:
+            below = [
+                tier for tier in tasks.LADDER
+                if tier < task["tier"] and any(t["tier"] == tier for t in chosen)
+            ]
+            if below:
+                mine = [r for r in read_results(results) if r["tier"] == below[-1]]
+                rate = sum(r["passed"] for r in mine) / max(len(mine), 1)
+                if rate < args.climb:
+                    stopped_at = below[-1]
+                    sys.stdout.write(
+                        f"{config.model}: {rate:.0%} of tier {stopped_at} passed, under "
+                        f"{args.climb:.0%}: not climbing further\n"
+                    )
+                    continue
+        if model and not healthy(config.url):
+            sys.stdout.write(f"{model}: the server is not answering; starting it again\n")
+            local_model("stop", model, check=False)
+            local_model("start", model, check=False)
+        trial = Trial(config, task["name"], number)
+        started = time.monotonic()
+        crashed = None
+        try:
+            task["run"](trial)
+        except Exception:  # noqa: BLE001 (a task that breaks is a result, not a crash)
+            crashed = traceback.format_exc(limit=4)
+        record = trial.record(task, number, time.monotonic() - started, crashed)
+        record["isolated"] = config.isolated
+        if config.user:
+            # A later trial must not find this one's attempt.
+            os.chown(trial.dir, 0, 0)
+            os.chmod(trial.dir, 0o700)
+        elif config.sandbox:
+            kept = config.out / "private" / "trials" / task["name"] / str(number)
+            shutil.rmtree(kept, ignore_errors=True)
+            kept.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(trial.dir), str(kept))
+        with results.open("a") as file:
+            file.write(json.dumps(record) + "\n")
+        mark = "PASS" if record["passed"] else "FAIL"
+        sys.stdout.write(
+            f"{time.strftime('%H:%M')} {config.model} [{number}/{args.trials}] {mark} "
+            f"{task['name']:<26} {record['seconds']:>6.0f}s"
+            f" {record['model_requests']:>2} requests  {'; '.join(record['failures'])[:160]}\n"
+        )
+        sys.stdout.flush()
+    if model:
+        local_model("stop", model, check=False)
+    sys.stdout.write(f"\n## {config.model}\n\n" + summarize(results, config.isolated) + "\n\n")
+    sys.stdout.flush()
+    return results
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--trials", type=int, default=3)
@@ -507,6 +720,21 @@ def main() -> int:
     parser.add_argument("--tier", help="tiers to run, separated by commas")
     parser.add_argument("--list", action="store_true", help="list the tasks and stop")
     parser.add_argument("--summary", help="print the table for a results file and stop")
+    parser.add_argument("--compare", help="print the models under this directory side by side and stop")
+    parser.add_argument(
+        "--models",
+        help="models `scripts/local-model.sh` knows, separated by commas, or `all`: each is "
+        "served in turn and its results go under <out>/<model>",
+    )
+    parser.add_argument("--label", default="model", help="what to call the model in the records, without --models")
+    parser.add_argument(
+        "--climb",
+        type=float,
+        metavar="RATE",
+        help="go tier by tier, and stop going up the ladder after a tier where less than "
+        "this share of trials passed (0.25, say): the tiers above are not tried",
+    )
+    parser.add_argument("--fresh", action="store_true", help="forget earlier results instead of going on from them")
     parser.add_argument("--url", default=os.environ.get("CORDUROY_LOCAL_MODEL_URL", DEFAULT_URL))
     parser.add_argument("--out", default="/var/tmp/corduroy-bench")
     parser.add_argument("--results", help="the results file (default: <out>/private/results.jsonl)")
@@ -529,6 +757,9 @@ def main() -> int:
     sys.path.insert(0, str(HERE))
     import tasks  # noqa: PLC0415 (after the path is set)
 
+    if args.compare:
+        sys.stdout.write(compare(Path(args.compare), tasks.TIERS, tasks.LADDER) + "\n")
+        return 0
     chosen = tasks.TASKS
     if args.only:
         names = args.only.split(",")
@@ -543,47 +774,26 @@ def main() -> int:
             sys.stdout.write(f"{task['tier']}  {task['name']:<26} {task['about']}\n")
         return 0
 
-    config = Config(args)
-    config.out.mkdir(parents=True, exist_ok=True)
-    config.stage()
-    results = Path(args.results) if args.results else config.out / "private" / "results.jsonl"
-    results.parent.mkdir(parents=True, exist_ok=True)
-    if config.user and not args.results:
-        os.chmod(results.parent, 0o700)
-    if config.user:
-        probe = subprocess.run(
-            ["ls", str(HERE)], capture_output=True, check=False, **config.demote()
-        )
-        if probe.returncode == 0:
-            sys.stderr.write(f"{config.user} can read {HERE}: the checks are not hidden\n")
-            return 1
-    else:
-        sys.stderr.write("not root: the agent runs as you and could read the checks\n")
-
-    for number in range(1, args.trials + 1):
-        for task in chosen:
-            trial = Trial(config, task["name"], number)
-            started = time.monotonic()
-            crashed = None
-            try:
-                task["run"](trial)
-            except Exception:  # noqa: BLE001 (a task that breaks is a result, not a crash)
-                crashed = traceback.format_exc(limit=4)
-            record = trial.record(task, number, time.monotonic() - started, crashed)
-            record["isolated"] = bool(config.user)
-            if config.user:
-                # A later trial must not find this one's attempt.
-                os.chown(trial.dir, 0, 0)
-                os.chmod(trial.dir, 0o700)
-            with results.open("a") as file:
-                file.write(json.dumps(record) + "\n")
-            mark = "PASS" if record["passed"] else "FAIL"
-            sys.stdout.write(
-                f"[{number}/{args.trials}] {mark} {task['name']:<26} {record['seconds']:>6.0f}s"
-                f" {record['model_requests']:>2} requests  {'; '.join(record['failures'])[:160]}\n"
-            )
-            sys.stdout.flush()
-    sys.stdout.write("\n" + summarize(results, bool(config.user)) + "\n")
+    if not args.models:
+        run_model(args, chosen, tasks, None)
+        return 0
+    known = [line.split()[0] for line in local_model("models", "lfm3-1.7b").splitlines()]
+    models = known if args.models == "all" else args.models.split(",")
+    unknown = [model for model in models if model not in known]
+    if unknown:
+        parser.error(f"no such model: {', '.join(unknown)} (known: {', '.join(known)})")
+    if args.results:
+        parser.error("--results is one file; with --models each model has its own under --out")
+    args.base = str(Path(args.out).resolve())
+    for model in models:
+        try:
+            run_model(args, chosen, tasks, model)
+        except (subprocess.CalledProcessError, OSError) as error:
+            # One model that cannot be fetched or served must not cost the others their turn.
+            sys.stdout.write(f"{model}: not run: {error}\n")
+    table = compare(Path(args.base), tasks.TIERS, tasks.LADDER)
+    (Path(args.base) / "summary.md").write_text(table + "\n")
+    sys.stdout.write(table + "\n")
     return 0
 
 

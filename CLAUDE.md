@@ -53,7 +53,7 @@ contracts must not break ("What is stable").
 | `cargo lint` | Strictest clippy on the host workspace, `-D warnings`. Must be clean before finishing. |
 | `cargo fmt --all` | Format. `cargo fmtc` checks without writing. |
 | `cargo corduroy` | Run the `corduroy` command from this tree (`cargo corduroy check`, `cargo corduroy run <prompt>`; the alias already ends in `--`). Needs `cargo plugins` first. |
-| `scripts/local-model.sh start` | Serve a small model (LFM3 1.7B, 4-bit) on `127.0.0.1:8080` as an OpenAI-compatible endpoint: builds llama.cpp's `llama-server` and fetches the model on first use (~4 min), both pinned by SHA-256. `stop` stops it. |
+| `scripts/local-model.sh start` | Serve a small model (LFM3 1.7B, 4-bit; `CORDUROY_LOCAL_MODEL` names another, `models` lists them) on `127.0.0.1:8080` as an OpenAI-compatible endpoint: builds llama.cpp's `llama-server` and fetches the model on first use (~4 min), both pinned by SHA-256. `stop` stops it. |
 | `cargo eval` | The evals: the agent in `examples/local-model/` doing small real tasks against that model, checked by outcome. Minutes, not seconds; needs `cargo plugins` and the server. |
 | `cargo demo` | Run a scripted agent through both plugins and print the event stream |
 | `scripts/check.sh` | fmt + clippy + plugins + nextest + doctests + docs, host and plugins: exactly what CI runs |
