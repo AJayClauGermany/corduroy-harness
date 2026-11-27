@@ -2523,12 +2523,14 @@ the step it waits on is done.
     workspace holds.
 15. How [the plugin world grows](#how-the-plugin-world-grows). *Done:* a check of the
     world's version when an add-on is loaded, with a message naming the version it was
-    built for, the host's and what is missing. *Decided, not built:* each capability's
+    built for, the host's and what is missing; a
+    [reference page](reference/script-host.md) for the script host's `host` object.
+    *Decided, not built:* each capability's
     sentence read again before the freeze; the interfaces already known to be wanted (progress from
     a running tool, a tool call that waits for a signal) in the 1.0 world; the cases and
     open tails the shared types need, since none can be added within 1.x; a prefix for the
-    service names the harness defines; a reference page for the script host's `host`
-    object; a built add-on from each released world as a fixture every later host loads.
+    service names the harness defines; a built add-on from each released world as a
+    fixture every later host loads.
     To check on the way: that an add-on importing no capability still says which world it
     was built for, in each guest language, and that the three toolchains accept a WIT in
     which a function says which version it arrived in.

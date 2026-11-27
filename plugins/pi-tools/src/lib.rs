@@ -274,21 +274,21 @@ fn specs() -> Vec<ToolSpec> {
             (true, true),
             "Read a text file. Returns at most 2000 lines or 50KB; use offset and limit to \
              page through larger files. A binary file is named by its kind and size.",
-            r#"{"type":"object","properties":{"path":{"type":"string","description":"The file, relative to the working directory, such as src/main.rs; an absolute path is rarely needed"},"offset":{"type":"integer","description":"First line to return, counting from 1"},"limit":{"type":"integer","description":"Maximum number of lines"}},"required":["path"]}"#,
+            r#"{"type":"object","properties":{"path":{"type":"string","description":"The path of the file, relative to the working directory; an absolute path is rarely needed"},"offset":{"type":"integer","description":"First line to return, counting from 1"},"limit":{"type":"integer","description":"Maximum number of lines"}},"required":["path"]}"#,
         ),
         spec(
             "write",
             (true, false),
             "Create or overwrite a file with the given content. Parent directories are \
              created as needed.",
-            r#"{"type":"object","properties":{"path":{"type":"string","description":"The file, relative to the working directory, such as src/main.rs; an absolute path is rarely needed"},"content":{"type":"string"}},"required":["path","content"]}"#,
+            r#"{"type":"object","properties":{"path":{"type":"string","description":"The path of the file, relative to the working directory; an absolute path is rarely needed"},"content":{"type":"string"}},"required":["path","content"]}"#,
         ),
         spec(
             "edit",
             (false, false),
             "Replace exact text in a file. Each oldText must occur exactly once in the file \
              as it is now; edits must not overlap.",
-            r#"{"type":"object","properties":{"path":{"type":"string","description":"The file, relative to the working directory, such as src/main.rs; an absolute path is rarely needed"},"edits":{"type":"array","items":{"type":"object","properties":{"oldText":{"type":"string"},"newText":{"type":"string"}},"required":["oldText","newText"]}}},"required":["path","edits"]}"#,
+            r#"{"type":"object","properties":{"path":{"type":"string","description":"The path of the file, relative to the working directory; an absolute path is rarely needed"},"edits":{"type":"array","items":{"type":"object","properties":{"oldText":{"type":"string"},"newText":{"type":"string"}},"required":["oldText","newText"]}}},"required":["path","edits"]}"#,
         ),
         shell_tool::spec(
             "Run a shell command. The shell is persistent: the working directory and \

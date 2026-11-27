@@ -80,6 +80,8 @@ Working on corduroy itself:
   how each is scoped, and what it exports.
 - [Shipped add-ons](reference/shipped-add-ons.md): tools, configuration and grants of each.
 - [Events](reference/events.md): the topics on the log and what each payload holds.
+- [The script host](reference/script-host.md): what a script is handed, the `host` object and
+  the plugin object it returns.
 - [`wit/corduroy.wit`](../wit/corduroy.wit), the plugin world itself, and the API docs
   (`cargo doc --open`) for the Rust crates.
 

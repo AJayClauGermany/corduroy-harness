@@ -33,7 +33,7 @@ bench again, so nothing below says a rate has changed.
 | 2. Nothing is recorded or shown while a request streams | An answer is shown as it is written, checkpointed in the log (`model/progress`), and kept if the request ends without one (`model/partial`) | [What the record promises](design.md#what-the-record-promises) |
 | 2. `thinking = "off"` against this server | Not tried | |
 | 3. A refusal is walked around through the shell | A refused path says where paths start from. A question that follows a refusal is to be flagged by the gate, with what a person can answer; a shell redirect outside the workspace waits for the confined kernel | [Capabilities](reference/capabilities.md), [G6](open-questions.md#g6-what-can-a-person-answer-to-an-ask), [What is safe by default](design.md#what-is-safe-by-default) |
-| 4. Absolute paths, got wrong | The `path` parameters say a path is relative; the evals' workspace has a real name | [Shipped add-ons](reference/shipped-add-ons.md#pi-tools) |
+| 4. Absolute paths, got wrong | The `path` parameters say a path is relative, with no example: models of a billion parameters and under took `src/main.rs` for the file to use ([the bench in pieces](https://github.com/AJayClauGermany/corduroy-harness/pull/35)); the evals' workspace has a real name | [Shipped add-ons](reference/shipped-add-ons.md#pi-tools) |
 | 5. Twenty turns | The example allows fifty; time and tokens are limits beside turns | [Agent file](reference/agent-file.md#top-level-keys) |
 | Exit code 1 for three endings | Each ending has its own code, and `corduroy codes` lists them | [Command](reference/cli.md) |
 | The answer mixed with tool lines | `--progress stderr`, the default when the output is piped | [Command](reference/cli.md) |
