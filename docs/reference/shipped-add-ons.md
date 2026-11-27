@@ -20,7 +20,9 @@ from Goose.
 | `bash` | `command`, `timeout` (seconds): run in the kernel, whose working directory and variables persist | |
 | `tree` | `path` (`.`), `depth`: a directory's layout through `fs-read` alone; skips `.git`, `node_modules`, `target`, `.corduroy`, `.venv` | yes |
 
-Output is capped at 2000 lines or 50 KB. Config: `kernel`, the kernel `bash` runs in (`shell`).
+Output is capped at 2000 lines or 50 KB. A binary file read with `read`, or printed by a
+command in `bash`, is not returned: the result names its kind and size instead. A `path`
+is relative to the working directory. Config: `kernel`, the kernel `bash` runs in (`shell`).
 Grants: `fs-read`, `fs-write`, `kernel`.
 
 ## search
@@ -32,7 +34,7 @@ command it asks about.
 | Tool | Input | Read-only |
 | --- | --- | --- |
 | `grep` | `pattern` (a regular expression, matched against each line), `path` (a directory, searched all the way down, or one file; `.`), `glob` (only files matching it), `ignore_case`, `context` (lines around each match), `limit` (most matching lines, 100), `files_only` | yes |
-| `find` | `pattern` (on the path: `*.rs` is that name at any depth, `src/**/*.toml`, `*.{ts,tsx}`; `*` stays within one name, `**` crosses directories, `?` is one character), `path` (`.`), `limit` (200) | yes |
+| `find` | `pattern` (on the path: `*.rs` is that name at any depth, `src/**/*.toml`, `*.{ts,tsx}`; `*` stays within one name, `**` crosses directories, `?` is one character; a set of characters such as `[0-9]` is not supported and is refused, saying so), `path` (`.`), `limit` (200) | yes |
 
 `grep` answers as `path:line:text`, with `--` between runs of context. Both pass over `.git`,
 `node_modules`, `target`, `.corduroy` and `.venv`; `grep` also passes over files that are

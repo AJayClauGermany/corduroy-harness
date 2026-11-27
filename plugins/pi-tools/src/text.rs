@@ -55,6 +55,32 @@ pub fn tail(output: &str, max_lines: usize, max_bytes: usize) -> (String, bool) 
     (kept.concat(), dropped)
 }
 
+/// What `text` is, with its size, where it is not text a model can read: the contents of a
+/// binary file, read or printed as if it were text. `None` for text.
+///
+/// Text holds no NUL, and a file that was not UTF-8 arrives with U+FFFD where its bytes
+/// could not be read, so either a NUL or many of those says binary.
+pub fn binary(text: &str) -> Option<String> {
+    let unreadable = text.chars().filter(|&c| c == '\u{fffd}').count();
+    let total = text.chars().count();
+    if !text.contains('\0') && (unreadable < 8 || unreadable * 20 < total) {
+        return None;
+    }
+    let kinds = [
+        ("\u{7f}ELF", "a compiled program (ELF)"),
+        ("MZ", "a compiled program (PE)"),
+        ("\u{fffd}PNG", "a PNG image"),
+        ("%PDF", "a PDF document"),
+        ("PK\u{3}\u{4}", "a zip archive"),
+        ("\u{1f}\u{fffd}", "gzip-compressed data"),
+    ];
+    let kind = kinds
+        .iter()
+        .find(|(start, _)| text.starts_with(start))
+        .map_or("binary data", |(_, kind)| kind);
+    Some(format!("{kind}, {} bytes", text.len()))
+}
+
 /// Apply every replacement to `original`. Each `old_text` must occur exactly once in
 /// `original` (not in the result of earlier replacements), and no two may overlap.
 pub fn replace(original: &str, edits: &[Replacement]) -> Result<String, String> {
@@ -103,6 +129,27 @@ mod tests {
             old_text: old.to_owned(),
             new_text: new.to_owned(),
         }
+    }
+
+    #[test]
+    fn binary_content_is_named_by_kind_and_size_and_text_is_left_alone() {
+        // A compiled program printed by `cat`, as a kernel hands it over.
+        let program = String::from_utf8_lossy(b"\x7fELF\x02\x01\x01\0\0\0\xff\xfe").into_owned();
+        assert_eq!(
+            binary(&program).unwrap(),
+            format!("a compiled program (ELF), {} bytes", program.len())
+        );
+        let image = String::from_utf8_lossy(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR").into_owned();
+        assert!(binary(&image).unwrap().starts_with("a PNG image, "));
+        // No NUL, but too much of it could not be read as text.
+        let noise = String::from_utf8_lossy(&[0xff; 64]).into_owned();
+        assert!(binary(&noise).unwrap().starts_with("binary data, "));
+        // Text, and text with the odd unreadable byte in a long output, is text.
+        assert_eq!(binary("fn main() {}\n"), None);
+        assert_eq!(binary(""), None);
+        assert_eq!(binary("naïve café ✓\n"), None);
+        let mostly = format!("{}\u{fffd}\u{fffd}", "a line of a log\n".repeat(50));
+        assert_eq!(binary(&mostly), None);
     }
 
     #[test]

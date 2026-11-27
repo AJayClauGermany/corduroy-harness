@@ -111,6 +111,12 @@ corduroy_guest::export!(PiTools);
 
 fn read(args: &Read) -> Result<String, ToolError> {
     let contents = fs_read::read(&args.path)?;
+    if let Some(binary) = text::binary(&contents) {
+        return Ok(format!(
+            "[{}: {binary}, not text, so it is not shown.]",
+            args.path
+        ));
+    }
     let offset = args.offset.unwrap_or(1).max(1);
     let limit = args.limit.unwrap_or(MAX_LINES).min(MAX_LINES);
     let page = text::page(&contents, offset, limit, MAX_BYTES);
@@ -160,7 +166,18 @@ fn bash(args: &Bash) -> Result<String, ToolError> {
         .map_or("shell", |config| config.kernel.as_str());
     let timeout_ms = args.timeout.unwrap_or(DEFAULT_TIMEOUT).saturating_mul(1000);
     let cell = kernel::exec(kernel, &args.command, timeout_ms)?;
-    let (mut output, dropped) = text::tail(&cell.output, MAX_LINES, MAX_BYTES);
+    let (mut output, dropped) = match text::binary(&cell.output) {
+        // What a command printed of a binary file is of no use to a model and can fill its
+        // context in one call.
+        Some(binary) => (
+            format!(
+                "[The output was {binary}, not text, so it is not shown. Look at such a \
+                 file with `file`, `strings` or `xxd | head`.]\n"
+            ),
+            false,
+        ),
+        None => text::tail(&cell.output, MAX_LINES, MAX_BYTES),
+    };
     if dropped || cell.truncated {
         output.insert_str(0, "[Earlier output was truncated.]\n");
     }
@@ -227,28 +244,29 @@ fn specs() -> Vec<ToolSpec> {
             "read",
             (true, true),
             "Read a text file. Returns at most 2000 lines or 50KB; use offset and limit to \
-             page through larger files.",
-            r#"{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","description":"First line to return, counting from 1"},"limit":{"type":"integer","description":"Maximum number of lines"}},"required":["path"]}"#,
+             page through larger files. A binary file is named by its kind and size.",
+            r#"{"type":"object","properties":{"path":{"type":"string","description":"The file, relative to the working directory, such as src/main.rs; an absolute path is rarely needed"},"offset":{"type":"integer","description":"First line to return, counting from 1"},"limit":{"type":"integer","description":"Maximum number of lines"}},"required":["path"]}"#,
         ),
         spec(
             "write",
             (true, false),
             "Create or overwrite a file with the given content. Parent directories are \
              created as needed.",
-            r#"{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}"#,
+            r#"{"type":"object","properties":{"path":{"type":"string","description":"The file, relative to the working directory, such as src/main.rs; an absolute path is rarely needed"},"content":{"type":"string"}},"required":["path","content"]}"#,
         ),
         spec(
             "edit",
             (false, false),
             "Replace exact text in a file. Each oldText must occur exactly once in the file \
              as it is now; edits must not overlap.",
-            r#"{"type":"object","properties":{"path":{"type":"string"},"edits":{"type":"array","items":{"type":"object","properties":{"oldText":{"type":"string"},"newText":{"type":"string"}},"required":["oldText","newText"]}}},"required":["path","edits"]}"#,
+            r#"{"type":"object","properties":{"path":{"type":"string","description":"The file, relative to the working directory, such as src/main.rs; an absolute path is rarely needed"},"edits":{"type":"array","items":{"type":"object","properties":{"oldText":{"type":"string"},"newText":{"type":"string"}},"required":["oldText","newText"]}}},"required":["path","edits"]}"#,
         ),
         spec(
             "bash",
             (false, false),
             "Run a shell command. The shell is persistent: the working directory and \
-             variables carry over between calls. Returns the last 2000 lines or 50KB of output.",
+             variables carry over between calls. Returns the last 2000 lines or 50KB of \
+             output; binary output is named by its kind and size.",
             r#"{"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"integer","description":"Seconds before the command is stopped (default 120)"}},"required":["command"]}"#,
         ),
         spec(
@@ -256,7 +274,7 @@ fn specs() -> Vec<ToolSpec> {
             (true, true),
             "Show the files and directories below a path as a tree, a few levels deep. \
              .git, node_modules, target and .venv are named but not opened.",
-            r#"{"type":"object","properties":{"path":{"type":"string","description":"Directory (default .)"},"depth":{"type":"integer","description":"Levels to show (default 3, at most 10)"}}}"#,
+            r#"{"type":"object","properties":{"path":{"type":"string","description":"The directory, relative to the working directory (default .)"},"depth":{"type":"integer","description":"Levels to show (default 3, at most 10)"}}}"#,
         ),
     ]
 }
