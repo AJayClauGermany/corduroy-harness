@@ -1187,7 +1187,12 @@ impl Harness {
         if let Some(end) = self.spent(journal, stop) {
             return Ok(Step::End(end));
         }
-        journal.ask_started(&self.provider, request)?;
+        journal.ask_started(
+            &self.provider,
+            request,
+            &provider.asking(&request.model),
+            self.sessions.shown(),
+        )?;
         let heard = Heard::new(
             journal,
             &self.outside.live,

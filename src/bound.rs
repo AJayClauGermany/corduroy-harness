@@ -135,7 +135,7 @@ fn level(sizes: &[usize], room: usize) -> Option<usize> {
 }
 
 /// The bytes of text in `output`.
-fn text_bytes(output: &ToolOutput) -> usize {
+pub(crate) fn text_bytes(output: &ToolOutput) -> usize {
     output
         .content()
         .iter()

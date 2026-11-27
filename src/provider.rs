@@ -151,6 +151,66 @@ impl fmt::Display for ProviderError {
 
 impl Error for ProviderError {}
 
+/// What a provider asks of its model beside the request itself: the settings it adds on
+/// the way, each `None` where it adds none or does not say.
+///
+/// The loop records them with the request, so the log says what a model was asked for and
+/// not only what it was sent. More may be said later, so it is built with
+/// [`new`](Self::new) and its builder methods.
+#[derive(Debug, Clone, PartialEq, Default)]
+#[non_exhaustive]
+pub struct Asking {
+    /// The most the answer may take, in tokens, as the request says it.
+    pub max_tokens: Option<u64>,
+    /// The temperature asked for.
+    pub temperature: Option<f32>,
+    /// How hard the model is asked to think, in the provider's word for it.
+    pub thinking: Option<String>,
+    /// How long one attempt at the request may take in all.
+    pub timeout: Option<Duration>,
+}
+
+impl Asking {
+    /// Nothing said.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            max_tokens: None,
+            temperature: None,
+            thinking: None,
+            timeout: None,
+        }
+    }
+
+    /// The answer may take `tokens` at most.
+    #[must_use]
+    pub const fn max_tokens(mut self, tokens: u64) -> Self {
+        self.max_tokens = Some(tokens);
+        self
+    }
+
+    /// The temperature asked for is `temperature`.
+    #[must_use]
+    pub const fn temperature(mut self, temperature: f32) -> Self {
+        self.temperature = Some(temperature);
+        self
+    }
+
+    /// The model is asked to think as hard as `thinking` says.
+    #[must_use]
+    pub fn thinking(mut self, thinking: impl Into<String>) -> Self {
+        self.thinking = Some(thinking.into());
+        self
+    }
+
+    /// One attempt may take `timeout` in all.
+    #[must_use]
+    pub const fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+}
+
 /// One attempt at a request that failed and is about to be made again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -309,6 +369,14 @@ pub trait Provider: Send + Sync {
         let _: &str = model;
         ModelInfo::unknown()
     }
+
+    /// The settings this provider adds to a request for `model`, by its own name for it:
+    /// the limit on the answer, the temperature, the thinking, how long it waits. Nothing,
+    /// unless the provider says.
+    fn asking(&self, model: &str) -> Asking {
+        let _: &str = model;
+        Asking::new()
+    }
 }
 
 /// A whole `reply` as the pieces a provider that streamed it would have told: one for each
@@ -444,6 +512,10 @@ impl Provider for Described {
             Some(stated) => stated.clone().or(reported),
             None => reported,
         }
+    }
+
+    fn asking(&self, model: &str) -> Asking {
+        self.provider.asking(model)
     }
 }
 

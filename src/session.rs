@@ -16,9 +16,10 @@
 //! | `gate/decision` | `host` | `{"point", "id", "tool", "verdict", "reason", "gate", "caller"}`, caused by its `tool/call`: what the gates said |
 //! | `gate/answer` | `user` | `{"id", "tool", "allow", "reason"}`, caused by its `tool/call`: a person's answer to a gate that asked |
 //! | `tool/start` | `host` | `{"id", "tool"}`, caused by its `tool/call`: the tool is about to run |
-//! | `tool/result` | `environment` | `{"id", "tool", "ok", "output"}`, and `"content"` when the result is not one block of text, caused by its `tool/call`; with `"signal"` where the call waited and this is what the signal of that name brought |
-//! | `model/request` | `host` | `{"provider", "model", "messages", "tools"}`: the model is about to be asked, with that many messages and tools; what follows it in the session (the model's `message`, or a `turn/end`) says when the answer came |
-//! | `model/retry` | `host` | `{"provider", "model", "attempt", "kind", "reason", "delay_ms", "by"}`: an attempt at the request failed for `reason` (of `kind`, as a failed `turn/end` names them) and it is made again after `delay_ms`; `attempt` counts the retries from 1, and `by` says who retries (`provider`) |
+//! | `tool/result` | `environment` | `{"id", "tool", "ok", "output", "bytes", "tokens"}`, and `"content"` when the result is not one block of text, caused by its `tool/call`; with `"signal"` where the call waited and this is what the signal of that name brought; `bytes` and `tokens` are the size of its text, and where the call had a bound `"budget"` is the tokens the model is shown at most and `"cut": true` says the result is longer |
+//! | `model/request` | `host` | `{"provider", "model", "messages", "tools", "estimated_tokens"}`: the model is about to be asked, with that many messages and tools, reckoned to take that many tokens; with `"system_hash"` and `"tools_hash"` naming what it carried (see `model/shown`), and `"max_tokens"`, `"temperature"`, `"thinking"` and `"timeout_ms"` where the provider says what it adds; what follows it in the session (the model's `message`, or a `turn/end`) says when the answer came |
+//! | `model/shown` | `host` | `{"hash", "kind"}` with `"text"` (`kind` `system`) or `"tools"` (`kind` `tools`): a system prompt or a set of tool declarations a model was shown, recorded once for a log under the hash the requests that carried it name; of no session |
+//! | `model/retry` | `host` | `{"provider", "model", "attempt", "kind", "reason", "delay_ms", "by"}`: an attempt at the request failed for `reason` (of `kind`, as a failed `turn/end` names them) and it is made again after `delay_ms`; `attempt` counts the retries from 1, and `by` says who retries (`provider`, or `client` for the HTTP client beneath it) |
 //! | `model/progress` | `host` | `{"provider", "model", "tokens", "elapsed_ms"}` with `"text"`, `"thinking"` and `"calls"` (each `{"id", "tool", "input"}`) where there is some: a checkpoint of an answer the model is still writing, holding what it wrote since the checkpoint before; `tokens` is what the attempt has written so far, with `"estimated": true` where that is reckoned from the length of the text; not part of the conversation |
 //! | `model/partial` | `host` | the same fields, holding the whole of what the model had written when its request ended without an answer, and `"why"`: `stopped`, `time-limit` or `failed` (with the `"kind"` a failed `turn/end` names); not part of the conversation, and nothing in it is run |
 //! | `usage` | `agent` | `{"model", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens", "stop"}`, each count only if the provider gave it; the cache counts are part of `input_tokens` and the reasoning count of `output_tokens`; `stop` is why the model stopped (`finished`, `limit`, `tool_calls` or `refused`), if the provider said |
@@ -93,14 +94,15 @@ use corduroy_core::ModelRequest;
 use corduroy_core::sync::Lock;
 use corduroy_core::{
     BYTES_PER_TOKEN, Content, Decision, Draft, Event, EventId, EventStream, LogError, Message,
-    Part, Query, Role, SessionId, Source, StopReason, TOOL_CALL, ToolCall, ToolOutput, ToolResult,
-    Usage, Verdict,
+    Part, Pattern, Query, ResultBudget, Role, SessionId, Source, StopReason, TOOL_CALL, ToolCall,
+    ToolOutput, ToolResult, Usage, Verdict,
 };
 use serde_json::{Value, json};
 
+use crate::bound::text_bytes;
 use crate::harness::HarnessError;
 use crate::message::{decode, decode_content, encode, encode_content};
-use crate::provider::{ProviderError, ProviderErrorKind, Retry};
+use crate::provider::{Asking, ProviderError, ProviderErrorKind, Retry};
 
 /// Topic of the events that make up the conversation.
 pub const MESSAGE: &str = "message";
@@ -113,6 +115,10 @@ const USAGE: &str = "usage";
 
 /// Topic of the event that records a request going out to the model.
 pub const MODEL_REQUEST: &str = "model/request";
+
+/// Topic of the event that holds, once for a log, something a model was shown: a system
+/// prompt or a set of tool declarations, under the hash the requests that carried it name.
+pub const MODEL_SHOWN: &str = "model/shown";
 
 /// Topic of the event that records a model request being made again after a failed attempt.
 pub const MODEL_RETRY: &str = "model/retry";
@@ -379,6 +385,7 @@ struct Known {
 pub struct Sessions {
     events: Arc<EventStream>,
     known: Lock<BTreeMap<SessionId, Known>>,
+    shown: Shown,
 }
 
 impl core::fmt::Debug for Sessions {
@@ -387,7 +394,123 @@ impl core::fmt::Debug for Sessions {
     }
 }
 
+/// What models have been shown, so far as the log holds it: the hash of each system prompt
+/// and each set of tool declarations a `model/shown` event records.
+///
+/// A request names what it carried by hash, and the text is recorded the first time a hash
+/// is used in a log, whichever session used it. The hashes already recorded are read from
+/// the stream the first time one is needed, so a log that is picked up again does not
+/// record them twice.
+pub(crate) struct Shown {
+    recorded: Lock<Option<BTreeSet<String>>>,
+}
+
+impl Shown {
+    const fn new() -> Self {
+        Self {
+            recorded: Lock::new(None),
+        }
+    }
+
+    /// The hash of `text`, something of `kind` a model is about to be shown, and the event
+    /// that records it as `shown` (the payload's other fields), if the log `events` holds
+    /// does not have it yet. It is taken as recorded from now on.
+    fn name(
+        &self,
+        events: &EventStream,
+        kind: &str,
+        text: &str,
+        shown: Value,
+    ) -> (String, Option<Draft>) {
+        let hashed = hash(text);
+        let fresh = self.recorded.with(|recorded| {
+            recorded
+                .get_or_insert_with(|| recorded_in(events))
+                .insert(hashed.clone())
+        });
+        let draft = fresh.then(|| {
+            let mut payload = json!({"hash": hashed, "kind": kind});
+            if let (Some(fields), Value::Object(shown)) = (payload.as_object_mut(), shown) {
+                fields.extend(shown);
+            }
+            Draft::new(Source::Host, MODEL_SHOWN).payload(payload.to_string())
+        });
+        (hashed, draft)
+    }
+}
+
+/// The hashes the `model/shown` events of `events` record.
+fn recorded_in(events: &EventStream) -> BTreeSet<String> {
+    events
+        .matching(&Pattern::new(MODEL_SHOWN))
+        .iter()
+        .filter_map(|event| {
+            let payload: Value = serde_json::from_str(&event.payload).ok()?;
+            Some(payload.get("hash")?.as_str()?.to_owned())
+        })
+        .collect()
+}
+
+/// A name for `text` that the same text always gets: its 64-bit FNV-1a hash, as sixteen
+/// hexadecimal digits. It tells one prompt from another in a log. It is no protection:
+/// two texts with one hash can be made on purpose.
+fn hash(text: &str) -> String {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let hashed = text.bytes().fold(OFFSET, |hashed, byte| {
+        (hashed ^ u64::from(byte)).wrapping_mul(PRIME)
+    });
+    format!("{hashed:016x}")
+}
+
+/// What `asking` says a provider adds to a request, as the fields of `model/request` that
+/// record it: each only where the provider said.
+fn asked(asking: &Asking) -> serde_json::Map<String, Value> {
+    let mut fields = serde_json::Map::new();
+    if let Some(tokens) = asking.max_tokens {
+        fields.insert("max_tokens".to_owned(), json!(tokens));
+    }
+    // As it was written, not as the nearest binary fraction reads.
+    if let Some(temperature) = asking
+        .temperature
+        .and_then(|temperature| temperature.to_string().parse::<f64>().ok())
+    {
+        fields.insert("temperature".to_owned(), json!(temperature));
+    }
+    if let Some(thinking) = &asking.thinking {
+        fields.insert("thinking".to_owned(), json!(thinking));
+    }
+    if let Some(timeout) = asking.timeout {
+        let millis = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
+        fields.insert("timeout_ms".to_owned(), json!(millis));
+    }
+    fields
+}
+
+/// The tool declarations a request carries, as the log keeps them: each tool's name, what
+/// it says of itself, and the schema of its input (as JSON where it is JSON).
+fn declarations(request: &ModelRequest) -> Value {
+    request
+        .tools
+        .iter()
+        .map(|tool| {
+            let schema = serde_json::from_str::<Value>(&tool.input_schema)
+                .unwrap_or_else(|_| json!(tool.input_schema));
+            json!({
+                "name": tool.name,
+                "description": tool.description,
+                "input_schema": schema,
+            })
+        })
+        .collect()
+}
+
 impl Sessions {
+    /// What models have been shown, as this log records it.
+    pub(crate) const fn shown(&self) -> &Shown {
+        &self.shown
+    }
+
     /// The sessions `events` holds, with the session [`MAIN`] started if it is not among
     /// them.
     ///
@@ -415,6 +538,7 @@ impl Sessions {
         Ok(Self {
             events,
             known: Lock::new(known),
+            shown: Shown::new(),
         })
     }
 
@@ -1615,9 +1739,25 @@ impl Journal {
     ///
     /// `output` is what the tool returned, or the text of its error. It is stored whole,
     /// images included, so a run picked up later hands the model the same result.
-    pub(crate) fn finish_call(&self, call: &str, ok: bool, output: &ToolOutput) -> Result<()> {
+    ///
+    /// `budget` is what the model is to be shown of it at most, where the call has a bound:
+    /// the event says so (`budget`, in tokens), and that the result is `cut` for the model
+    /// where it is longer.
+    pub(crate) fn finish_call(
+        &self,
+        call: &str,
+        ok: bool,
+        output: &ToolOutput,
+        budget: Option<ResultBudget>,
+    ) -> Result<()> {
         let (draft, tool) = self.about_call(call, Source::Environment, "tool/result");
-        let payload = result_payload(call, &tool, ok, output);
+        let mut payload = result_payload(call, &tool, ok, output);
+        if let (Some(budget), Some(fields)) = (budget, payload.as_object_mut()) {
+            fields.insert("budget".to_owned(), json!(budget.tokens));
+            if text_bytes(output) > budget.bytes() {
+                fields.insert("cut".to_owned(), json!(true));
+            }
+        }
         self.events.emit(draft.payload(payload.to_string()))?;
         self.state(|state| {
             if let Some(open) = state.calls.get_mut(call) {
@@ -1702,20 +1842,63 @@ impl Journal {
         }
     }
 
-    /// Record that `request` is about to go to the model `provider` serves. This is its own
-    /// commit, so the log says when the model was asked, and that it was, even if no answer
-    /// ever comes.
-    pub(crate) fn ask_started(&self, provider: &str, request: &ModelRequest) -> Result<()> {
-        let payload = json!({
+    /// Record that `request` is about to go to the model `provider` serves, with what the
+    /// provider adds to it (`asking`). This is its own commit, so the log says when the
+    /// model was asked, and that it was, even if no answer ever comes.
+    ///
+    /// The request names its system prompt and its tool declarations by hash; whichever
+    /// of the two `shown` does not have yet is recorded in the same commit, before the
+    /// request, as a `model/shown` event of no session, since any session may name it.
+    pub(crate) fn ask_started(
+        &self,
+        provider: &str,
+        request: &ModelRequest,
+        asking: &Asking,
+        shown: &Shown,
+    ) -> Result<()> {
+        let mut payload = json!({
             "provider": provider,
             "model": request.model,
             "messages": request.messages.len(),
             "tools": request.tools.len(),
         });
-        let draft = Draft::new(Source::Host, MODEL_REQUEST)
-            .session(self.id.clone())
-            .payload(payload.to_string());
-        self.events.emit(draft)?;
+        let mut drafts = Vec::new();
+        let tools = declarations(request);
+        let declared = if request.tools.is_empty() {
+            String::new()
+        } else {
+            tools.to_string()
+        };
+        let bytes = request
+            .messages
+            .iter()
+            .map(size)
+            .sum::<usize>()
+            .saturating_add(request.system.len())
+            .saturating_add(declared.len());
+        let mut said = asked(asking);
+        said.insert("estimated_tokens".to_owned(), json!(estimate(bytes)));
+        if !request.system.is_empty() {
+            let text = json!({"text": request.system});
+            let (hashed, draft) = shown.name(&self.events, "system", &request.system, text);
+            drafts.extend(draft);
+            said.insert("system_hash".to_owned(), json!(hashed));
+        }
+        if !request.tools.is_empty() {
+            let (hashed, draft) =
+                shown.name(&self.events, "tools", &declared, json!({"tools": tools}));
+            drafts.extend(draft);
+            said.insert("tools_hash".to_owned(), json!(hashed));
+        }
+        if let Some(fields) = payload.as_object_mut() {
+            fields.extend(said);
+        }
+        drafts.push(
+            Draft::new(Source::Host, MODEL_REQUEST)
+                .session(self.id.clone())
+                .payload(payload.to_string()),
+        );
+        self.events.commit(drafts)?;
         Ok(())
     }
 
@@ -1869,15 +2052,7 @@ fn size(message: &Message) -> usize {
         .map(|part| match part {
             Part::Text(text) => text.len(),
             Part::ToolCall(call) => call.name.len().saturating_add(call.input.len()),
-            Part::ToolResult(result) => result
-                .output
-                .content()
-                .iter()
-                .map(|block| match block {
-                    Content::Text(text) => text.len(),
-                    _ => 0,
-                })
-                .sum(),
+            Part::ToolResult(result) => text_bytes(&result.output),
             _ => 0,
         })
         .sum()
@@ -1944,8 +2119,15 @@ fn usage_payload(model: &str, usage: Usage, stop: Option<StopReason>) -> Value {
 /// The payload of the `tool/result` event for the call `id`: the result's text as `output`,
 /// and its blocks as `content` unless the result is one block of text, which `output`
 /// already is. [`recorded_output`] reads it back.
+///
+/// It says how large the result is as a model reads it: the `bytes` of its text, and the
+/// `tokens` those are counted as.
 fn result_payload(id: &str, tool: &str, ok: bool, output: &ToolOutput) -> Value {
-    let mut payload = json!({"id": id, "tool": tool, "ok": ok, "output": output.to_text()});
+    let bytes = text_bytes(output);
+    let mut payload = json!({
+        "id": id, "tool": tool, "ok": ok, "output": output.to_text(),
+        "bytes": bytes, "tokens": estimate(bytes),
+    });
     if !matches!(output.content(), [Content::Text(_)])
         && let Some(fields) = payload.as_object_mut()
     {
@@ -2018,7 +2200,7 @@ mod tests {
     fn one_block_of_text_is_recorded_as_output_alone() {
         assert_eq!(
             result_payload("c1", "label", true, &ToolOutput::text("a view")).to_string(),
-            r#"{"id":"c1","tool":"label","ok":true,"output":"a view"}"#
+            r#"{"id":"c1","tool":"label","ok":true,"output":"a view","bytes":6,"tokens":2}"#
         );
         assert_eq!(
             result_payload(
@@ -2032,6 +2214,9 @@ mod tests {
                 "tool": "snap",
                 "ok": false,
                 "output": "[image: image/png, 8 bytes]",
+                // What a model reads of it as text: an image is not counted.
+                "bytes": 0,
+                "tokens": 0,
                 "content": [{"type": "image", "mime_type": "image/png", "data": "iVBORw0KGgo="}],
             })
         );

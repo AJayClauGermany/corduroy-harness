@@ -211,8 +211,8 @@ async fn a_step_the_log_refuses_ends_the_run_before_anyone_sees_it() {
     assert!(matches!(error, HarnessError::Log(_)), "{error:?}");
     assert_eq!(error.to_string(), "event log: the disk is full");
     // The result that was not stored is in neither the stream nor the conversation, and
-    // the model was not asked again.
-    assert_eq!(harness.events().len(), 7);
+    // the model was not asked again. (The request's commit also holds the tools it showed.)
+    assert_eq!(harness.events().len(), 8);
     let journal = harness.journal(&MAIN.into()).unwrap();
     assert_eq!(journal.session().conversation().len(), 2);
     assert_eq!(model.requests().len(), 1);
@@ -314,11 +314,11 @@ async fn a_continued_run_treats_each_call_by_how_far_it_got() {
         payloads(&harness, "tool/result"),
         [
             // Finished before the crash: its result is handed over from the log as it is.
-            r#"{"id":"c1","tool":"launch","ok":true,"output":"done"}"#,
+            r#"{"id":"c1","tool":"launch","ok":true,"output":"done","bytes":4,"tokens":2}"#,
             // Running at the crash, and not safe to run twice.
-            r#"{"id":"c2","tool":"launch","ok":false,"output":"interrupted: the harness stopped while `launch` was running, and it is not safe to run twice. Check what it did before calling it again."}"#,
+            r#"{"id":"c2","tool":"launch","ok":false,"output":"interrupted: the harness stopped while `launch` was running, and it is not safe to run twice. Check what it did before calling it again.","bytes":136,"tokens":46}"#,
             // Never started: run now.
-            r#"{"id":"c3","tool":"launch","ok":true,"output":"done"}"#,
+            r#"{"id":"c3","tool":"launch","ok":true,"output":"done","bytes":4,"tokens":2}"#,
         ]
     );
     // The model got all three results, in one message, after its own.
@@ -358,8 +358,8 @@ async fn a_call_that_was_running_is_made_again_only_if_its_tool_says_it_is_safe(
     assert_eq!(
         payloads(&harness, "tool/result"),
         [
-            r#"{"id":"c1","tool":"launch","ok":true,"output":"done"}"#,
-            r#"{"id":"c2","tool":"peek","ok":true,"output":"done"}"#,
+            r#"{"id":"c1","tool":"launch","ok":true,"output":"done","bytes":4,"tokens":2}"#,
+            r#"{"id":"c2","tool":"peek","ok":true,"output":"done","bytes":4,"tokens":2}"#,
         ]
     );
 }
@@ -440,6 +440,8 @@ async fn a_finished_image_is_handed_over_from_the_log_and_the_tool_is_not_run_ag
             "tool": "snap",
             "ok": true,
             "output": "the view\n[image: image/png, 8 bytes]",
+            "bytes": 8,
+            "tokens": 3,
             "content": [
                 {"type": "text", "text": "the view"},
                 {"type": "image", "mime_type": "image/png", "data": "iVBORw0KGgo="},

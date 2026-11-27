@@ -105,7 +105,7 @@ impl PluginTools {
                 Ok(output) => (true, output),
                 Err(error) => (false, ToolOutput::text(error.to_string())),
             };
-            journal.finish_call(&call.id, ok, &output)?;
+            journal.finish_call(&call.id, ok, &output, budgets.get(&call.id).copied())?;
             results = results.result(ToolResult::new(call.id, ok, output));
         }
         Ok(match self.bounds {

@@ -202,7 +202,10 @@ async fn a_call_waiting_for_a_signal_waits_in_the_log_until_it_comes() {
     let payload: serde_json::Value = serde_json::from_str(&result.payload).unwrap();
     assert_eq!(
         payload,
-        json!({"id": "c1", "tool": "ci", "ok": true, "output": "green", "signal": "ci/done"})
+        json!({
+            "id": "c1", "tool": "ci", "ok": true, "output": "green", "bytes": 5, "tokens": 2,
+            "signal": "ci/done",
+        })
     );
     let all = stored.iter().filter(|event| event.topic == "tool/result");
     assert_eq!(all.count(), 1);

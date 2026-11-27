@@ -176,7 +176,8 @@ async fn denials_and_plugin_events_are_on_the_stream() {
 
     assert_eq!(
         payloads(&agent.harness, "capability/denied"),
-        [r#"{"plugin":"pi-tools","capability":"fs-read","resource":"/etc/hostname"}"#]
+        // With the tool call that was being served when it was refused.
+        [r#"{"plugin":"pi-tools","capability":"fs-read","resource":"/etc/hostname","call":"1"}"#]
     );
     assert_eq!(
         payloads(&agent.harness, "skills/changed"),

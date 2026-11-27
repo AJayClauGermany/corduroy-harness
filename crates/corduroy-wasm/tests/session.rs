@@ -110,7 +110,8 @@ fn a_session_the_grant_does_not_reach_is_refused_and_recorded() {
         .matching(&Pattern::new("capability/denied"));
     assert_eq!(
         denied.first().map(|event| event.payload.as_str()),
-        Some(r#"{"plugin":"testbed","capability":"session","resource":"main/1"}"#)
+        // With the call it was serving, which is the one the scope names.
+        Some(r#"{"plugin":"testbed","capability":"session","resource":"main/1","call":"2"}"#)
     );
 }
 

@@ -138,10 +138,15 @@ impl HostState {
         })
     }
 
-    /// Record that `capability` was refused for `resource`.
+    /// Record that `capability` was refused for `resource`, and for which tool call of a
+    /// session, where the plugin was serving one.
     fn refused(&mut self, capability: &str, resource: &str) {
+        let call = corduroy_core::call::current()
+            .and_then(|serving| serving.call)
+            .map(|call| format!(",\"call\":{}", json::string(&call)))
+            .unwrap_or_default();
         let payload = format!(
-            "{{\"plugin\":{},\"capability\":{},\"resource\":{}}}",
+            "{{\"plugin\":{},\"capability\":{},\"resource\":{}{call}}}",
             json::string(&self.plugin),
             json::string(capability),
             json::string(resource)

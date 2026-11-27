@@ -120,11 +120,11 @@ pub use loops::{DEFAULT_LOOP, LOOPS, Loop, Loops, Run, StandardLoop, Step};
 pub use operation::{Next, Operation};
 pub use outside::{FRONTS, Front, Fronts, OUTSIDE, Outside};
 pub use provider::{
-    BY_PROVIDER, CallPiece, DEFAULT_PROVIDER, PROVIDERS, Piece, Provider, ProviderError,
+    Asking, BY_PROVIDER, CallPiece, DEFAULT_PROVIDER, PROVIDERS, Piece, Provider, ProviderError,
     ProviderErrorKind, ProviderPlugin, Providers, Reports, Retry, pieces_of, provider,
 };
 pub use session::{
     Answer, Ask, COMPACTION, Effect, End, Journal, MAIN, MODEL_PARTIAL, MODEL_PROGRESS,
-    MODEL_REQUEST, MODEL_RETRY, PROCESS_START, ProcessInfo, Removal, SESSION_REMOVED, SIGNAL,
-    Session, SessionInfo, Sessions, Wait, removal,
+    MODEL_REQUEST, MODEL_RETRY, MODEL_SHOWN, PROCESS_START, ProcessInfo, Removal, SESSION_REMOVED,
+    SIGNAL, Session, SessionInfo, Sessions, Wait, removal,
 };

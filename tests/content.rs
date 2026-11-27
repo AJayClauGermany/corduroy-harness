@@ -96,6 +96,8 @@ async fn an_image_a_tool_returns_reaches_the_model_and_the_log() {
             "tool": "snap",
             "ok": true,
             "output": "the view\n[image: image/png, 8 bytes]",
+            "bytes": 8,
+            "tokens": 3,
             "content": [
                 {"type": "text", "text": "the view"},
                 {"type": "image", "mime_type": "image/png", "data": PNG_BASE64},
@@ -126,24 +128,32 @@ async fn only_a_result_that_is_more_than_one_text_is_recorded_block_by_block() {
     // Text is the whole of its record, exactly as before there were blocks.
     assert_eq!(
         recorded[0],
-        json!({"id": "c1", "tool": "label", "ok": true, "output": "a view"})
+        json!({
+            "id": "c1", "tool": "label", "ok": true, "output": "a view", "bytes": 6, "tokens": 2,
+        })
     );
     // Blocks that `output` alone would not give back are there as `content`.
     assert_eq!(
         recorded[1],
         json!({
-            "id": "c2", "tool": "lines", "ok": true, "output": "one\ntwo",
+            "id": "c2", "tool": "lines", "ok": true, "output": "one\ntwo", "bytes": 6, "tokens": 2,
             "content": [{"type": "text", "text": "one"}, {"type": "text", "text": "two"}],
         })
     );
     assert_eq!(
         recorded[2],
-        json!({"id": "c3", "tool": "nothing", "ok": true, "output": "", "content": []})
+        json!({
+            "id": "c3", "tool": "nothing", "ok": true, "output": "", "bytes": 0, "tokens": 0,
+            "content": [],
+        })
     );
     // A failure is its text.
     assert_eq!(
         recorded[3],
-        json!({"id": "c4", "tool": "broken", "ok": false, "output": "tool failed: no film"})
+        json!({
+            "id": "c4", "tool": "broken", "ok": false, "output": "tool failed: no film",
+            "bytes": 20, "tokens": 7,
+        })
     );
     assert_eq!(
         results(&outcome.session),
