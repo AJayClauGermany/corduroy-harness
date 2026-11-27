@@ -39,9 +39,6 @@ pub struct Index {
     pub events: u64,
     /// Whether the log holds more than has been written yet.
     pub behind: bool,
-    /// Whether the person has been told where the page is.
-    #[serde(default)]
-    pub announced: bool,
     /// The sessions the chunks hold events of, each with the id of its last one. A session
     /// is removed from the log whole, so if that event is no longer there, neither is the
     /// session.
@@ -223,7 +220,6 @@ mod tests {
             last: 412,
             events: 400,
             behind: false,
-            announced: true,
             sessions: BTreeMap::from([("main".to_owned(), 412), ("main/1".to_owned(), 380)]),
         };
         assert_eq!(Index::read(&index.script()).unwrap(), index);
@@ -233,10 +229,9 @@ mod tests {
         };
         assert_eq!(Index::read(&other.script()), None);
         assert_eq!(Index::read("corduroyIndex({);"), None);
-        // One written before the page was announced says nothing of it.
+        // One that names no sessions holds none.
         let earlier = r#"corduroyIndex({"format":1,"generation":1,"chunks":0,"last":0,"events":0,"behind":false});"#;
-        let earlier = Index::read(earlier).unwrap();
-        assert!(!earlier.announced && earlier.sessions.is_empty());
+        assert!(Index::read(earlier).unwrap().sessions.is_empty());
         assert_eq!(Index::read(""), None);
     }
 }

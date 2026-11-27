@@ -682,6 +682,13 @@ kind = "{{kind}}"   # anthropic, openai, ollama, *-compatible, or a provider oi-
 [kernels.shell]
 kind = "{{shell}}"      # a persistent shell in {workspace}: shell (sh) or powershell
 
+# The agent's page in a browser, served on this machine while corduroy runs: what the agent
+# does as it does it, and Allow and Refuse for what a gate asks. corduroy says the address
+# when it starts. It is a new one each time, and whoever has it is let in. Remove this
+# entry to serve nothing; port = 4747 keeps the port the same.
+[extensions.page]
+kind = "page"
+
 # read, write, edit and bash, within the workspace. The agent file and the log are out of
 # reach whatever this says.
 [[plugins]]
@@ -799,10 +806,9 @@ path = "compact.wasm"
 config = { model = "main/{{model}}" }
 grants = { llm = "main/{{model}}" }
 
-# The log as a page: open {data}/viewer/index.html in a browser to see each session's
-# conversation, tool calls, timings, tokens and what went wrong, following a run as it goes.
-# It only shows; you still answer and type in the terminal. The directory holds a copy of
-# the log, so set enabled = false if nothing should hold one.
+# The same page as files, for when corduroy is not running: open
+# {data}/viewer/index.html in a browser. It shows and cannot be answered on. The directory
+# holds a copy of the log, so set enabled = false if nothing should hold one.
 [[plugins]]
 name = "viewer"
 path = "viewer.wasm"
@@ -1434,8 +1440,8 @@ mod tests {
         assert_eq!(
             error,
             "extension `box`: this command has no extension kind `docker-kernel` (it has: \
-             chatgpt-secret, env-secret, http-client, keychain-secret, mcp, powershell-kernel, \
-             shell-kernel)"
+             chatgpt-secret, env-secret, http-client, keychain-secret, mcp, page, \
+             powershell-kernel, shell-kernel)"
         );
 
         let refusing = Extensions::none().kind("picky", |_| Err("`image` is required".into()));

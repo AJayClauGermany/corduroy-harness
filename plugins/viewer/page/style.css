@@ -104,6 +104,17 @@ header {
   white-space: nowrap;
   color: var(--ink);
 }
+.asks button { color: var(--ink); }
+.asks button.allow { border-color: var(--good); color: var(--good); font-weight: 600; }
+.asks input {
+  width: 15em;
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--ink);
+}
+.asks .trouble { flex-basis: 100%; color: var(--bad); }
 .layout { flex: 1; display: flex; min-height: 0; }
 nav {
   width: 270px;

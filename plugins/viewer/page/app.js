@@ -6,7 +6,12 @@
 'use strict';
 (() => {
   const FORMAT = 1;
-  const POLL_MS = 2000;
+  /**
+   * Whether corduroy is serving this page, as its `page` extension does, or it was opened
+   * as the files the `viewer` add-on wrote. Served, a gate's question can be answered here.
+   */
+  const SERVED = location.protocol === 'http:' || location.protocol === 'https:';
+  const POLL_MS = SERVED ? 1000 : 2000;
   /** How many timeline items, or event rows, are drawn before "show earlier" is needed. */
   const WINDOW = 300;
   /** Characters of one output drawn; the log has the rest. */
@@ -25,6 +30,11 @@
     arrived: null,
     loading: false,
     drawn: '',
+    /** The reason being typed for refusing each question, and what went wrong answering it. */
+    reasons: new Map(),
+    trouble: new Map(),
+    /** What the bar of questions was last drawn from, so that typing in it is not undone. */
+    asked: '',
   };
 
   // ---------------------------------------------------------------- loading
@@ -86,6 +96,7 @@
       tick();
     } catch (error) {
       if (!state.index) say('nothing written yet: start the agent, and this page follows it');
+      else if (SERVED) say('corduroy is no longer running: this is what it last showed');
     } finally {
       state.loading = false;
     }
@@ -464,15 +475,66 @@
     }
   }
 
-  /** The bar over every view while a gate's question waits: where to answer it. */
+  /** Send the person's answer to a gate's question to corduroy, which records it. */
+  async function answer(key, session, call, allow) {
+    const reason = allow ? '' : (state.reasons.get(key) || '');
+    let trouble = '';
+    try {
+      const sent = await fetch('answer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session, call, allow, reason }),
+      });
+      if (sent.status === 403) trouble = 'this page is from an earlier run: open the address corduroy says now';
+      else if (!sent.ok) trouble = (await sent.json().catch(() => ({}))).error || `corduroy answered ${sent.status}`;
+    } catch (error) {
+      trouble = 'corduroy is not running: answer once it is, in its terminal or on its new page';
+    }
+    if (trouble) state.trouble.set(key, trouble);
+    else state.trouble.delete(key);
+    state.asked = '';
+    await poll();
+    draw();
+  }
+
+  /** What a question is answered with: here if the page is served, else where to go. */
+  function answering(key, session, call) {
+    if (!SERVED) {
+      return [h('span', null, 'Answer in the terminal where corduroy runs, or with ', h('code', null, 'corduroy continue'), '.')];
+    }
+    return [
+      h('button', { class: 'allow', onclick: () => answer(key, session, call.id, true) }, 'Allow'),
+      h('input', {
+        type: 'text', placeholder: 'why not (the model is told)', 'aria-label': `Reason for refusing ${call.tool}`,
+        value: state.reasons.get(key) || '',
+        oninput: (typed) => state.reasons.set(key, typed.target.value),
+        onkeydown: (pressed) => { if (pressed.key === 'Enter') answer(key, session, call.id, false); },
+      }),
+      h('button', { onclick: () => answer(key, session, call.id, false) }, 'Refuse'),
+      state.trouble.has(key) ? h('span', { class: 'trouble' }, state.trouble.get(key)) : null,
+    ];
+  }
+
+  /** The bar over every view while a gate's question waits: the answer, or where to give it. */
   function drawAsks() {
     const bar = document.getElementById('asks');
     const { asks } = state.model;
+    const keys = asks.map(({ session, call }) => `${session}\n${call.id}`);
+    // Drawn again only when the questions change, so that a reason half typed stays.
+    const asked = JSON.stringify([keys, [...state.trouble]]);
+    if (asked === state.asked) return;
+    state.asked = asked;
+    for (const key of [...state.reasons.keys(), ...state.trouble.keys()]) {
+      if (!keys.includes(key)) {
+        state.reasons.delete(key);
+        state.trouble.delete(key);
+      }
+    }
     bar.hidden = !asks.length;
-    fill(bar, asks.map(({ session, call }) => h('div', { class: 'ask' },
+    fill(bar, asks.map(({ session, call }, at) => h('div', { class: 'ask' },
       h('b', null, `${session} waits for your answer`),
-      h('span', { class: 'what' }, `${call.gate.gate || 'a gate'} asks about `, h('code', null, call.tool), ` ${brief(call.input)}`),
-      h('span', null, 'Answer in the terminal where corduroy runs, or with ', h('code', null, 'corduroy continue'), '.'),
+      h('span', { class: 'what', title: brief(call.input) }, `${call.gate.gate || 'a gate'} asks about `, h('code', null, call.tool), ` ${brief(call.input)}`),
+      answering(keys[at], session, call),
       h('a', { href: link(session, call.event.id) }, 'show it'))));
   }
 
@@ -535,7 +597,7 @@
     let mark = ['…', '', 'still running, or never ran'];
     if (result) mark = result.ok ? ['✓', 'good', 'returned'] : ['✗', 'bad', 'failed'];
     if (refused || declined) mark = ['⊘', 'bad', 'not run'];
-    else if (asking) mark = ['?', 'warn', 'waits for your answer in the terminal'];
+    else if (asking) mark = ['?', 'warn', 'waits for your answer'];
     const tone = refused || declined || (result && !result.ok) ? 'bad' : asking ? 'warn' : '';
     const body = [h('div', { class: 'label' }, 'Input'), h('pre', null, shown(pretty(item.input)))];
     if (gate && gate.verdict !== 'allow') {
@@ -638,7 +700,8 @@
       s.task ? h('div', { class: 'item' }, h('div', { class: 'who' }, h('b', null, 'Its task')), h('div', { class: 'said-user' }, shown(s.task))) : null,
       button,
       ...s.items.slice(from).map((item) => drawItem(s, item)),
-      s.status === 'asking' ? h('div', { class: 'end warn' }, 'A gate asks you about the call above, and the run waits. This page only shows: answer in the terminal where corduroy runs, or run ', h('code', null, 'corduroy continue'), ' in this workspace to be asked again.') : null,
+      s.status === 'asking' && SERVED ? h('div', { class: 'end warn' }, 'A gate asks you about the call above, and the run waits. Answer in the bar at the top of this page, or in the terminal where corduroy runs.') : null,
+      s.status === 'asking' && !SERVED ? h('div', { class: 'end warn' }, 'A gate asks you about the call above, and the run waits. This page only shows: answer in the terminal where corduroy runs, or run ', h('code', null, 'corduroy continue'), ' in this workspace to be asked again.') : null,
       s.status === 'unfinished' ? h('div', { class: 'end warn' }, 'This run was cut short. ', h('code', null, 'corduroy continue'), ' picks it up; ', h('code', null, 'corduroy stop'), ' ends it.') : null,
     );
     return { id: s.id };

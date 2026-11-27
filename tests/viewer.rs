@@ -147,7 +147,7 @@ fn remove(path: &Path, session: &str) -> Result<(), Box<dyn Error>> {
 }
 
 #[tokio::test]
-async fn the_viewer_writes_the_log_as_a_page_and_says_once_where_it_is() {
+async fn the_viewer_writes_the_log_as_a_page() {
     let work = scratch("viewer-page");
     fs::write(work.join("lib.rs"), "pub fn add() {}\n").unwrap();
     let dir = work.join(".corduroy/viewer");
@@ -187,18 +187,8 @@ async fn the_viewer_writes_the_log_as_a_page_and_says_once_where_it_is() {
         page.iter()
             .any(|event| event["payload"]["ok"] == json!(false))
     );
-    // It said once, during the first run, where the page is.
-    let said = harness.events().matching(&Pattern::new("plugin/log"));
-    assert_eq!(said.len(), 1);
-    assert!(
-        said[0].payload.contains("index.html"),
-        "{}",
-        said[0].payload
-    );
-    assert_eq!(
-        said[0].session.as_ref().map(SessionId::as_str),
-        Some("main")
-    );
+    // It writes, and says nothing: where a page is, is the agent file's to say.
+    assert_eq!(harness.events().matching(&Pattern::new("plugin/log")), []);
 }
 
 #[tokio::test]
@@ -222,9 +212,6 @@ async fn a_new_instance_goes_on_from_what_the_last_one_wrote() {
     let written = index(&dir).unwrap();
     assert_eq!(written["generation"], json!(1));
     assert_eq!(written["events"], json!(after.len()));
-    // Told once, by the first instance, and not again.
-    let said = harness.events().matching(&Pattern::new("plugin/log"));
-    assert_eq!(said.len(), 1);
 }
 
 #[tokio::test]

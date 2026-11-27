@@ -11,12 +11,15 @@
 //! `corduroy stop`.
 
 use std::io::{BufRead, Write};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, mpsc};
+use std::thread;
 
 use corduroy_harness::core::{Event, ListenerId, Pattern, SessionId, Source};
 use corduroy_harness::message::decode;
-use corduroy_harness::{Answer, Harness, HarnessError, Outcome, Status};
+use corduroy_harness::{Answer, Ask, Harness, HarnessError, Outcome, Status};
 use serde_json::Value;
+use tokio::sync::Notify;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 /// Where the terminal writes: shared, because events are shown from inside the loop.
 pub type Out = Arc<Mutex<dyn Write + Send>>;
@@ -27,6 +30,70 @@ pub fn say(out: &Out, text: &str) {
     let mut out = out.lock().unwrap_or_else(PoisonError::into_inner);
     drop(writeln!(out, "{text}"));
     drop(out.flush());
+}
+
+/// Read a line of `input` each time one is `wanted` and hand it over, `None` for the end of
+/// the input, until nobody wants or takes any more.
+fn read_lines(
+    input: &mut dyn BufRead,
+    wanted: &mpsc::Receiver<()>,
+    read: &UnboundedSender<Option<String>>,
+) {
+    while wanted.recv().is_ok() {
+        let mut line = String::new();
+        let more = input.read_line(&mut line).unwrap_or(0) > 0;
+        if read.send(more.then_some(line)).is_err() {
+            return;
+        }
+    }
+}
+
+/// What a person types, a line at a time.
+///
+/// The lines are read on a thread of their own, so that waiting for one can be given up:
+/// a question put at the terminal may be answered somewhere else first. A line that was
+/// waited for and then no longer wanted is kept, and is the next one handed out.
+#[derive(Debug)]
+pub struct Lines {
+    /// Asks the thread for one more line.
+    want: mpsc::Sender<()>,
+    /// The lines it read, `None` for the end of the input.
+    typed: UnboundedReceiver<Option<String>>,
+    /// Whether a line was asked for that has not been handed out yet.
+    asked: bool,
+}
+
+impl Lines {
+    /// The lines of `input`, read only as they are asked for.
+    #[must_use]
+    pub fn new(mut input: Box<dyn BufRead + Send>) -> Self {
+        let (want, wanted) = mpsc::channel::<()>();
+        let (read, typed) = unbounded_channel();
+        let reader = move || read_lines(&mut *input, &wanted, &read);
+        // Without a thread nobody can type: every line asked for is the end of the input.
+        drop(
+            thread::Builder::new()
+                .name("corduroy-input".to_owned())
+                .spawn(reader),
+        );
+        Self {
+            want,
+            typed,
+            asked: false,
+        }
+    }
+
+    /// The next line typed, or `None` once the input has ended. Giving up the wait loses
+    /// nothing: the line, when it comes, is the next one returned.
+    pub async fn next(&mut self) -> Option<String> {
+        if !self.asked {
+            self.want.send(()).ok()?;
+            self.asked = true;
+        }
+        let line = self.typed.recv().await.flatten();
+        self.asked = false;
+        line
+    }
 }
 
 /// At most `limit` characters of the first line of `text`, marked where it was cut.
@@ -94,6 +161,15 @@ pub fn describe(event: &Event) -> Option<String> {
                 Some(format!("  ✗ {}", short(output, 200)))
             }
         }
+        // An answer typed here needs no line; one given elsewhere does.
+        "gate/answer" if !field(&payload, "via").is_empty() => {
+            let (via, reason) = (field(&payload, "via"), field(&payload, "reason"));
+            Some(if payload.get("allow") == Some(&Value::Bool(true)) {
+                format!("  ✓ allowed on {via}")
+            } else {
+                format!("  ✗ refused on {via}: {reason}")
+            })
+        }
         "gate/decision" if field(&payload, "verdict") == "deny" => Some(format!(
             "  ✗ denied by {}: {}",
             field(&payload, "gate"),
@@ -144,10 +220,47 @@ pub fn watch(harness: &Harness, session: &SessionId, out: &Out) -> ListenerId {
     })
 }
 
+/// Who answered a question put at the terminal.
+enum Heard {
+    /// The person here, with this line.
+    Typed(String),
+    /// Someone at a front end: the answer is in the log already.
+    Elsewhere,
+    /// Nobody, and nobody will: the input has ended.
+    Nobody,
+}
+
+/// Whether `ask` still waits for an answer.
+fn waits(harness: &Harness, ask: &Ask) -> bool {
+    harness.journal(&ask.session).is_ok_and(|journal| {
+        journal
+            .waiting()
+            .iter()
+            .any(|waiting| waiting.call == ask.call)
+    })
+}
+
+/// Wait for an answer to `ask`: a line typed here, or an answer recorded from a front end,
+/// of which `answered` tells.
+async fn hear(harness: &Harness, ask: &Ask, input: &mut Lines, answered: &Notify) -> Heard {
+    loop {
+        if !waits(harness, ask) {
+            return Heard::Elsewhere;
+        }
+        tokio::select! {
+            line = input.next() => return line.map_or(Heard::Nobody, Heard::Typed),
+            // Some question was answered: look again whether it was this one.
+            () = answered.notified() => {}
+        }
+    }
+}
+
 /// Ask a person about each tool call `outcome` waits on, until the run no longer waits.
 ///
 /// `y` allows a call; anything else refuses it, and any text other than `n` is the reason the
-/// model is given. When the input ends the run is left waiting, in the log, for `corduroy
+/// model is given. A question answered at a front end meanwhile (the agent's page, say) is
+/// answered: the run is taken on from there, and what was being typed goes to the next
+/// question. When the input ends the run is left waiting, in the log, for `corduroy
 /// continue` in this process or another.
 ///
 /// # Errors
@@ -155,9 +268,26 @@ pub fn watch(harness: &Harness, session: &SessionId, out: &Out) -> ListenerId {
 /// As [`Harness::answer`].
 pub async fn settle(
     harness: &Harness,
-    mut outcome: Outcome,
-    input: &mut (dyn BufRead + Send),
+    outcome: Outcome,
+    input: &mut Lines,
     out: &Out,
+) -> Result<Outcome, HarnessError> {
+    let answered = Arc::new(Notify::new());
+    let heard = Arc::clone(&answered);
+    let listener = harness
+        .events()
+        .subscribe("gate/answer", move |_| heard.notify_one());
+    let settled = ask_each(harness, outcome, input, out, &answered).await;
+    harness.events().unsubscribe(listener);
+    settled
+}
+
+async fn ask_each(
+    harness: &Harness,
+    mut outcome: Outcome,
+    input: &mut Lines,
+    out: &Out,
+    answered: &Notify,
 ) -> Result<Outcome, HarnessError> {
     while let Status::Waiting { asks, .. } = &outcome.status {
         let Some(ask) = asks.first().cloned() else {
@@ -173,18 +303,34 @@ pub async fn settle(
                 ask.reason
             ),
         );
-        let mut line = String::new();
-        if input.read_line(&mut line).unwrap_or(0) == 0 {
+        let typed = match hear(harness, &ask, input, answered).await {
+            Heard::Typed(line) => Some(line),
+            Heard::Elsewhere => None,
             // Nobody is there to answer. The run waits in the log for whoever is next.
-            break;
-        }
-        let answer = match line.trim() {
+            Heard::Nobody => break,
+        };
+        let answer = typed.map(|line| match line.trim() {
             "y" | "Y" | "yes" => Answer::Allow,
             "" | "n" | "N" | "no" => Answer::Deny("the user declined".to_owned()),
             reason => Answer::Deny(reason.to_owned()),
+        });
+        let session = &ask.session;
+        let typed = match answer {
+            Some(answer) => {
+                let run = harness.answer(session, &ask.call, answer);
+                Some(stoppable(harness, session, run).await)
+            }
+            None => None,
         };
-        let answered = harness.answer(&ask.session, &ask.call, answer);
-        outcome = stoppable(harness, &ask.session, answered).await?;
+        outcome = match typed {
+            Some(Ok(outcome)) => outcome,
+            // Answered at a front end, perhaps in the moment the line was typed: the run
+            // is taken on from what the log holds.
+            None | Some(Err(HarnessError::NotAsked { .. })) => {
+                stoppable(harness, session, harness.answered(session)).await?
+            }
+            Some(Err(error)) => return Err(error),
+        };
     }
     Ok(outcome)
 }
@@ -234,7 +380,7 @@ pub async fn prompt(
     harness: &Harness,
     session: &SessionId,
     prompt: &str,
-    input: &mut (dyn BufRead + Send),
+    input: &mut Lines,
     out: &Out,
 ) -> Result<Outcome, HarnessError> {
     let outcome = resume(harness, session, input, out).await?;
@@ -254,7 +400,7 @@ pub async fn prompt(
 pub async fn resume(
     harness: &Harness,
     session: &SessionId,
-    input: &mut (dyn BufRead + Send),
+    input: &mut Lines,
     out: &Out,
 ) -> Result<Outcome, HarnessError> {
     let outcome = stoppable(harness, session, harness.continue_run(session)).await?;

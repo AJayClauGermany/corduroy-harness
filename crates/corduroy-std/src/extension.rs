@@ -52,6 +52,9 @@ pub const CHATGPT_SECRET: &str = "chatgpt-secret";
 /// entry is built from when it says `kind = "keychain"`, or says nothing at all.
 pub const KEYCHAIN_SECRET: &str = "keychain-secret";
 
+/// The extension kind that serves the agent's page in a browser.
+pub const PAGE: &str = "page";
+
 /// The extension kind a `[secrets.<name>]` entry of `kind` is built from: `<kind>-secret`.
 #[must_use]
 pub fn secret_kind(kind: &str) -> String {
@@ -170,6 +173,20 @@ fn shell_kernel_in(asked: &Asked<'_>, shell: ShellKernel) -> Built {
 /// The MCP server `[mcp.<name>]` describes: a `command` started through a kernel (`shell` by
 /// default), or a `url`, with the `secret` or the variable (`bearer_token_env`) its bearer
 /// token comes from.
+/// The page an entry of the kind [`PAGE`] asks for.
+fn page_in(asked: &Asked<'_>) -> Built {
+    asked.only(&["port"])?;
+    let port = match asked.config.get("port") {
+        None => 0,
+        Some(port) => port
+            .as_u64()
+            .and_then(|port| u16::try_from(port).ok())
+            .ok_or("`port` is a whole number from 0 (any free port) to 65535")?,
+    };
+    let config = corduroy_page::Config::new().port(port);
+    Ok(Box::new(corduroy_page::page(asked.name, config)))
+}
+
 fn mcp_server_in(asked: &Asked<'_>) -> Built {
     asked.only(&[
         "command",
@@ -366,6 +383,7 @@ impl Extensions {
     /// | `shell-kernel` | `dir` (default `{workspace}`), `program` (default `sh`; any POSIX shell, such as `bash`, Git for Windows' included), `env` (variables to set), `pass` (variables of the command's own environment to hand through) | a persistent shell as the kernel named like the entry, starting from an empty environment; what `[kernels.<name>]` with `kind = "shell"` builds |
     /// | `powershell-kernel` | `dir` (default `{workspace}`), `program` (default `powershell` on Windows, `pwsh` elsewhere), `env`, `pass` | a persistent PowerShell as the kernel named like the entry; what `[kernels.<name>]` with `kind = "powershell"` builds |
     /// | `http-client` | none | the client the `http` capability sends through, for `http` and `https` |
+    /// | `page` | `port` (any free one by default) | the agent's page in a browser, served on `127.0.0.1` at an address the command says when it is about to run the agent: the record as it grows, and a gate's question answered there |
     /// | `mcp` | `command` (with `args`, `env` and `kernel`, `shell` by default) or `url` (with `secret` or `bearer_token_env`), and `timeout_seconds` | the tools of one MCP server, as `<name>__<tool>`; what `[mcp.<name>]` builds |
     /// | `env-secret` | `env` | the secret named like the entry, read from that environment variable when it is used; what `[secrets.<name>]` builds |
     /// | `keychain-secret` | none | the secret named like the entry, read from the system's keychain (the macOS Keychain, the Windows Credential Manager, the Secret Service) when it is first used; what `[secrets.<name>]` with `kind = "keychain"` builds |
@@ -389,6 +407,7 @@ impl Extensions {
                 asked.only(&[])?;
                 Ok(Box::new(corduroy_http::http_client()))
             })
+            .kind(PAGE, page_in)
             .kind(MCP, mcp_server_in);
         let system: Arc<dyn Keychain> = Arc::new(Os::new());
         kinds.kind(ENV_SECRET, env_secret_in).keeping_in(&system)

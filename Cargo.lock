@@ -546,6 +546,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "corduroy-page"
+version = "0.1.0"
+dependencies = [
+ "corduroy-harness",
+ "getrandom 0.3.4",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "corduroy-providers"
 version = "0.1.0"
 dependencies = [
@@ -580,6 +590,7 @@ dependencies = [
  "corduroy-jsonl",
  "corduroy-keychain",
  "corduroy-mcp",
+ "corduroy-page",
  "corduroy-providers",
  "corduroy-shell",
  "corduroy-test-support",

@@ -22,6 +22,7 @@ corduroy-keychain = { workspace = true }
 corduroy-jsonl = { workspace = true }
 corduroy-shell = { workspace = true }
 corduroy-mcp = { workspace = true }
+corduroy-page = { workspace = true }
 corduroy-providers = { workspace = true }
 serde_json = { workspace = true, features = ["std"] }
 

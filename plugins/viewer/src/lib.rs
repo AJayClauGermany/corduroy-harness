@@ -117,7 +117,6 @@ impl Writer {
                 last: 0,
                 events: 0,
                 behind: false,
-                announced: false,
                 sessions: BTreeMap::new(),
             },
             sealed: 0,
@@ -167,7 +166,6 @@ impl Writer {
             // nothing of it is kept.
             None => {
                 self.start_over(index.generation + 1);
-                self.index.announced = index.announced;
                 self.leftover = index.chunks;
             }
         }
@@ -269,25 +267,11 @@ fn lost_a_session(index: &Index) -> bool {
     })
 }
 
-/// Bring the page up to date, saying so once if it cannot be written. `in_a_run` says a
-/// run is going, which is when a line in the log is shown to the person: the first time
-/// the page is written, that is when they are told where it is.
-fn follow(in_a_run: bool) {
+/// Bring the page up to date, saying so once if it cannot be written.
+fn follow() {
     let mut writer = WRITER.lock().unwrap_or_else(PoisonError::into_inner);
     if writer.stage == Stage::Broken {
         return;
-    }
-    // Said before the files are written, so that the index written next remembers it.
-    let announce = in_a_run && writer.stage == Stage::Following && !writer.index.announced;
-    if announce {
-        writer.index.announced = true;
-        log(
-            Level::Info,
-            &format!(
-                "open {} in a browser to see what the agent does",
-                writer.path("index.html")
-            ),
-        );
     }
     if let Err(error) = writer.sync() {
         writer.stage = Stage::Broken;
@@ -316,7 +300,7 @@ impl Plugin for Viewer {
         }
         // Whatever the last process wrote after its last followed event, and this one so
         // far, so that the page is current as soon as the agent has started.
-        follow(false);
+        follow();
         let mut info = PluginInfo::new("viewer", env!("CARGO_PKG_VERSION"));
         for topic in FOLLOWED {
             info = info.subscribe(topic);
@@ -324,8 +308,8 @@ impl Plugin for Viewer {
         Ok(info)
     }
 
-    fn on_event(event: Event) {
-        follow(event.session.is_some());
+    fn on_event(_event: Event) {
+        follow();
     }
 }
 

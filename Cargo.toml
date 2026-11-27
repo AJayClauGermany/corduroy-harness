@@ -25,6 +25,7 @@ corduroy-wasm = { path = "crates/corduroy-wasm", version = "0.1.0" }
 corduroy-jsonl = { path = "crates/corduroy-jsonl", version = "0.1.0" }
 corduroy-shell = { path = "crates/corduroy-shell", version = "0.1.0" }
 corduroy-http = { path = "crates/corduroy-http", version = "0.1.0" }
+corduroy-page = { path = "crates/corduroy-page", version = "0.1.0" }
 corduroy-chatgpt = { path = "crates/corduroy-chatgpt", version = "0.1.0" }
 corduroy-keychain = { path = "crates/corduroy-keychain", version = "0.1.0" }
 corduroy-mcp = { path = "crates/corduroy-mcp", version = "0.1.0" }
