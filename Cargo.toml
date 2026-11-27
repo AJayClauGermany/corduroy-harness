@@ -157,6 +157,10 @@ required-features = ["wasm"]
 name = "stop"
 required-features = ["tokio"]
 
+[[test]]
+name = "limits"
+required-features = ["std"]
+
 # Plugins are compiled to machine code when they are loaded. With the compiler itself
 # unoptimised that takes seconds per plugin and dominates test time, so the crates on that
 # path are optimised even in debug builds.

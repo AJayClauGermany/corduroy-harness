@@ -1072,9 +1072,10 @@ and for which session, and what a checkpoint's payload holds.
 `ModelReply` says why the model stopped, when its provider does (`StopReason`: finished,
 cut off at its limit, asked for a tool, refused; the set can grow), and the reason is
 recorded. A session says how the model's last answer stopped (`Session::stopped`), and
-the terminal tells the person when it was cut off or declined. The loop acts on none of it:
-what to do (go on after a cut-off answer, ask the person after a refusal) is policy, for a
-step of the loop an extension adds. `ProviderError` is text, so a loop cannot tell a full
+the terminal tells the person when it was cut off or declined. A run whose answer was cut off
+ends as `cut-off`, not `finished`; beyond that the loop acts on none of it: what to do (go
+on after a cut-off answer, ask the person after a refusal) is policy, for a step of the
+loop an extension adds. `ProviderError` is text, so a loop cannot tell a full
 context from a rate limit or a bad key.
 
 *Direction.* What is left is whether those four are the reasons, and a kind on the error.
@@ -1148,16 +1149,18 @@ between the projection and the provider) or always means a custom `Loop`.
 
 ### G20. What limits a run besides the number of turns?
 
-`max_turns` and the restart limit. There is no budget of tokens, cost or time, for a run, a
-session or a child.
+Decided for the agent's own runs
+([What an extension can reach](design.md#what-an-extension-can-reach)): turns, the time a
+run is driven for and the tokens the model writes in it, the last two kept by the harness
+whichever loop runs, with cost to join them. They are settings of the harness today
+(`max_turns`, `max_seconds`, `max_output_tokens` in the agent file), the same for every
+session.
 
-Where a limit is written is decided: a session is started with a set of limits that can
-grow, turns being the first, counted as its loop counts them
-([What an extension can reach](design.md#what-an-extension-can-reach)).
-
-*Direction.* Decide which budgets join that set, and whether each is the loop's own to keep
-or policy asked at a decision point before each model request
-([D3](#d3-which-decision-points-exist-at-10)).
+*Direction.* What is left waits on sessions being started with limits of their own: how a
+child's budgets relate to its parent's (a share of what is left, or its own), whether what
+a child writes counts against the run that waits for it (today a child shares its parent's
+clock and has its own count of tokens), and the unit a budget of cost is written in
+([G17](#g17-where-is-usage-added-up)).
 
 ### G21. Who retries, and who falls back?
 

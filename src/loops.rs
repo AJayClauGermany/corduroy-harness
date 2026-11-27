@@ -203,6 +203,11 @@ impl<'run> Run<'run> {
     /// what it cost as one commit. A model that fails ends the run as
     /// [failed](End::Failed); a person stopping the run does not wait for the answer.
     ///
+    /// This is where a run is held to its time and to what the model may write
+    /// ([`Harness::with_time_limit`], [`Harness::with_output_limit`]), whichever loop asks:
+    /// a run that has used either up ends here without the model being asked, and a
+    /// request still being answered when the time is up is dropped.
+    ///
     /// # Errors
     ///
     /// [`HarnessError::Log`] if the answer could not be stored.

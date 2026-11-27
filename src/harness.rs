@@ -11,6 +11,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::error::Error;
 use core::fmt;
+use core::time::Duration;
 #[cfg(feature = "std")]
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -141,8 +142,20 @@ pub enum Status {
         /// The model's final answer.
         answer: String,
     },
+    /// The model answered, and its answer was cut off at the most it may write in one
+    /// answer, so it is not whole.
+    CutOff {
+        /// The answer, as far as it got.
+        answer: String,
+    },
     /// The model was still working when it ran out of turns.
     TurnLimitReached,
+    /// The model was still working when the run ran out of time
+    /// ([`Harness::with_time_limit`]).
+    TimeLimitReached,
+    /// The model was still working when the run had written all it may
+    /// ([`Harness::with_output_limit`]).
+    OutputLimitReached,
     /// The model could not be reached or failed. The reason is in the run's `turn/end`.
     Failed {
         /// What went wrong.
@@ -169,7 +182,10 @@ impl fmt::Display for Status {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Finished { answer } => write!(f, "finished: {answer}"),
+            Self::CutOff { answer } => write!(f, "cut off: {answer}"),
             Self::TurnLimitReached => f.write_str("stopped: turn limit reached"),
+            Self::TimeLimitReached => f.write_str("stopped: time limit reached"),
+            Self::OutputLimitReached => f.write_str("stopped: output limit reached"),
             Self::Failed { reason } => write!(f, "failed: {reason}"),
             Self::Stopped => f.write_str("stopped"),
             Self::Yielded => f.write_str("yielded"),
@@ -236,7 +252,8 @@ pub struct Harness {
     provider: String,
     model: String,
     system: String,
-    max_turns: u32,
+    /// What a run is held to.
+    budget: Budget,
     restart_limit: u32,
     /// The name of the loop that takes each step, looked up in `loops` on every step.
     looping: String,
@@ -259,7 +276,7 @@ impl fmt::Debug for Harness {
             .field("tools", &self.tools)
             .field("provider", &self.provider)
             .field("model", &self.model)
-            .field("max_turns", &self.max_turns)
+            .field("budget", &self.budget)
             .finish_non_exhaustive()
     }
 }
@@ -268,6 +285,28 @@ impl fmt::Debug for Harness {
 struct Running<'harness> {
     running: &'harness Lock<BTreeMap<SessionId, Stop>>,
     session: SessionId,
+}
+
+/// What a run is held to: its turns, and its time and what the model may write in it where
+/// the host set them.
+#[derive(Debug, Clone, Copy)]
+struct Budget {
+    /// How many model turns it may take.
+    turns: u32,
+    /// For how long it may be driven.
+    time: Option<Duration>,
+    /// How many tokens the model may write in it.
+    output: Option<u64>,
+}
+
+impl Budget {
+    const fn new() -> Self {
+        Self {
+            turns: 25,
+            time: None,
+            output: None,
+        }
+    }
 }
 
 /// Results for the unanswered tool calls of `journal`'s session that must not simply be
@@ -404,7 +443,7 @@ impl Harness {
             provider: DEFAULT_PROVIDER.to_owned(),
             model: "default".to_owned(),
             system: String::new(),
-            max_turns: 25,
+            budget: Budget::new(),
             looping: DEFAULT_LOOP.to_owned(),
             loops,
             restart_limit: 5,
@@ -469,7 +508,38 @@ impl Harness {
     /// [`max_turns`](Self::max_turns); the [`StandardLoop`] ends the run there.
     #[must_use]
     pub const fn with_max_turns(mut self, max_turns: u32) -> Self {
-        self.max_turns = max_turns;
+        self.budget.turns = max_turns;
+        self
+    }
+
+    /// End a run once it has been driven for this long without an answer: the model is not
+    /// asked again, and a request that is still being answered then is dropped. The run
+    /// ends as [`Status::TimeLimitReached`], whichever loop takes its steps.
+    ///
+    /// The time is counted from when the run is taken on ([`run_in`](Self::run_in),
+    /// [`continue_run`](Self::continue_run), [`answer`](Self::answer),
+    /// [`signal`](Self::signal), [`take_on`](Self::take_on)), with the child sessions it
+    /// runs on the way: time spent waiting for a person, or between a crash and being
+    /// picked up, is not counted, and a run picked up again has the whole of it. A host
+    /// that takes steps itself ([`step`](Self::step)) keeps its own time. A tool call
+    /// under way is not cut short. Without the `std` feature there is no clock, and the
+    /// limit is not kept.
+    #[must_use]
+    pub const fn with_time_limit(mut self, limit: Duration) -> Self {
+        self.budget.time = Some(limit);
+        self
+    }
+
+    /// End a run once the model has written this many tokens in it without an answer,
+    /// thinking included, as its provider counts them ([`Usage`](corduroy_core::Usage)):
+    /// the model is not asked again, and the run ends as [`Status::OutputLimitReached`],
+    /// whichever loop takes its steps. The request that passes the limit is answered
+    /// whole, and the tools it asked for are called. Counted from the last message a
+    /// person wrote ([`Session::turn_output_tokens`]), so a run picked up again goes on
+    /// from what it had written.
+    #[must_use]
+    pub const fn with_output_limit(mut self, tokens: u64) -> Self {
+        self.budget.output = Some(tokens);
         self
     }
 
@@ -601,7 +671,19 @@ impl Harness {
     /// How many model turns a run may take without an answer.
     #[must_use]
     pub const fn max_turns(&self) -> u32 {
-        self.max_turns
+        self.budget.turns
+    }
+
+    /// For how long a run may be driven, if that is limited.
+    #[must_use]
+    pub const fn time_limit(&self) -> Option<Duration> {
+        self.budget.time
+    }
+
+    /// How many tokens the model may write in a run, if that is limited.
+    #[must_use]
+    pub const fn output_limit(&self) -> Option<u64> {
+        self.budget.output
     }
 
     /// The steps of the loop plugins have registered.
@@ -1063,9 +1145,15 @@ impl Harness {
             let reason = format!("no model provider is registered as `{}`", self.provider);
             return Ok(Step::End(End::Failed(reason)));
         };
+        if let Some(end) = self.spent(journal, stop) {
+            return Ok(Step::End(end));
+        }
         journal.ask_started(&self.provider, request)?;
-        let Some(reply) = stop.unless_asked(provider.complete(request)).await else {
-            return self.stopped(journal);
+        let answering = stop.unless_asked(provider.complete(request));
+        let reply = match stop.within(self.budget.time, answering).await {
+            Some(Some(reply)) => reply,
+            Some(None) => return self.stopped(journal),
+            None => return Ok(Step::End(End::TimeLimit)),
         };
         match reply {
             Ok(reply) => {
@@ -1081,6 +1169,19 @@ impl Harness {
             }
             Err(error) => Ok(Step::End(End::ModelFailed(error))),
         }
+    }
+
+    /// The limit a run has used up, if it has: its time, as `stop` has counted it, or what
+    /// the model may write.
+    fn spent(&self, journal: &Journal, stop: &Stop) -> Option<End> {
+        if self.budget.time.is_some_and(|limit| stop.driven_for(limit)) {
+            return Some(End::TimeLimit);
+        }
+        let written = journal.session().turn_output_tokens();
+        self.budget
+            .output
+            .is_some_and(|limit| written >= limit)
+            .then_some(End::OutputLimit)
     }
 
     /// What the provider the loop asks says about the loop's model, with whatever the host
@@ -1193,8 +1294,19 @@ fn brought(outcome: &Outcome) -> Option<String> {
     match &outcome.status {
         Status::Finished { answer } => Some(answer.clone()),
         Status::Failed { reason } => Some(format!("The sub-agent failed: {reason}")),
+        Status::CutOff { answer } => Some(format!(
+            "{answer}\n\n[The sub-agent's answer was cut off at the most its model may write.]"
+        )),
         Status::TurnLimitReached => Some(format!(
             "The sub-agent ran out of turns before it answered. The last it said: {}",
+            last()
+        )),
+        Status::TimeLimitReached => Some(format!(
+            "The sub-agent ran out of time before it answered. The last it said: {}",
+            last()
+        )),
+        Status::OutputLimitReached => Some(format!(
+            "The sub-agent had written all it may before it answered. The last it said: {}",
             last()
         )),
         Status::Stopped => Some("The sub-agent was stopped before it finished.".to_owned()),
@@ -1211,7 +1323,12 @@ fn status_of(journal: &Journal, session: &Session) -> Status {
             .map_or(Status::Yielded, |answer| Status::Finished { answer })
     };
     match journal.ended() {
+        Some(End::CutOff) => session
+            .answer()
+            .map_or(Status::Yielded, |answer| Status::CutOff { answer }),
         Some(End::TurnLimit) => Status::TurnLimitReached,
+        Some(End::TimeLimit) => Status::TimeLimitReached,
+        Some(End::OutputLimit) => Status::OutputLimitReached,
         Some(End::Failed(reason)) => Status::Failed { reason },
         Some(End::ModelFailed(error)) => Status::Failed {
             reason: error.to_string(),

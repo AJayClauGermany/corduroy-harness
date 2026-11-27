@@ -47,7 +47,7 @@ Source: the table in [`src/session.rs`](../../src/session.rs).
 | `compaction` | host | `{"summary", "keep_from", "by"}`: the messages before `keep_from` are summarised |
 | `run/restart` | host | `{"attempt"}`: an unfinished run was picked up again |
 | `run/stop` | user | `{}`: a person asked the run to stop; `{"via"}` where they asked through a plugin (the page) |
-| `turn/end` | host | `{"status"}`: `finished`, `turn-limit`, `failed` (with `"reason"`, and `"kind"` where the model gave no answer: `context-overflow`, `rate-limit`, `auth`, `timeout`, `unreachable` or `other`; a reader takes a kind it does not know as `other`), `stopped` or `yielded` |
+| `turn/end` | host | `{"status"}`: `finished`, `cut-off` (the model answered, and the answer stopped at the most it may write, so it is not whole), `turn-limit`, `time-limit`, `output-limit` (the model was still working when the run reached its [`max_turns`, `max_seconds` or `max_output_tokens`](agent-file.md#top-level-keys)), `failed` (with `"reason"`, and `"kind"` where the model gave no answer: `context-overflow`, `rate-limit`, `auth`, `timeout`, `unreachable` or `other`; a reader takes a kind it does not know as `other`), `stopped` or `yielded`. A reader takes a status it does not know as a run that is over without an answer |
 
 A run is **unfinished** from its first `message` to its `turn/end`. One that has no
 `turn/end` because a gate asked, or because a call waits for a signal, is **waiting**, not

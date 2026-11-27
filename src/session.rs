@@ -19,7 +19,7 @@
 //! | `tool/result` | `environment` | `{"id", "tool", "ok", "output"}`, and `"content"` when the result is not one block of text, caused by its `tool/call` |
 //! | `model/request` | `host` | `{"provider", "model", "messages", "tools"}`: the model is about to be asked, with that many messages and tools; what follows it in the session (the model's `message`, or a `turn/end`) says when the answer came |
 //! | `usage` | `agent` | `{"model", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens", "stop"}`, each count only if the provider gave it; the cache counts are part of `input_tokens` and the reasoning count of `output_tokens`; `stop` is why the model stopped (`finished`, `limit`, `tool_calls` or `refused`), if the provider said |
-//! | `turn/end` | `host` | `{"status"}`: `finished`, `turn-limit`, `failed` (with `"reason"`, and `"kind"` where the model gave no answer: `context-overflow`, `rate-limit`, `auth`, `timeout`, `unreachable` or `other`), `stopped` or `yielded` |
+//! | `turn/end` | `host` | `{"status"}`: `finished`, `cut-off` (the answer stopped at the most the model may write), `turn-limit`, `time-limit`, `output-limit`, `failed` (with `"reason"`, and `"kind"` where the model gave no answer: `context-overflow`, `rate-limit`, `auth`, `timeout`, `unreachable` or `other`), `stopped` or `yielded` |
 //! | `run/restart` | `host` | `{"attempt"}`: an unfinished run was picked up again |
 //! | `run/stop` | `user` | `{}`: a person asked the run to stop |
 //! | `tool/wait` | `host` | `{"id", "tool", "signal"}`, caused by its `tool/call`: the call's result comes with the signal |
@@ -493,6 +493,8 @@ pub struct Session {
     summary: Option<(String, usize)>,
     /// Why the model stopped the last time it answered, if its provider said.
     stopped: Option<StopReason>,
+    /// The output tokens of the current turn's model requests.
+    written: u64,
 }
 
 impl Session {
@@ -582,6 +584,14 @@ impl Session {
     #[must_use]
     pub const fn stopped(&self) -> Option<StopReason> {
         self.stopped
+    }
+
+    /// How many tokens the model has written in the current turn, thinking included, as
+    /// its provider counted them: what a run's
+    /// [output limit](crate::Harness::with_output_limit) is held against.
+    #[must_use]
+    pub const fn turn_output_tokens(&self) -> u64 {
+        self.written
     }
 
     /// The model's last answer, if the conversation ends with one that asks for nothing.
@@ -683,8 +693,16 @@ pub struct Wait {
 pub enum End {
     /// The model answered.
     Finished,
+    /// The model answered, and its answer was cut off at the most it may write.
+    CutOff,
     /// The model was still working when it ran out of turns.
     TurnLimit,
+    /// The model was still working when the run ran out of time
+    /// ([`Harness::with_time_limit`](crate::Harness::with_time_limit)).
+    TimeLimit,
+    /// The model was still working when the run had written all it may
+    /// ([`Harness::with_output_limit`](crate::Harness::with_output_limit)).
+    OutputLimit,
     /// The model, or the run, failed, for this reason.
     Failed(String),
     /// The model gave no answer, for this reason. Recorded as a failed run, with the
@@ -698,20 +716,24 @@ pub enum End {
 
 impl End {
     /// How a run with nothing left to do ends: finished if the model has answered `session`,
-    /// yielded if not.
+    /// cut off if that answer stopped at the most the model may write, yielded if there is
+    /// none.
     #[must_use]
     pub fn settled(session: &Session) -> Self {
-        if session.answer().is_some() {
-            Self::Finished
-        } else {
-            Self::Yielded
+        match (session.answer(), session.stopped()) {
+            (Some(_), Some(StopReason::Limit)) => Self::CutOff,
+            (Some(_), _) => Self::Finished,
+            (None, _) => Self::Yielded,
         }
     }
 
     fn payload(&self) -> Value {
         match self {
             Self::Finished => json!({"status": "finished"}),
+            Self::CutOff => json!({"status": "cut-off"}),
             Self::TurnLimit => json!({"status": "turn-limit"}),
+            Self::TimeLimit => json!({"status": "time-limit"}),
+            Self::OutputLimit => json!({"status": "output-limit"}),
             Self::Failed(reason) => json!({"status": "failed", "reason": reason}),
             Self::ModelFailed(error) => json!({
                 "status": "failed",
@@ -729,7 +751,10 @@ impl End {
         let payload: Value = serde_json::from_str(payload).ok()?;
         Some(match payload.get("status")?.as_str()? {
             "finished" => Self::Finished,
+            "cut-off" => Self::CutOff,
             "turn-limit" => Self::TurnLimit,
+            "time-limit" => Self::TimeLimit,
+            "output-limit" => Self::OutputLimit,
             "failed" => {
                 let reason = payload
                     .get("reason")
@@ -808,6 +833,8 @@ struct State {
     input_tokens: u64,
     /// Why the model stopped the last time it answered, if its provider said.
     stopped: Option<StopReason>,
+    /// The output tokens of the model requests since a person last wrote.
+    written: u64,
     /// Tool calls that waited for a signal, by tool-call id, with the payload once it came.
     waits: BTreeMap<String, Waited>,
     /// The tool calls waiting for a response, by tool-call id.
@@ -842,8 +869,18 @@ struct Batch {
     closed: Vec<String>,
     /// What the gates decided about tool calls, by tool-call id.
     gated: Vec<(String, Gated)>,
-    /// A model request recorded in this batch: its input tokens, and why the model stopped.
-    asked: Option<(u64, Option<StopReason>)>,
+    /// A model request recorded in this batch.
+    asked: Option<Asked>,
+}
+
+/// What a model request came to.
+struct Asked {
+    /// The tokens it read.
+    input: u64,
+    /// The tokens the model wrote.
+    output: u64,
+    /// Why the model stopped, if its provider said.
+    stopped: Option<StopReason>,
 }
 
 impl Batch {
@@ -888,6 +925,7 @@ impl State {
             compaction: None,
             input_tokens: 0,
             stopped: None,
+            written: 0,
             waits: BTreeMap::new(),
             calls: BTreeMap::new(),
             unfinished: false,
@@ -954,6 +992,10 @@ impl State {
         for result in message.tool_results() {
             self.calls.remove(&result.id);
         }
+        // A person's message begins a turn, and what the model writes is counted from there.
+        if message.role == Role::User && !message.is_tool_results() {
+            self.written = 0;
+        }
         let message = self.resolved(message);
         self.messages.push(message);
         self.message_ids.push(id);
@@ -979,6 +1021,12 @@ impl State {
             .or_else(|| usage.pointer("/usage/input_tokens"))
             .and_then(Value::as_u64)
             .unwrap_or(0);
+        let written = usage
+            .get("output_tokens")
+            .or_else(|| usage.pointer("/usage/output_tokens"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        self.written = self.written.saturating_add(written);
         self.stopped = usage
             .get("stop")
             .and_then(Value::as_str)
@@ -995,6 +1043,7 @@ impl State {
             messages: self.messages.clone(),
             summary,
             stopped: self.stopped,
+            written: self.written,
         }
     }
 
@@ -1251,7 +1300,11 @@ impl Journal {
                     batch
                         .drafts
                         .push(Draft::new(Source::Agent, USAGE).payload(payload.to_string()));
-                    batch.asked = Some((usage.input_tokens.unwrap_or(0), stop));
+                    batch.asked = Some(Asked {
+                        input: usage.input_tokens.unwrap_or(0),
+                        output: usage.output_tokens.unwrap_or(0),
+                        stopped: stop,
+                    });
                 }
                 Effect::Compacted {
                     summary,
@@ -1646,8 +1699,9 @@ impl State {
         for call in batch.closed {
             self.calls.remove(&call);
         }
-        if let Some((tokens, stopped)) = batch.asked {
-            (self.input_tokens, self.stopped) = (tokens, stopped);
+        if let Some(asked) = batch.asked {
+            (self.input_tokens, self.stopped) = (asked.input, asked.stopped);
+            self.written = self.written.saturating_add(asked.output);
         }
     }
 }
@@ -1881,6 +1935,7 @@ mod tests {
             ],
             summary: Some(("they talked".into(), 2)),
             stopped: None,
+            written: 0,
         };
 
         let view = session.for_model();

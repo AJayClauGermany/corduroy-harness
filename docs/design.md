@@ -865,11 +865,24 @@ log says what each session ran as:
 | Loop | A name in `Loops`. |
 | Instructions | The text its system prompt starts with. Plugins' prompt parts follow it, rendered for the session and so under its grants. |
 | Grants | As above. |
-| Limits | A set that can grow. Turns are its first entry, counted as the session's loop counts them. A budget of time, tokens or cost has a place to go (G20). |
+| Limits | A set that can grow. Turns are its first entry, counted as the session's loop counts them. Time and what the model writes are the next two, and cost has a place to go once usage carries one (see below). |
 
 Gates are not on the list. They hold for every session, since taking a guard away widens
 what an agent may do. A gate is told the session, and may treat sessions differently.
 
+- *What bounds a run.* Three budgets: turns, the time the run is driven for, and the
+  tokens the model writes in it. Turns are the loop's to count, since only it knows what a
+  turn is. Time and output are the harness's, kept whichever loop takes the steps (they
+  are looked at wherever a loop asks the model, and a request still being answered when
+  the time is up is dropped), because a limit that holds only while a certain plugin is
+  loaded is not a limit. Each ends the run with an ending of its own (`turn-limit`,
+  `time-limit`, `output-limit`), none of them a failure: what the run did is done, and the
+  next message goes on. Time is a budget of the clock and the other two of fuel; cost is
+  fuel too, and joins them when usage states one. A gate may also end a run, for a reason
+  no budget expresses (a run about to read what it must not), but that is a guard someone
+  adds, never the default. Time is counted while a host drives the run, so waiting for a
+  person costs nothing and a run picked up again has all of it; what the model wrote is
+  read from the log, so it carries over.
 - *The values are recorded, not a name for them.* A session picked up after its agent file
   changed runs as it started. A `session/start` that says none of this, as every log written
   so far does, runs as the agent is configured.
