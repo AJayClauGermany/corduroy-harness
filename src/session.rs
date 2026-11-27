@@ -88,8 +88,9 @@ use anyhow::{Context as _, Result};
 use corduroy_core::ModelRequest;
 use corduroy_core::sync::Lock;
 use corduroy_core::{
-    Decision, Draft, Event, EventId, EventStream, LogError, Message, Part, Query, Role, SessionId,
-    Source, StopReason, TOOL_CALL, ToolCall, ToolOutput, ToolResult, Usage, Verdict,
+    BYTES_PER_TOKEN, Content, Decision, Draft, Event, EventId, EventStream, LogError, Message,
+    Part, Query, Role, SessionId, Source, StopReason, TOOL_CALL, ToolCall, ToolOutput, ToolResult,
+    Usage, Verdict,
 };
 use serde_json::{Value, json};
 
@@ -715,6 +716,14 @@ pub enum End {
 }
 
 impl End {
+    /// Whether the run ended because its request was more than the model holds.
+    pub(crate) fn overflowed(&self) -> bool {
+        matches!(
+            self,
+            Self::ModelFailed(error) if error.kind() == ProviderErrorKind::ContextOverflow
+        )
+    }
+
     /// How a run with nothing left to do ends: finished if the model has answered `session`,
     /// cut off if that answer stopped at the most the model may write, yielded if there is
     /// none.
@@ -831,6 +840,13 @@ struct State {
     compaction: Option<(String, EventId)>,
     /// The input tokens of the last model request, unless a compaction came after it.
     input_tokens: u64,
+    /// The tokens the model wrote in answer to that request, which the next one sends back.
+    replied: u64,
+    /// The bytes of the messages added since that request was answered.
+    added: usize,
+    /// Whether the last run ended because its request was more than the model holds, and
+    /// nothing has been answered or summarised since.
+    overflowed: bool,
     /// Why the model stopped the last time it answered, if its provider said.
     stopped: Option<StopReason>,
     /// The output tokens of the model requests since a person last wrote.
@@ -924,6 +940,9 @@ impl State {
             message_ids: Vec::new(),
             compaction: None,
             input_tokens: 0,
+            replied: 0,
+            added: 0,
+            overflowed: false,
             stopped: None,
             written: 0,
             waits: BTreeMap::new(),
@@ -997,6 +1016,7 @@ impl State {
             self.written = 0;
         }
         let message = self.resolved(message);
+        self.added = self.added.saturating_add(size(&message));
         self.messages.push(message);
         self.message_ids.push(id);
         self.unfinished = true;
@@ -1027,6 +1047,7 @@ impl State {
             .and_then(Value::as_u64)
             .unwrap_or(0);
         self.written = self.written.saturating_add(written);
+        (self.replied, self.added, self.overflowed) = (written, 0, false);
         self.stopped = usage
             .get("stop")
             .and_then(Value::as_str)
@@ -1045,6 +1066,19 @@ impl State {
             stopped: self.stopped,
             written: self.written,
         }
+    }
+
+    /// What the next model request is expected to take, in tokens, given the conversation
+    /// the model sees: what the last request took and was answered with, and an estimate
+    /// of what was added since; or an estimate of all of it, where no request was answered
+    /// since the last summary.
+    fn expected(&self, view: &[(Option<EventId>, Message)]) -> u64 {
+        if self.input_tokens == 0 {
+            return estimate(view.iter().map(|(_, message)| size(message)).sum());
+        }
+        self.input_tokens
+            .saturating_add(self.replied)
+            .saturating_add(estimate(self.added))
     }
 
     /// The conversation the model sees, before joining, each message with the event it
@@ -1092,11 +1126,12 @@ impl State {
                     .and_then(Value::as_u64)
                     .map_or(event.id, EventId::new);
                 self.compaction = Some((summary.to_owned(), keep_from));
-                self.input_tokens = 0;
+                (self.input_tokens, self.overflowed) = (0, false);
             }
             TURN_END => {
                 (self.unfinished, self.restarts) = (false, 0);
                 self.ended = End::read(&event.payload);
+                self.overflowed = self.ended.as_ref().is_some_and(End::overflowed);
             }
             RESTART => self.restarts = self.restarts.saturating_add(1),
             TOOL_WAIT | SIGNAL => {
@@ -1375,23 +1410,50 @@ impl Journal {
         recorded
     }
 
-    /// What a compaction could summarise now: the messages the model sees from before the
-    /// current turn began. `None` if there is nothing but an earlier summary, or no turn yet.
+    /// What a compaction could summarise now. `None` if there is nothing but an earlier
+    /// summary, or no turn yet.
+    ///
+    /// The cut falls where a step begins, so that no tool call is parted from its result.
+    /// While a turn is under way and every call of its last step is answered, that is the
+    /// last step: the model keeps the calls it just made and their results, and everything
+    /// before them, the start of the turn included, gives way to the summary. Otherwise it
+    /// is where the turn began, and the turn is kept whole.
     pub(crate) fn compactable(&self) -> Option<Compactable> {
-        let (view, input_tokens) = self.state(|state| (state.model_view(), state.input_tokens));
+        let (view, expected, overflowed, open) = self.state(|state| {
+            let view = state.model_view();
+            let open =
+                !state.calls.is_empty() || state.waits.values().any(|wait| wait.payload.is_none());
+            let expected = state.expected(&view);
+            (view, expected, state.overflowed, open)
+        });
         // The turn began with the last message a person wrote that the model still sees.
         let kickoff = view.iter().rposition(|(id, message)| {
             id.is_some() && message.role == Role::User && !message.is_tool_results()
         })?;
-        let earlier = view.get(..kickoff)?;
-        // With nothing but an earlier summary before the turn, there is nothing new.
-        if !earlier.iter().any(|(id, _)| id.is_some()) {
+        let answered = view
+            .last()
+            .is_some_and(|(_, message)| message.is_tool_results());
+        let step = view
+            .iter()
+            .rposition(|(id, message)| id.is_some() && message.role == Role::Assistant)
+            .filter(|step| !open && answered && *step > kickoff);
+        let cut = step.unwrap_or(kickoff);
+        let earlier = view.get(..cut)?;
+        // With nothing but an earlier summary before the cut, there is nothing new.
+        let messages = earlier.iter().filter(|(id, _)| id.is_some()).count();
+        if messages == 0 {
             return None;
         }
+        // A cut inside the turn hides what the person asked for, so it is kept in words.
+        let request = step
+            .and_then(|_| view.get(kickoff))
+            .map(|(_, message)| message.text_content());
         Some(Compactable {
-            keep_from: view.get(kickoff)?.0?,
-            input_tokens,
-            messages: earlier.len(),
+            keep_from: view.get(cut)?.0?,
+            input_tokens: expected,
+            messages,
+            overflowed,
+            request,
         })
     }
 
@@ -1630,6 +1692,7 @@ impl Journal {
         self.events.emit(draft)?;
         self.state(|state| {
             (state.unfinished, state.restarts) = (false, 0);
+            state.overflowed = end.overflowed();
             state.ended = Some(end.clone());
         });
         Ok(())
@@ -1674,7 +1737,7 @@ impl State {
         for (position, summary, keep_from) in batch.compactions {
             if ids.get(position).is_some() {
                 self.compaction = Some((summary, keep_from));
-                self.input_tokens = 0;
+                (self.input_tokens, self.overflowed) = (0, false);
             }
         }
         for (call, (position, tool, input)) in batch.opened {
@@ -1702,6 +1765,7 @@ impl State {
         if let Some(asked) = batch.asked {
             (self.input_tokens, self.stopped) = (asked.input, asked.stopped);
             self.written = self.written.saturating_add(asked.output);
+            (self.replied, self.added, self.overflowed) = (asked.output, 0, false);
         }
     }
 }
@@ -1709,12 +1773,46 @@ impl State {
 /// What a compaction could summarise. See [`Journal::compactable`].
 #[derive(Debug, Clone)]
 pub(crate) struct Compactable {
-    /// The first message to keep: where the current turn began.
+    /// The first message to keep: where the current turn began, or its last step.
     pub(crate) keep_from: EventId,
-    /// The input tokens of the last model request since the last compaction, or zero.
+    /// What the next model request is expected to take, in tokens: the last request's
+    /// count and answer, and an estimate of what was added since.
     pub(crate) input_tokens: u64,
-    /// How many messages would be summarised.
+    /// How many messages would be summarised, an earlier summary not counted.
     pub(crate) messages: usize,
+    /// Whether the last run ended because its request was more than the model holds.
+    pub(crate) overflowed: bool,
+    /// What the person asked for in the turn under way, if the cut would hide it.
+    pub(crate) request: Option<String>,
+}
+
+/// The bytes of `message` that a model reads: its text, its tool calls and their results.
+fn size(message: &Message) -> usize {
+    message
+        .parts
+        .iter()
+        .map(|part| match part {
+            Part::Text(text) => text.len(),
+            Part::ToolCall(call) => call.name.len().saturating_add(call.input.len()),
+            Part::ToolResult(result) => result
+                .output
+                .content()
+                .iter()
+                .map(|block| match block {
+                    Content::Text(text) => text.len(),
+                    _ => 0,
+                })
+                .sum(),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// `bytes` of text as tokens, counted as the core counts them.
+fn estimate(bytes: usize) -> u64 {
+    u64::try_from(bytes)
+        .unwrap_or(u64::MAX)
+        .div_ceil(u64::from(BYTES_PER_TOKEN))
 }
 
 /// Longest part of a message a transcript keeps, in characters.
@@ -1773,7 +1871,7 @@ fn usage_payload(model: &str, usage: Usage, stop: Option<StopReason>) -> Value {
 /// already is. [`recorded_output`] reads it back.
 fn result_payload(id: &str, tool: &str, ok: bool, output: &ToolOutput) -> Value {
     let mut payload = json!({"id": id, "tool": tool, "ok": ok, "output": output.to_text()});
-    if !matches!(output.content(), [corduroy_core::Content::Text(_)])
+    if !matches!(output.content(), [Content::Text(_)])
         && let Some(fields) = payload.as_object_mut()
     {
         fields.insert("content".to_owned(), encode_content(output));
@@ -1794,8 +1892,6 @@ fn recorded_output(id: EventId, payload: &Value) -> Result<ToolOutput> {
 #[cfg(test)]
 mod tests {
     use alloc::vec;
-
-    use corduroy_core::Content;
 
     use super::*;
 

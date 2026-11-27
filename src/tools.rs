@@ -2,6 +2,7 @@
 
 #[cfg(feature = "std")]
 use alloc::borrow::ToOwned;
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
@@ -11,6 +12,7 @@ use anyhow::Result;
 use corduroy_core::call::Serve;
 use corduroy_core::{Message, ToolCall, ToolError, ToolOutput, ToolResult, Tools};
 
+use crate::bound::Bounds;
 use crate::session::Journal;
 use crate::stop::Stop;
 
@@ -27,13 +29,23 @@ pub(crate) const NOT_RUN: &str = "not run: the run was stopped before this call"
 #[derive(Debug)]
 pub struct PluginTools {
     tools: Arc<Tools>,
+    bounds: Option<Bounds>,
 }
 
 impl PluginTools {
     /// Run tools from `tools`.
     #[must_use]
     pub const fn new(tools: Arc<Tools>) -> Self {
-        Self { tools }
+        Self {
+            tools,
+            bounds: None,
+        }
+    }
+
+    /// Hold each call's result to `bounds`: its tool's own budget and the model's share.
+    pub(crate) const fn bounded(mut self, bounds: Bounds) -> Self {
+        self.bounds = Some(bounds);
+        self
     }
 
     /// Run `calls` of `journal`'s session one after another and return the message that
@@ -42,6 +54,10 @@ impl PluginTools {
     ///
     /// A call whose tool says it waits for a signal (see [`corduroy_core::call`]) is
     /// recorded as waiting and answered with a placeholder until the signal comes.
+    ///
+    /// Each `tool/result` holds what its tool returned. The message is what the model is
+    /// shown: a result longer than its call's bound, or a step's results longer together
+    /// than the step's, is cut there and says so (see [`bound`](crate::bound)).
     pub(crate) async fn run(
         &self,
         journal: &Arc<Journal>,
@@ -49,6 +65,7 @@ impl PluginTools {
         stop: &Stop,
     ) -> Result<Message> {
         let mut results = Message::user();
+        let mut budgets = BTreeMap::new();
         for call in calls {
             if stop.asked() {
                 results = results.result(ToolResult::failed(call.id, NOT_RUN));
@@ -57,9 +74,15 @@ impl PluginTools {
             // Intent first: if this cannot be stored, the tool must not run.
             journal.start_call(&call.id)?;
             let tools = Arc::clone(&self.tools);
-            let serve = Serve::session(journal.id().clone())
+            let mut serve = Serve::session(journal.id().clone())
                 .call(call.id.clone())
                 .stopped_by(stop.flag());
+            // What the call may return: its tool's own budget, held to the model's share.
+            let declared = tools.get(&call.name).and_then(|tool| tool.spec().result);
+            if let Some(budget) = self.bounds.and_then(|bounds| bounds.call(declared)) {
+                serve = serve.budget(budget.tokens);
+                budgets.insert(call.id.clone(), budget);
+            }
             let (name, input) = (call.name.clone(), call.input.clone());
             // Tools are synchronous and may run for a while (a shell command, say). The call
             // is served in its scope, so what it calls knows its session, can make it wait,
@@ -85,7 +108,10 @@ impl PluginTools {
             journal.finish_call(&call.id, ok, &output)?;
             results = results.result(ToolResult::new(call.id, ok, output));
         }
-        Ok(results)
+        Ok(match self.bounds {
+            Some(bounds) => bounds.hold(results, &budgets),
+            None => results,
+        })
     }
 }
 

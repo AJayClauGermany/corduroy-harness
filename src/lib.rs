@@ -89,6 +89,7 @@ extern crate alloc;
 #[cfg(any(feature = "std", test))]
 extern crate std;
 
+pub mod bound;
 pub mod children;
 pub mod compact;
 pub mod gates;

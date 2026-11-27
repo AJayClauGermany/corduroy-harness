@@ -25,6 +25,7 @@ use corduroy_core::{
 #[cfg(feature = "std")]
 use corduroy_core::{KERNELS, Kernels};
 
+use crate::bound::Bounds;
 use crate::children::{SESSIONS, SessionsService};
 use crate::compact::CompactOperation;
 use crate::gates::GateOperation;
@@ -872,8 +873,24 @@ impl Harness {
     }
 
     /// As [`settled`], with what this harness's tools say of themselves.
+    ///
+    /// A result handed over from the log is held to the same bounds as one just returned.
     fn settled(&self, journal: &Journal, not_run: &str) -> Option<Message> {
-        settled(journal, not_run, &|tool| self.replay_safe(tool))
+        let results = settled(journal, not_run, &|tool| self.replay_safe(tool))?;
+        let bounds = Bounds::for_model(&self.model_info());
+        let budgets = journal
+            .session()
+            .pending_calls()
+            .into_iter()
+            .filter_map(|call| {
+                let declared = self
+                    .tools
+                    .get(&call.name)
+                    .and_then(|tool| tool.spec().result);
+                Some((call.id, bounds.call(declared)?))
+            })
+            .collect();
+        Some(bounds.hold(results, &budgets))
     }
 
     /// Answer the gate that asked about the tool call `call` in `session`. Once every call
@@ -1097,7 +1114,8 @@ impl Harness {
         calls: Vec<ToolCall>,
         stop: &Stop,
     ) -> Result<Step, HarnessError> {
-        let tools = PluginTools::new(Arc::clone(&self.tools));
+        let bounds = Bounds::for_model(&self.model_info());
+        let tools = PluginTools::new(Arc::clone(&self.tools)).bounded(bounds);
         let results = tools.run(journal, calls, stop).await?;
         journal.apply(vec![Effect::from(results)])?;
         Ok(Step::Applied("tools".to_owned()))

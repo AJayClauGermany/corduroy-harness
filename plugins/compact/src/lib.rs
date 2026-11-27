@@ -2,7 +2,7 @@
 //!
 //! The harness asks the service this plugin provides, `compaction`, before each step of the
 //! loop: `due` says whether the conversation should be condensed, and `summarize` writes the
-//! summary the model will see in place of the messages before the current turn. The harness
+//! summary the model will see in place of the messages before the cut. The harness
 //! picks where to cut and records the summary; the messages stay in the log.
 //!
 //! Configuration: `model`, the model that writes summaries, as `<provider>/<model>` (the
@@ -10,7 +10,11 @@
 //! conversation is due; and `max_messages`, a count of earlier messages past which it is due
 //! whatever the tokens (off by default). Without `max_tokens` the conversation is due at
 //! three quarters of what the session's model holds, which the harness passes on when the
-//! model's description says, and at 100 000 tokens when it does not.
+//! model's description says, and at 100 000 tokens when it does not. A session whose last
+//! run ended because its request was more than the model holds is due whatever the counts
+//! say. What is sent to the summariser is held to half of what the session's model holds
+//! (half of 100 000 tokens when that is not known), counted at three bytes to a token: the
+//! start and the end of the transcript are kept and the middle is left out.
 
 use std::sync::OnceLock;
 
@@ -62,11 +66,48 @@ struct Due {
     /// How much the session's model holds, if its description says.
     #[serde(default)]
     context_tokens: Option<u64>,
+    /// Whether the session's last run ended because its request was more than the model
+    /// holds.
+    #[serde(default)]
+    overflowed: bool,
 }
 
 #[derive(Deserialize)]
 struct Summarize {
     transcript: String,
+    /// How much the session's model holds, if its description says.
+    #[serde(default)]
+    context_tokens: Option<u64>,
+}
+
+/// Bytes of text counted as one token, as the harness counts them.
+const BYTES_PER_TOKEN: u64 = 3;
+
+/// `transcript` held to half of what a model of `context` tokens holds, so that the request
+/// to summarise it is not itself too much: the start, where the goals are, and twice as
+/// much of the end, where the work stands, with the middle left out.
+fn held(transcript: &str, context: Option<u64>) -> String {
+    let tokens = context.unwrap_or(DEFAULT_MAX_TOKENS) / 2;
+    let room = usize::try_from(tokens.saturating_mul(BYTES_PER_TOKEN)).unwrap_or(usize::MAX);
+    if transcript.len() <= room {
+        return transcript.to_owned();
+    }
+    let mut head = room / 3;
+    while !transcript.is_char_boundary(head) {
+        head = head.saturating_sub(1);
+    }
+    let mut tail = transcript.len().saturating_sub(room.saturating_sub(head));
+    while !transcript.is_char_boundary(tail) {
+        tail = tail.saturating_add(1);
+    }
+    let (start, end) = (
+        transcript.get(..head).unwrap_or_default(),
+        transcript.get(tail..).unwrap_or_default(),
+    );
+    format!(
+        "{start}\n[{} bytes of the conversation are left out here]\n{end}",
+        tail.saturating_sub(head)
+    )
 }
 
 fn config() -> Result<&'static Config, CallError> {
@@ -99,13 +140,19 @@ impl Plugin for Compact {
                     input_tokens,
                     messages,
                     context_tokens,
+                    overflowed,
                 } = parse(&call.payload)?;
-                let due = input_tokens >= config.limit(context_tokens)
+                let due = overflowed
+                    || input_tokens >= config.limit(context_tokens)
                     || config.max_messages.is_some_and(|most| messages >= most);
                 Ok(json!({ "due": due }).to_string())
             }
             "summarize" => {
-                let Summarize { transcript } = parse(&call.payload)?;
+                let Summarize {
+                    transcript,
+                    context_tokens,
+                } = parse(&call.payload)?;
+                let transcript = held(&transcript, context_tokens);
                 let request = Completion {
                     system: INSTRUCTIONS.to_owned(),
                     messages: vec![Turn {
@@ -142,5 +189,21 @@ mod tests {
         assert_eq!(config(None).limit(None), DEFAULT_MAX_TOKENS);
         assert_eq!(config(Some(5000)).limit(Some(16_384)), 5000);
         assert_eq!(config(Some(5000)).limit(None), 5000);
+    }
+
+    #[test]
+    fn a_transcript_too_long_for_the_model_keeps_its_start_and_more_of_its_end() {
+        let transcript = format!(
+            "user: the goal\n{}\ntool: the last result",
+            "é".repeat(5000)
+        );
+        // A model of 1000 tokens: 500 of them, 1500 bytes, for the transcript.
+        let held = held(&transcript, Some(1000));
+        assert!(held.len() < 1600, "{}", held.len());
+        assert!(held.starts_with("user: the goal\n"), "{held}");
+        assert!(held.ends_with("tool: the last result"), "{held}");
+        assert!(held.contains("bytes of the conversation are left out here"));
+        assert_eq!(super::held("short", Some(1000)), "short");
+        assert_eq!(super::held(&transcript, None), transcript);
     }
 }

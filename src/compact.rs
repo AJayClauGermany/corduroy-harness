@@ -6,21 +6,31 @@
 //!
 //! | Method | Payload | Answer |
 //! | --- | --- | --- |
-//! | `due` | `{"session", "input_tokens", "messages", "context_tokens"}` | `{"due": true}` or `{"due": false}` |
-//! | `summarize` | `{"session", "transcript"}` | `{"summary": "..."}` |
+//! | `due` | `{"session", "input_tokens", "messages", "context_tokens", "overflowed"}` | `{"due": true}` or `{"due": false}` |
+//! | `summarize` | `{"session", "transcript", "context_tokens"}` | `{"summary": "..."}` |
 //!
-//! `input_tokens` is what the last model request took (zero if a compaction came after it)
-//! and `messages` how many messages the model still sees from before the current turn.
-//! `context_tokens` is how much the session's model holds at once, and is there only if the
-//! model's description says: a service can then start from a share of it. Only
-//! those are ever summarised: the turn in progress is kept whole, so no tool call is parted
-//! from its result. The summary is stored as a `compaction` event in the step's commit, and
+//! `input_tokens` is what the next model request is expected to take: what the last one
+//! took and was answered with, and an estimate, at three bytes of text to a token, of what
+//! was added since (of everything, where no request was answered since the last summary).
+//! `messages` is how many messages would give way to the summary. `context_tokens` is how
+//! much the session's model holds at once, and is there only if the model's description
+//! says: a service can then start from a share of it, and keep what it sends a summariser
+//! within it. `overflowed` is there, and true, when the session's last run ended because
+//! its request was more than the model holds: the conversation is then due whatever the
+//! counts say, since nothing but a summary lets the session be used again.
+//!
+//! The cut falls where a step begins, so no tool call is parted from its result. While a
+//! turn is under way and the calls of its last step are answered, the model keeps that
+//! step and everything before it gives way, the start of the turn included; what the
+//! person asked for is then added to the summary in their own words, since the model no
+//! longer sees their message. Otherwise the cut is where the turn began. The summary is
+//! stored as a `compaction` event in the step's commit, and
 //! the projection hides the summarised messages from the model and puts the summary in their
 //! place (see [`session`](crate::session)). With no such service, nothing happens.
 
 use alloc::borrow::ToOwned;
 use alloc::boxed::Box;
-use alloc::string::ToString;
+use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec;
 
@@ -63,6 +73,12 @@ impl CompactOperation {
     }
 }
 
+/// What comes between a summary and the request of the turn it was made in.
+const REQUEST_NOTE: &str = "\n\nWhat the person asked for, which is still being worked on, in \
+their words:\n";
+/// Most characters of the person's request kept with a summary.
+const REQUEST: usize = 4000;
+
 /// Call `method` of the compaction service as blocking work, since it may ask a model.
 async fn ask(services: &Arc<Services>, method: &'static str, payload: Value) -> Option<Value> {
     let services = Arc::clone(services);
@@ -92,8 +108,13 @@ impl Operation for CompactOperation {
             "input_tokens": compactable.input_tokens,
             "messages": compactable.messages,
         });
-        if let (Some(context), Some(asked)) = (self.model.context_tokens, due.as_object_mut()) {
-            asked.insert("context_tokens".to_owned(), json!(context));
+        if let Some(asked) = due.as_object_mut() {
+            if let Some(context) = self.model.context_tokens {
+                asked.insert("context_tokens".to_owned(), json!(context));
+            }
+            if compactable.overflowed {
+                asked.insert("overflowed".to_owned(), json!(true));
+            }
         }
         // A service that fails, or answers what it should not, leaves the conversation be.
         let is_due = ask(&self.services, "due", due).await;
@@ -101,7 +122,10 @@ impl Operation for CompactOperation {
             return Ok(Next::Pass);
         }
         let transcript = journal.transcript_before(compactable.keep_from);
-        let request = json!({"session": session.id().as_str(), "transcript": transcript});
+        let mut request = json!({"session": session.id().as_str(), "transcript": transcript});
+        if let (Some(context), Some(asked)) = (self.model.context_tokens, request.as_object_mut()) {
+            asked.insert("context_tokens".to_owned(), json!(context));
+        }
         let summary = ask(&self.services, "summarize", request)
             .await
             .and_then(|answer| {
@@ -111,9 +135,14 @@ impl Operation for CompactOperation {
                     .map(str::to_owned)
             })
             .filter(|summary| !summary.trim().is_empty());
-        let Some(summary) = summary else {
+        let Some(mut summary) = summary else {
             return Ok(Next::Pass);
         };
+        if let Some(asked) = compactable.request.filter(|asked| !asked.trim().is_empty()) {
+            let asked: String = asked.chars().take(REQUEST).collect();
+            summary.push_str(REQUEST_NOTE);
+            summary.push_str(&asked);
+        }
         Ok(Next::Continue(vec![Effect::Compacted {
             summary,
             keep_from: compactable.keep_from,
