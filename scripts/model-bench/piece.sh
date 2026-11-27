@@ -75,5 +75,8 @@ saver=$!
 trap 'kill "$saver" 2>/dev/null || true; save' EXIT
 # The clock ends the bench, not an error: what was recorded is kept either way.
 timeout --signal=TERM --kill-after=30 "${minutes}m" "$here/run.sh" "$@" || true
-# A server the bench was serving when the clock ran out is still there.
+# The clock stops run.sh alone: the bench under it, the run it was waiting for and the
+# servers it was serving are still there.
+pkill -f 'model-bench/bench.py' 2>/dev/null || true
+pkill -f 'stage/corduroy' 2>/dev/null || true
 pkill -f 'llama-server' 2>/dev/null || true

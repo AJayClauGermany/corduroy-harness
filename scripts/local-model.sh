@@ -25,6 +25,7 @@
 #   CORDUROY_LOCAL_MODEL_PORT   port on 127.0.0.1 (8080); one server a port, so several models
 #                               can be served side by side
 #   CORDUROY_LOCAL_MODEL_CTX    context window in tokens (16384)
+#   CORDUROY_LOCAL_MODEL_CACHE  the server's prompt cache in MiB (1024)
 #   CORDUROY_LOCAL_MODEL_REPO, CORDUROY_LOCAL_MODEL_FILE, CORDUROY_LOCAL_MODEL_SHA256
 #                               another GGUF to serve; without a SHA-256 it is not verified
 set -euo pipefail
@@ -58,6 +59,7 @@ IFS='|' read -r _ _ _ default_repo default_revision default_file default_sha256 
 dir=${CORDUROY_LOCAL_MODEL_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/corduroy/local-model}
 port=${CORDUROY_LOCAL_MODEL_PORT:-8080}
 ctx=${CORDUROY_LOCAL_MODEL_CTX:-16384}
+cache=${CORDUROY_LOCAL_MODEL_CACHE:-1024}
 repo=${CORDUROY_LOCAL_MODEL_REPO:-$default_repo}
 file=${CORDUROY_LOCAL_MODEL_FILE:-$default_file}
 if [ "$repo" = "$default_repo" ] && [ "$file" = "$default_file" ]; then
@@ -130,9 +132,12 @@ setup() { build_server; fetch_model; }
 # `--jinja` applies the model's own chat template, which is what turns its tool calls into
 # OpenAI `tool_calls`; the sampling is what the model's makers recommend. The words of the
 # two variables are split on purpose: each is a list of arguments.
+# The server keeps earlier prompts in memory to answer a repeated one sooner, up to 8 GB by
+# default: a 0.6 GB model grew past 8 GB in twenty minutes of the bench and was killed with
+# its neighbour by the sandbox's memory limit. 1 GB keeps the conversation in hand.
 # shellcheck disable=SC2206
 server_args=(--model "$model" --alias local --host 127.0.0.1 --port "$port"
-  --ctx-size "$ctx" --jinja $sampling ${CORDUROY_LOCAL_MODEL_ARGS:-})
+  --ctx-size "$ctx" --cache-ram "$cache" --jinja $sampling ${CORDUROY_LOCAL_MODEL_ARGS:-})
 
 healthy() { curl --silent --fail --max-time 2 "http://127.0.0.1:$port/health" >/dev/null; }
 
