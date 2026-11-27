@@ -8,19 +8,19 @@ is notes on work under way, not a stock-take like
 
 ## Where it stands (27 November 2026)
 
-Two pieces, about 75 minutes of bench, in a four-core sandbox with two models served side
+Three pieces, about 100 minutes of bench, in a four-core sandbox with two models served side
 by side (two threads each, 6 to 8 tokens a second). Tier 1 only (one ability a task), **one
 trial each**: read a failure as "it can fail", never as a rate.
 
 | Model | Tier 1 so far | Failed |
 | --- | --- | --- |
 | `lfm3-1.7b` | 18/18 | |
-| `minicpm5-2b` | 11/11 (not finished) | |
-| `qwen3-1.7b` | 5/5 (not finished) | |
+| `minicpm5-2b` | 18/18 | |
+| `qwen3.5-2b` | 13/14 (not finished) | `continuity` |
+| `qwen3-1.7b` | 5/7 (not finished) | `bash` (empty answer), `find` (one request past 300 s) |
 | `qwen3-0.6b` | 9/13 (not finished) | `edit`, `bash`, `find`, `hints` |
 | `qwen3.5-0.8b` | 9/14 (not finished) | `chat`, `shell_state`, `find`, `grep`, `continuity` |
 | `minicpm5-1b` | 4/18 | all but `chat`, `shell_state`, `today`, `mcp` |
-| `qwen3.5-2b` | not started | |
 
 Every model loaded and answered through the harness; none failed to be served. Nothing
 above tier 1 has been run, nor tiers 0, 2 and 3, and no hosted model.
@@ -28,7 +28,7 @@ above tier 1 has been run, nor tiers 0, 2 and 3, and no hosted model.
 ## To go on
 
 ```bash
-scripts/model-bench/piece.sh 80 --models qwen3.5-2b,minicpm5-2b,qwen3-1.7b,qwen3-0.6b,qwen3.5-0.8b --jobs 2 --tier 1 --trials 1
+scripts/model-bench/piece.sh 80 --models qwen3.5-2b,qwen3-1.7b,qwen3-0.6b,qwen3.5-0.8b --jobs 2 --tier 1 --trials 1
 ```
 
 then commit `results/`. After that, the ladder for the models that hold tier 1
@@ -74,8 +74,10 @@ Each of these is from a record in `collected.jsonl` (the task is named).
 8. **One request can take the whole timeout.** `minicpm5-1b` twice had a single request
    still going after 300 seconds (`grep`, `memory`), with no tokens recorded for it.
 
-`lfm3-1.7b` did none of these, as in the stock-take; the two-billion models have not gone
-far enough to say.
+`lfm3-1.7b` and `minicpm5-2b` did none of these, and `qwen3.5-2b` one (4, on
+`continuity`): at about two billion parameters tier 1 holds, and the line this list draws
+is between one and two billion. `qwen3-1.7b`, which thinks before it answers, is the one of
+that size that is slow enough at two threads to meet 5 and 8.
 
 ## What the bench itself got wrong
 
@@ -88,8 +90,9 @@ far enough to say.
   the agent's user; one that was running when the bench was stopped is not. `qwen3.5-0.8b`,
   looking for a `.cfg` file, went through `/var/tmp` and found `qwen3-1.7b`'s unfinished
   `find` workspace. It still failed, but with `--jobs` every model runs as the same user
-  and can read a neighbour's workspace while it is in use: the wall is between the agent
-  and the checks, not between agents. Not fixed here.
+  and could read a neighbour's workspace while it was in use. Now each model's agent is a
+  user of its own, a trial's directory is that user's alone, and a trial left open is
+  closed when the bench next starts.
 - **Two threads a model is slow enough to matter.** At 6 to 8 tokens a second a thinking
   model takes one to two minutes for a one-call task; the 300-second request timeout and
   the 900-second command limit are nearer than in the stock-take. Compare only with runs
