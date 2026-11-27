@@ -10,7 +10,7 @@ use corduroy_harness::core::{
 };
 use corduroy_harness::core::{Message, ToolCall};
 use corduroy_harness::scripted::{ScriptedProvider, call, say};
-use corduroy_harness::{Answer, Harness, HarnessError, MAIN, Status};
+use corduroy_harness::{Answer, FRONTS, Harness, HarnessError, MAIN, OUTSIDE, Outside, Status};
 use corduroy_jsonl as jsonl;
 use corduroy_test_support::scratch;
 use serde_json::{Value, json};
@@ -185,6 +185,91 @@ async fn an_ask_waits_for_a_person_and_runs_once_allowed() {
     assert_eq!(payloads(&harness, "gate/answer")[0]["allow"], true);
     // The gate was asked once, not again after the answer.
     assert_eq!(payloads(&harness, "gate/decision").len(), 1);
+}
+
+#[tokio::test]
+async fn an_answer_recorded_from_outside_is_taken_on_by_the_host() {
+    let runs = Arc::new(AtomicUsize::new(0));
+    let replies = [call("c1", "poke", &json!({})), say("poked")];
+    let harness = harness(EventStream::new(), replies, &runs).unwrap();
+    let main = SessionId::new(MAIN);
+    // What an extension is handed, by name.
+    let outside = harness.app().service::<Outside>(OUTSIDE).unwrap();
+    harness.run("poke it").await.unwrap();
+    assert_eq!(outside.asks().len(), 1);
+    assert_eq!(outside.asks()[0].call, "c1");
+
+    outside.answer("page", &main, "c1", &Answer::Allow).unwrap();
+
+    // Recorded, with who it came through, and nothing run: that is the host's to do.
+    assert_eq!(runs.load(Ordering::SeqCst), 0);
+    let recorded = &payloads(&harness, "gate/answer")[0];
+    assert_eq!(
+        (&recorded["allow"], &recorded["via"]),
+        (&json!(true), &json!("page"))
+    );
+    assert_eq!(outside.asks(), []);
+    // The question is answered once: a second answer, from anywhere, finds nothing waiting.
+    let again = outside.answer("page", &main, "c1", &Answer::Deny("no".into()));
+    assert!(matches!(again, Err(HarnessError::NotAsked { .. })));
+    let typed = harness.answer(&main, "c1", Answer::Allow).await;
+    assert!(matches!(typed, Err(HarnessError::NotAsked { .. })));
+
+    let outcome = harness.answered(&main).await.unwrap();
+
+    assert_eq!(
+        outcome.status,
+        Status::Finished {
+            answer: "poked".into()
+        }
+    );
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+    assert_eq!(payloads(&harness, "gate/answer").len(), 1);
+    assert_eq!(payloads(&harness, "run/restart"), Vec::<Value>::new());
+    // Taking on a run that has ended runs nothing more.
+    let asked = payloads(&harness, "model/request").len();
+    let ended = harness.answered(&main).await.unwrap();
+    assert_eq!(ended.status, outcome.status);
+    assert_eq!(payloads(&harness, "model/request").len(), asked);
+}
+
+#[tokio::test]
+async fn a_run_is_not_taken_on_while_another_of_its_questions_waits() {
+    let runs = Arc::new(AtomicUsize::new(0));
+    let both = Message::assistant()
+        .call(ToolCall::new("c1", "poke", "{}"))
+        .call(ToolCall::new("c2", "poke", "{}"));
+    let harness = harness(EventStream::new(), [both, say("poked twice")], &runs).unwrap();
+    let main = SessionId::new(MAIN);
+    let outside = harness.app().service::<Outside>(OUTSIDE).unwrap();
+    harness.run("poke it twice").await.unwrap();
+
+    outside
+        .answer("page", &main, "c2", &Answer::Deny("not that one".into()))
+        .unwrap();
+    let waiting = harness.answered(&main).await.unwrap();
+
+    let Status::Waiting { asks, .. } = &waiting.status else {
+        panic!("expected to wait, got {:?}", waiting.status);
+    };
+    assert_eq!(asks.len(), 1);
+    assert_eq!(asks[0].call, "c1");
+    assert_eq!(runs.load(Ordering::SeqCst), 0);
+    // The other answered at the terminal: the run goes on, one call made and one refused.
+    let outcome = harness.answer(&main, "c1", Answer::Allow).await.unwrap();
+    assert!(matches!(outcome.status, Status::Finished { .. }));
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn what_acts_from_outside_is_out_of_reach_of_add_ons() {
+    let runs = Arc::new(AtomicUsize::new(0));
+    let harness = harness(EventStream::new(), [], &runs).unwrap();
+    // An add-on reaches services through the `Services` registry alone, and neither is
+    // there: a gate's question is the person's to answer.
+    assert!(harness.services().get(OUTSIDE).is_none());
+    assert!(harness.services().get(FRONTS).is_none());
+    assert_eq!(harness.fronts().names(), Vec::<String>::new());
 }
 
 #[tokio::test]

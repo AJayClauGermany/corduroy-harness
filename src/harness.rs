@@ -29,6 +29,7 @@ use crate::compact::CompactOperation;
 use crate::gates::GateOperation;
 use crate::loops::{DEFAULT_LOOP, LOOPS, Loops, Run, StandardLoop, Step};
 use crate::operation::{Next, Operation};
+use crate::outside::{FRONTS, Fronts, OUTSIDE, Outside};
 use crate::provider::{DEFAULT_PROVIDER, PROVIDERS, Provider, Providers};
 use crate::session::{
     Answer, Ask, Effect, End, Journal, MAIN, Progress, Session, SessionInfo, Sessions, Wait, ended,
@@ -245,6 +246,8 @@ pub struct Harness {
     operations: Vec<Arc<dyn Operation>>,
     /// Steps plugins registered, tried next and in name order.
     contributed: Arc<Operations>,
+    /// What a person reaches the agent through besides the host, by plugin.
+    fronts: Arc<Fronts>,
     /// The sessions being run now, each with what stops it.
     running: Lock<BTreeMap<SessionId, Stop>>,
 }
@@ -344,6 +347,9 @@ impl Harness {
         app.provide(HTTP, Arc::clone(&http))?;
         app.provide(OPERATIONS, Arc::clone(&contributed))?;
         app.provide(LOOPS, Arc::clone(&loops))?;
+        let fronts = Arc::new(Fronts::new());
+        app.provide(FRONTS, Arc::clone(&fronts))?;
+        app.provide(OUTSIDE, Arc::new(Outside::new(Arc::clone(&sessions))))?;
         Ok(Self {
             #[cfg(feature = "std")]
             app: Arc::new(Mutex::new(app)),
@@ -370,6 +376,7 @@ impl Harness {
             restart_limit: 5,
             operations: Vec::new(),
             contributed,
+            fronts,
             running: Lock::new(BTreeMap::new()),
         })
     }
@@ -533,6 +540,13 @@ impl Harness {
     #[must_use]
     pub const fn http(&self) -> &Arc<HttpClients> {
         &self.http
+    }
+
+    /// What a person reaches the agent through besides the host: the front ends plugins
+    /// registered, by plugin. A host opens each when it is about to drive runs.
+    #[must_use]
+    pub const fn fronts(&self) -> &Arc<Fronts> {
+        &self.fronts
     }
 
     /// The loops a run can take its steps with, by name. See [`with_loop`](Self::with_loop).
@@ -812,13 +826,29 @@ impl Harness {
         answer: Answer,
     ) -> Result<Outcome, HarnessError> {
         let journal = self.journal(session)?;
-        if !journal.answer(call, &answer)? {
+        if !journal.answer(call, &answer, None)? {
             return Err(HarnessError::NotAsked {
                 session: session.clone(),
                 call: call.to_owned(),
             });
         }
-        if !journal.waiting().is_empty() {
+        self.answered(session).await
+    }
+
+    /// Take on the run of `session` after an answer to one of its questions was recorded
+    /// from outside it ([`Outside::answer`]): a front end records, and the host that drives
+    /// calls this.
+    ///
+    /// If other questions of the run still wait, or the session has no run to take on, the
+    /// outcome says how it stands and nothing is run. Otherwise the loop goes on as after
+    /// [`answer`](Self::answer), and with it each session up the chain that waited.
+    ///
+    /// # Errors
+    ///
+    /// As [`run_in`](Self::run_in).
+    pub async fn answered(&self, session: &SessionId) -> Result<Outcome, HarnessError> {
+        let journal = self.journal(session)?;
+        if !journal.waiting().is_empty() || !journal.unfinished() {
             return Ok(self.outcome_of(&journal));
         }
         let stop = Stop::default();

@@ -96,6 +96,7 @@ pub mod harness;
 pub mod loops;
 pub mod message;
 pub mod operation;
+pub mod outside;
 pub mod provider;
 pub mod scripted;
 pub mod session;
@@ -112,6 +113,7 @@ pub use gates::GateOperation;
 pub use harness::{Harness, HarnessError, OPERATIONS, Operations, Outcome, Status, Stepped};
 pub use loops::{DEFAULT_LOOP, LOOPS, Loop, Loops, Run, StandardLoop, Step};
 pub use operation::{Next, Operation};
+pub use outside::{FRONTS, Front, Fronts, OUTSIDE, Outside};
 pub use provider::{
     DEFAULT_PROVIDER, PROVIDERS, Provider, ProviderError, ProviderPlugin, Providers, provider,
 };
