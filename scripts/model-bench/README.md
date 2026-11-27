@@ -218,3 +218,10 @@ def read(t):
 
 `t.expect` records a failure and goes on; `t.note` records something worth knowing that
 decides nothing. Never write into the workspace anything that gives the check away.
+
+## In pieces
+
+Where a machine does not last as long as the bench (a cloud sandbox is reclaimed after about
+two hours), `piece.sh MINUTES [options]` runs it for that long and keeps the results in
+[`results/`](results/README.md), from where the next piece goes on. What has been kept so
+far, and what it shows, is on that page.
