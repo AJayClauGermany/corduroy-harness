@@ -406,17 +406,18 @@ async fn run(
         answers,
         paid,
         unfiled,
+        live: !console.piped && Arc::ptr_eq(answers, out),
     };
     match command.as_slice() {
         [] => chat(harness, session, input, &shown).await,
         ["run", words @ ..] if !words.is_empty() => {
-            let _shown = terminal::watch(harness, &session, answers, out);
+            let _shown = terminal::watch(harness, &session, answers, out, shown.live);
             let prompt = words.join(" ");
             let outcome = terminal::prompt(harness, &session, &prompt, input, out).await?;
             Ok(finish(&outcome.status, &shown))
         }
         ["continue"] => {
-            let _shown = terminal::watch(harness, &session, answers, out);
+            let _shown = terminal::watch(harness, &session, answers, out, shown.live);
             let outcome = terminal::resume(harness, &session, input, out).await?;
             Ok(finish(&outcome.status, &shown))
         }
@@ -572,6 +573,9 @@ struct Shown<'a> {
     answers: &'a Out,
     paid: Option<&'a dyn SignIn>,
     unfiled: bool,
+    /// Whether what the model writes is shown as it writes it: where a person reads the
+    /// answers and the progress in one place, at a terminal.
+    live: bool,
 }
 
 impl Shown<'_> {
@@ -742,7 +746,7 @@ async fn chat(
         out,
         "corduroy: type a prompt, /help for commands, /exit or ctrl-d to leave",
     );
-    let mut shown = terminal::watch(harness, &session, ends.answers, out);
+    let mut shown = terminal::watch(harness, &session, ends.answers, out, ends.live);
     let outcome = terminal::resume(harness, &session, input, out).await?;
     let started = !outcome.session.conversation().is_empty();
     if started {
@@ -784,7 +788,7 @@ async fn chat(
                 }
                 harness.events().unsubscribe(shown);
                 session = next;
-                shown = terminal::watch(harness, &session, ends.answers, out);
+                shown = terminal::watch(harness, &session, ends.answers, out, ends.live);
             }
             Typed::Prompt(prompt) => {
                 let outcome = terminal::prompt(harness, &session, prompt, input, out).await?;
@@ -830,6 +834,7 @@ mod tests {
                 answers: &out,
                 paid: None,
                 unfiled,
+                live: false,
             }
             .end(status);
             String::from_utf8(written.lock().unwrap().clone()).unwrap()

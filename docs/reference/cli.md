@@ -205,9 +205,16 @@ the answer and nothing else; `--progress stdout` or `--progress stderr` says whi
 whatever the output is. Commands that drive no run (`check`, `log`, `report` and the rest)
 write what they were asked for to standard output.
 
+At a terminal, where the answers and the progress are written to the same place, what the
+model says appears as it writes it and is not written again when it is finished. Where they
+are written apart (a pipe, a file, `--progress stderr`), each thing it says is written
+whole, once it is finished.
+
 | Line | Means |
 | --- | --- |
 | text | what the model said: an answer, or, with a tool call, progress |
+| `  … thinking` | at a terminal: the model is thinking before it answers. Said once for an answer; what it thinks is not shown |
+| `  ↻ the model is asked again: the answer starts over` | at a terminal: the request failed part-way and is made again, so the text above it is not the answer |
 | `▸ tool {input}` | the model called a tool |
 | `  ✓ output` / `  ✗ output` | the tool returned / failed (the model sees the full text) |
 | `the agent's page is at http://127.0.0.1:<port>/<token>/ …` | before a run, where the agent file has a [`page`](agent-file.md#extensionsname) extension: the address to open in a browser. It is a new one each time, it lets in whoever has it, and it is never written to the log |

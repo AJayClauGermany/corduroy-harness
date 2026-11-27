@@ -276,27 +276,42 @@ impl Watch {
         poll_fn(|cx| self.queue.poll_take(cx.waker())).await
     }
 
+    /// Wait on this thread for at most `at_most` until something has been shown that is
+    /// not yet read, and say whether something has. Nothing is taken: a reader that must
+    /// read and show under a lock of its own takes it there.
+    #[cfg(feature = "std")]
+    #[must_use]
+    pub fn pending(&self, at_most: Duration) -> bool {
+        let waker = Waker::from(Arc::new(Unpark(thread::current())));
+        let unread = |unread: &mut Unread| !unread.is_empty();
+        let already = self.queue.unread.with(|unread| {
+            if unread.is_empty() {
+                unread.waiting = Some(waker);
+                return false;
+            }
+            true
+        });
+        if already {
+            return true;
+        }
+        thread::park_timeout(at_most);
+        self.queue.unread.with(unread)
+    }
+
     /// Everything shown since the last read, waiting on this thread for at most `at_most`
     /// until there is something. Nothing, if nothing came in that time.
     #[cfg(feature = "std")]
     #[must_use]
     pub fn wait(&self, at_most: Duration) -> Vec<Shown> {
-        let waker = Waker::from(Arc::new(Unpark(thread::current())));
-        let shown = self.queue.unread.with(|unread| {
-            if unread.is_empty() {
-                unread.waiting = Some(waker);
-            }
-            unread.take()
-        });
-        if !shown.is_empty() {
-            return shown;
+        if self.pending(at_most) {
+            self.take()
+        } else {
+            Vec::new()
         }
-        thread::park_timeout(at_most);
-        self.take()
     }
 }
 
-/// Wakes a thread parked in [`Watch::wait`].
+/// Wakes a thread parked in [`Watch::pending`].
 #[cfg(feature = "std")]
 struct Unpark(Thread);
 

@@ -11,12 +11,15 @@
 //! `corduroy stop`.
 
 use std::io::{BufRead, Write};
-use std::sync::{Arc, Mutex, PoisonError, mpsc};
+use std::sync::{Arc, Mutex, PoisonError, Weak, mpsc};
 use std::thread;
+use std::time::Duration;
 
 use corduroy_harness::core::{Event, ListenerId, Pattern, SessionId, Source};
 use corduroy_harness::message::decode;
-use corduroy_harness::{Answer, Ask, Harness, HarnessError, Outcome, Status};
+use corduroy_harness::{
+    Answer, Ask, Harness, HarnessError, Outcome, Piece, Seen, Status, Watch as Pieces,
+};
 use serde_json::Value;
 use tokio::sync::Notify;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -225,17 +228,185 @@ fn answers(event: &Event) -> bool {
         && decode(&event.payload).is_ok_and(|message| message.tool_calls().next().is_none())
 }
 
+/// Where the line being written stands, for what the model writes shown as it writes.
+#[derive(Debug, Default)]
+struct Line {
+    /// Text was written and its line not ended.
+    open: bool,
+    /// How much of the answer now being written has been shown.
+    text: Told,
+    /// That the model is thinking has been said for this answer.
+    thinking: bool,
+}
+
+/// How much of an answer's text was shown while it was written.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum Told {
+    /// None of it: the whole is shown when it is committed.
+    #[default]
+    Nothing,
+    /// All there was.
+    All,
+    /// Some, with some missed on the way: the whole is shown when it is committed.
+    Some,
+}
+
+impl Told {
+    /// What was shown, once more of the text has been.
+    const fn with_more(self) -> Self {
+        match self {
+            Self::Nothing | Self::All => Self::All,
+            Self::Some => Self::Some,
+        }
+    }
+}
+
+/// What the model of one session writes, written to the terminal as it comes.
+///
+/// Read in two places, both under `line`: by a thread of its own, so text appears while
+/// the model writes, and by the listener on the event stream before it shows an event, so
+/// an answer's last pieces are on the terminal before the line its commit would add.
+struct Streamed {
+    pieces: Pieces,
+    out: Out,
+    line: Mutex<Line>,
+}
+
+impl Streamed {
+    /// Write `text` as it is, with no line end of its own.
+    fn write(&self, text: &str) {
+        let mut out = self.out.lock().unwrap_or_else(PoisonError::into_inner);
+        drop(write!(out, "{text}"));
+        drop(out.flush());
+    }
+
+    /// End the line being written, if one is.
+    fn end(&self, line: &mut Line) {
+        if line.open {
+            self.write("\n");
+            line.open = false;
+        }
+    }
+
+    /// End the line being written, if one is, taking the lock to look.
+    fn end_now(&self) {
+        let mut line = self.line.lock().unwrap_or_else(PoisonError::into_inner);
+        self.end(&mut line);
+    }
+
+    /// The request is made again: say so if any of its answer was shown, and begin anew.
+    fn start_over(&self, line: &mut Line) {
+        self.end(line);
+        if line.text != Told::Nothing {
+            say(
+                &self.out,
+                "  ↻ the model is asked again: the answer starts over",
+            );
+        }
+        *line = Line::default();
+    }
+
+    /// Write whatever the model has written since the last look.
+    fn catch_up(&self, line: &mut Line) {
+        for shown in self.pieces.take() {
+            match shown.seen {
+                Seen::Piece(Piece::Text(text)) if !text.is_empty() => {
+                    self.write(&text);
+                    line.open = !text.ends_with('\n');
+                    line.text = line.text.with_more();
+                }
+                // Said once and quietly: what it thinks is in the log for whoever wants it.
+                Seen::Piece(Piece::Thinking(_)) if !line.thinking => {
+                    self.end(line);
+                    say(&self.out, "  … thinking");
+                    line.thinking = true;
+                }
+                Seen::Restarted => self.start_over(line),
+                Seen::Missed => line.text = Told::Some,
+                _ => {}
+            }
+        }
+    }
+
+    /// Show `event` of the session's own, described as `text`, after whatever was written
+    /// before it. An answer whose text was shown as it came is not said twice.
+    fn show(&self, event: &Event, text: Option<&str>) {
+        let mut line = self.line.lock().unwrap_or_else(PoisonError::into_inner);
+        self.catch_up(&mut line);
+        let message = event.topic == "message" && event.source == Source::Agent;
+        let shown_already = message && line.text == Told::All;
+        // A run that ends while the model writes leaves a line unfinished too.
+        let over = message || event.topic == "turn/end";
+        if text.is_some() || over {
+            self.end(&mut line);
+        }
+        if let Some(text) = text
+            && !shown_already
+        {
+            say(&self.out, text);
+        }
+        if over {
+            *line = Line::default();
+        }
+    }
+}
+
+/// Keep writing what `streamed` is shown, for as long as anything else holds it.
+fn follow(streamed: &Weak<Streamed>) {
+    while let Some(streamed) = streamed.upgrade() {
+        if streamed.pieces.pending(Duration::from_millis(100)) {
+            let mut line = streamed.line.lock().unwrap_or_else(PoisonError::into_inner);
+            streamed.catch_up(&mut line);
+        }
+    }
+}
+
 /// Show what happens in `session`, in the sub-agents it starts, and to the plugins, as it
 /// is committed.
 ///
 /// What the session's agent answers is written to `answers`, and everything else to `out`,
 /// which may be the same. A sub-agent's lines are indented under its session's name.
-pub fn watch(harness: &Harness, session: &SessionId, answers: &Out, out: &Out) -> ListenerId {
+///
+/// With `live`, what the session's model writes is also written as it writes it (the
+/// harness's [live channel](corduroy_harness::live)), to `out`, and an answer shown that
+/// way is not written again when it is committed. That is for a person reading at a
+/// terminal where answers and progress go to the same place: a program that reads the
+/// answers is given each whole, once.
+pub fn watch(
+    harness: &Harness,
+    session: &SessionId,
+    answers: &Out,
+    out: &Out,
+    live: bool,
+) -> ListenerId {
+    let streamed = live.then(|| {
+        let streamed = Arc::new(Streamed {
+            pieces: harness.watch(Some(session)),
+            out: Arc::clone(out),
+            line: Mutex::default(),
+        });
+        let followed = Arc::downgrade(&streamed);
+        // Without the thread, text still appears: at each event, and so at the latest when
+        // its message is committed.
+        drop(
+            thread::Builder::new()
+                .name("corduroy-live".to_owned())
+                .spawn(move || follow(&followed)),
+        );
+        streamed
+    });
     let session = session.clone();
     let below = format!("{session}/");
     let (answered, out) = (Arc::clone(answers), Arc::clone(out));
     harness.events().subscribe(Pattern::any(), move |event| {
-        let Some(text) = describe(event) else {
+        let text = describe(event);
+        if let Some(streamed) = &streamed
+            && event.session.as_ref().is_none_or(|id| *id == session)
+        {
+            streamed.show(event, text.as_deref());
+            return;
+        }
+        let Some(text) = text else {
             return;
         };
         match &event.session {
@@ -243,6 +414,9 @@ pub fn watch(harness: &Harness, session: &SessionId, answers: &Out, out: &Out) -
             Some(id) if *id == session && self::answers(event) => say(&answered, &text),
             Some(id) if *id == session => say(&out, &text),
             Some(id) if id.as_str().starts_with(&below) => {
+                if let Some(streamed) = &streamed {
+                    streamed.end_now();
+                }
                 let indented = text.replace('\n', "\n    ");
                 say(&out, &format!("  [{id}] {indented}"));
             }
@@ -786,5 +960,62 @@ mod tests {
             shown(Source::Host, "gate/decision", plugins).as_deref(),
             Some("  ✗ denied by approval: no shell")
         );
+    }
+
+    /// What a run of `harness` writes on a terminal that shows the model's text live.
+    async fn written_live(harness: &Harness, prompt: &str) -> (Status, String) {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let out: Out = Arc::<Mutex<Vec<u8>>>::clone(&written);
+        let main = SessionId::new(corduroy_harness::MAIN);
+        let shown = watch(harness, &main, &out, &out, true);
+        let outcome = harness.run(prompt).await.unwrap();
+        harness.events().unsubscribe(shown);
+        let text = String::from_utf8(written.lock().unwrap().clone()).unwrap();
+        (outcome.status, text)
+    }
+
+    #[tokio::test]
+    async fn an_answer_shown_as_it_is_written_is_not_said_again() {
+        use corduroy_harness::scripted::{ScriptedProvider, call, say as answer};
+        let mut first = answer("Looking at it.");
+        first
+            .parts
+            .extend(call("c1", "missing", &serde_json::json!({})).parts);
+        let model = ScriptedProvider::new([first, answer("one two\nthree")]).piecewise(3);
+        let harness = Harness::new(Arc::new(model)).unwrap();
+
+        let (status, text) = written_live(&harness, "count").await;
+
+        assert!(matches!(status, Status::Finished { .. }), "{status:?}");
+        // Each thing the model said is there once, its line ended before the next begins.
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.first(), Some(&"Looking at it."), "{text}");
+        assert!(
+            lines
+                .get(1)
+                .is_some_and(|line| line.starts_with("▸ missing")),
+            "{text}"
+        );
+        assert_eq!(lines.get(3..), Some(&["one two", "three"][..]), "{text}");
+        assert!(text.ends_with("three\n"), "{text:?}");
+    }
+
+    #[tokio::test]
+    async fn a_run_ended_while_the_model_writes_ends_its_line() {
+        use corduroy_harness::scripted::ScriptedProvider;
+        let pieces = [
+            Piece::Thinking("hm".to_owned()),
+            Piece::Thinking("mm".to_owned()),
+            Piece::Text("so f".to_owned()),
+            Piece::Text("ar".to_owned()),
+        ];
+        let harness = Harness::new(Arc::new(ScriptedProvider::new([]).hanging(pieces)))
+            .unwrap()
+            .with_time_limit(Duration::from_millis(100));
+
+        let (status, text) = written_live(&harness, "go").await;
+
+        assert_eq!(status, Status::TimeLimitReached);
+        assert_eq!(text, "  … thinking\nso far\n");
     }
 }

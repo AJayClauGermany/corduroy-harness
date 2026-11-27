@@ -1460,15 +1460,17 @@ someone needs it, since it is also something to keep private).
 
 **Live output is a preview; checkpoints are the record of it.** Text from a model as it
 arrives, and output from a tool while it runs, reach the terminal as they come. It is
-expected of a harness and is part of 1.0, and it is not the core's (*planned*):
+expected of a harness and is part of 1.0, and it is not the core's (built for a model's
+answer; *planned* for a tool's output):
 
 - *A live channel in the loop.* Fragments go to whoever displays them, at whatever grain
   the provider or the tool gives, and are not events. The core's rule keeps no exception:
   every event is in the log.
 - *Checkpoints in the log.* While a reply or a long tool call is under way, the loop
   commits what has arrived since the last checkpoint as an ordinary event, at a coarse
-  grain, and always when the run is stopped or fails. A crash loses at most what came after
-  the last checkpoint, and the log shows how far the reply or the command got.
+  grain. A crash loses at most what came after the last checkpoint, and the log shows how
+  far the reply or the command got. A reply that never became whole, because the run was
+  stopped or ran out of time or the model failed, is recorded once more, whole.
 - *The whole is still committed.* The finished message or result is one event, as now.
   Nobody reconstructs anything from checkpoints: a reader, the model and other agents use
   the whole one, and checkpoints matter only where no whole one exists. A view of a session
@@ -1480,11 +1482,49 @@ How often to checkpoint is a setting: off, every fragment, or an interval in bet
 few seconds by default. Streamed text is then stored at most about twice, and the number of
 events is bounded by time and not by tokens. A reply cut off part-way is not continued from
 its checkpoint, because providers differ on whether they can: on resume the partial text is
-evidence for the reader and the request is made again. This needs a streaming method with
-a default on `Provider`, a way for a running tool to report output through the call scope
-(the one piece in the core, to be marked before the freeze) and topics for the checkpoints.
-The split between channel and checkpoints is the decision; the mechanism is confirmed
-against a real provider before it is fixed.
+evidence for the reader and the request is made again.
+
+The shape, as built for a model's answer and tried against a streamed response on loopback
+(`crates/corduroy-providers/tests/wire.rs`):
+
+- *A piece* (`corduroy_harness::Piece`) is more text, more thinking, more of a tool call
+  (its id, its tool's name, more of its input's text) or what the request has cost so far.
+  The set can grow. Pieces are a preview: the reply still comes back whole.
+- *A provider tells pieces through what it is already handed.* `Provider::complete_reporting`
+  is the one thing the loop calls, and `Reports`, which it is given, has `piece` beside
+  `retry`. The default tells a whole reply as one piece for each of its parts, so a watcher
+  is told the same things by a provider that streams and by one that does not. oi-kit gives
+  text and thinking as they come and a tool call once it is whole, so that is what the
+  shipped providers tell; the `streaming` key of a provider's entry still says only how the
+  provider's client reads the response.
+- *A retry voids what was told.* The harness hears the retry before the next attempt writes
+  anything: it forgets what the failed attempt wrote and the channel says the answer starts
+  over (`Seen::Restarted`).
+- *A display subscribes by session* (`Harness::watch`, and `Outside::watch` for a front
+  end; for one session or for all). It gets a queue of its own and reads it from its own
+  task or thread: `take`, an awaited `next`, or a wait on a thread. Telling a piece never
+  waits. Text that follows text is joined in the queue, and a watcher that has not read
+  64 KiB of it loses the oldest and is told so (`Seen::Missed`). The channel is not in
+  the `Services` registry: what a model is writing is for the person, and nothing is to act
+  on it.
+- *A checkpoint is `model/progress`*: the text, thinking and calls written since the one
+  before, the tokens written so far (the provider's count, or an estimate from the length
+  of the text, marked as one) and the time since the request went out. It is written when
+  a piece arrives and the last one is at least the interval old (`Harness::with_checkpoints`,
+  five seconds unless said). The first piece starts the clock, so an answer that comes
+  whole, or within one interval, has none. Where there is no clock, one is written for
+  every 2048 tokens.
+- *What a request that never answered had written is `model/partial`*, once and whole, with
+  why: `stopped`, `time-limit` or `failed` and the failure's kind. Neither topic is part of
+  the conversation: the model is never shown them, and a tool call in one is never asked
+  about or run.
+- *The terminal* shows the text as it comes where a person reads answers and progress in
+  one place, and does not say an answer again when it is committed; it says once, quietly,
+  that the model is thinking. A program reading the output gets each answer whole, once.
+
+Still to do: a way for a running tool to report output through the call scope (the one
+piece in the core, to be marked before the freeze), the interval as a key of the agent
+file, and pieces on the page (`corduroy-page` shows committed events only).
 
 **Whole sessions may leave the log, and nothing smaller.** The stream never removes or
 rewrites an event: while a program runs, the log only grows. A store may remove a whole

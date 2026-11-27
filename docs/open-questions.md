@@ -1072,19 +1072,20 @@ feature-gated.
 
 *Direction.* Decide what an extension that builds for both a desktop and a device may use.
 
-### G9. Does a provider stream?
+### G9. What of a streamed answer is still to settle?
 
-`Provider::complete` returns a whole reply (`src/provider.rs:171`). The `streaming` key of a
-provider entry only changes how the provider's own client reads the response; nothing
-reaches the terminal until the message is committed.
+A provider streams: it tells the pieces of its answer as the model writes them, the loop
+shows them to whoever watches a session and checkpoints them in the log, and a request that
+never answered leaves what it had written
+([What the record promises](design.md#what-the-record-promises)). That was tried against a
+streamed response on loopback and not yet against a provider over the network.
 
-Decided in [What the record promises](design.md#what-the-record-promises): a streaming
-method with a default on `Provider`, its pieces going to a live channel in the loop and, at
-a coarse grain, into checkpoints in the log.
-
-*Direction.* What is left is the shape, to be tried against a real provider: what a piece
-is (text, thinking, a tool call being written), how a display subscribes to the channel
-and for which session, and what a checkpoint's payload holds.
+*Direction.* Three things are left. Whether a tool call is told as it is written or only
+whole: the piece has room for either, and oi-kit gives it whole. Whether the checkpoint
+interval is a key of the agent file or stays the host's to set
+([H3](#h3-what-of-the-harness-can-the-agent-file-set)). And whether what a model thinks
+belongs in a checkpoint at all, or only its length: it is the larger part of what a small
+model writes, and a signed one is of no use to a reader.
 
 ### G10. Why did the model stop, and why did it fail?
 
