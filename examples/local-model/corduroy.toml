@@ -13,7 +13,7 @@ You are a careful coding agent working in {workspace}. Use the tools to do the t
 before you change anything, keep changes small, check your work, then say briefly what you did."""
 provider = "local"
 model = "local"     # the server answers to any name; the script calls it `local`
-max_turns = 20
+max_turns = 50      # a small model checks one thing a request, so a real task takes many
 
 [providers.local]
 kind = "openai-compatible"
