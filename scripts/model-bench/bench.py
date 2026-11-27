@@ -526,7 +526,9 @@ def summarize(path: Path, isolated: bool | None = None) -> str:
         reasons: dict[str, int] = {}
         for record in records:
             for failure in record["failures"][:1]:
-                reasons[failure[:110]] = reasons.get(failure[:110], 0) + 1
+                # One line, and no bar: it is a cell of a table.
+                reason = " ".join(failure.split()).replace("|", "/")[:110]
+                reasons[reason] = reasons.get(reason, 0) + 1
         why = "; ".join(f"{count}× {reason}" for reason, count in reasons.items())
         lines.append(
             f"| `{name}` | {records[0]['tier']} | {passed}/{len(records)} | "
