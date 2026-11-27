@@ -3,7 +3,6 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -13,8 +12,8 @@ use corduroy_harness::core::{
     AUDIO, Content, IMAGE, Message, PDF, Part, Role, TEXT, ToolCall, ToolSpec, VIDEO,
 };
 use corduroy_harness::{
-    ModelInfo, ModelReply, ModelRequest, Provider, ProviderError, ProviderErrorKind, StopReason,
-    Usage,
+    ModelInfo, ModelReply, ModelRequest, Provider, ProviderError, ProviderErrorKind, Reports,
+    Retry, StopReason, Usage,
 };
 use oi_kit_provider_types::base::Provider as OiKitProvider;
 use oi_kit_provider_types::canonical::Modality;
@@ -25,7 +24,7 @@ use oi_kit_provider_types::conversation::message::{
 use oi_kit_provider_types::errors::ProviderError as OiKitError;
 use oi_kit_provider_types::formats::openai::is_openai_responses_model;
 use oi_kit_provider_types::model::ModelConfig;
-use oi_kit_provider_types::retry::retry_operation;
+use oi_kit_provider_types::retry::should_retry;
 use oi_kit_provider_types::thinking::ThinkingEffort;
 use oi_kit_providers::openai::OPEN_AI_DEFAULT_BASE_PATH;
 use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock, JsonObject, Tool};
@@ -175,9 +174,26 @@ impl Adapted {
     }
 }
 
+/// How one attempt at a request ended, where it did not answer.
+enum Missed {
+    /// It was still going when its time ran out. Not tried again: a model that never
+    /// stops writing would not stop the next time either.
+    TimedOut,
+    /// oi-kit said why.
+    Failed(OiKitError),
+}
+
 #[async_trait]
 impl Provider for Adapted {
     async fn complete(&self, request: &ModelRequest) -> Result<ModelReply, ProviderError> {
+        self.complete_reporting(request, &()).await
+    }
+
+    async fn complete_reporting(
+        &self,
+        request: &ModelRequest,
+        reports: &dyn Reports,
+    ) -> Result<ModelReply, ProviderError> {
         let (config, system) = self.settings.asking(&request.model, &request.system);
         let messages: Vec<OiKitMessage> = request.messages.iter().map(to_oi_kit).collect();
         let tools = request
@@ -187,35 +203,49 @@ impl Provider for Adapted {
             .collect::<Result<Vec<Tool>, ProviderError>>()?;
         let provider = &self.provider;
         let bound = self.settings.timeout;
-        let timed_out = AtomicBool::new(false);
         // Rate limits, server errors and dropped connections are tried again, as the
-        // provider's own policy says. Each attempt has the whole of the bound, whether its
+        // provider's own policy says (oi-kit's `should_retry` and its delays), each retry
+        // told to whoever asked. Each attempt has the whole of the bound, whether its
         // answer is streamed or not: oi-kit bounds only the gap between two pieces of a
         // stream, which a model that never stops writing never exceeds. An attempt that
         // runs out is dropped, which closes its connection, and is not tried again.
-        let (message, usage) = retry_operation(&provider.retry_config(), || async {
+        let policy = provider.retry_config();
+        let mut retries: usize = 0;
+        let (message, usage) = loop {
             let attempt = provider.complete(&config, system, &messages, &tools);
-            match tokio::time::timeout(bound, attempt).await {
-                Ok(answer) => answer,
-                Err(_elapsed) => {
-                    timed_out.store(true, Ordering::Relaxed);
-                    Err(OiKitError::ExecutionError("timed out".to_owned()))
+            let missed = match tokio::time::timeout(bound, attempt).await {
+                Ok(Ok(answer)) => break answer,
+                Ok(Err(error)) => Missed::Failed(error),
+                Err(_elapsed) => Missed::TimedOut,
+            };
+            let error = match missed {
+                Missed::TimedOut => {
+                    return Err(ProviderError::new(format!(
+                        "the model had not finished answering after {} seconds (the \
+                         provider's timeout_seconds)",
+                        bound.as_secs()
+                    ))
+                    .of(ProviderErrorKind::Timeout));
                 }
+                Missed::Failed(error) => error,
+            };
+            let said = ProviderError::new(error.to_string()).of(kind_of_error(&error));
+            if !should_retry(&error, &policy) || retries >= policy.max_retries() {
+                return Err(said);
             }
-        })
-        .await
-        .map_err(|error| {
-            if timed_out.load(Ordering::Relaxed) {
-                ProviderError::new(format!(
-                    "the model had not finished answering after {} seconds (the provider's \
-                     timeout_seconds)",
-                    bound.as_secs()
-                ))
-                .of(ProviderErrorKind::Timeout)
-            } else {
-                ProviderError::new(error.to_string()).of(kind_of_error(&error))
-            }
-        })?;
+            retries += 1;
+            // The provider's own word on how long to wait comes first.
+            let delay = match &error {
+                OiKitError::RateLimitExceeded {
+                    retry_delay: Some(delay),
+                    ..
+                } => *delay,
+                _ => policy.delay_for_attempt(retries),
+            };
+            let attempt = u32::try_from(retries).unwrap_or(u32::MAX);
+            reports.retry(&Retry::new(attempt, said, delay));
+            tokio::time::sleep(delay).await;
+        };
         if let Some(error) = message.error() {
             return Err(ProviderError::new(error.message.clone()));
         }

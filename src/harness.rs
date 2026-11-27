@@ -32,7 +32,7 @@ use crate::gates::GateOperation;
 use crate::loops::{DEFAULT_LOOP, LOOPS, Loops, Run, StandardLoop, Step};
 use crate::operation::{Next, Operation};
 use crate::outside::{FRONTS, Fronts, OUTSIDE, Outside};
-use crate::provider::{DEFAULT_PROVIDER, PROVIDERS, Provider, Providers};
+use crate::provider::{DEFAULT_PROVIDER, PROVIDERS, Provider, Providers, Reports, Retry};
 use crate::session::{
     Answer, Ask, Effect, End, Journal, MAIN, Progress, Session, SessionInfo, Sessions, Wait, ended,
 };
@@ -283,6 +283,25 @@ impl fmt::Debug for Harness {
 }
 
 /// While alive, the session it names is being run, and [`Harness::stop`] reaches it.
+/// Records what a provider reports while it answers one request of a session.
+struct Heard<'run> {
+    journal: &'run Journal,
+    provider: &'run str,
+    model: &'run str,
+    /// The first report that could not be recorded.
+    failed: Lock<Option<anyhow::Error>>,
+}
+
+impl Reports for Heard<'_> {
+    fn retry(&self, retry: &Retry) {
+        if let Err(error) = self.journal.retried(self.provider, self.model, retry) {
+            self.failed.with(|failed| {
+                failed.get_or_insert(error);
+            });
+        }
+    }
+}
+
 struct Running<'harness> {
     running: &'harness Lock<BTreeMap<SessionId, Stop>>,
     session: SessionId,
@@ -1167,8 +1186,19 @@ impl Harness {
             return Ok(Step::End(end));
         }
         journal.ask_started(&self.provider, request)?;
-        let answering = stop.unless_asked(provider.complete(request));
-        let reply = match stop.within(self.budget.time, answering).await {
+        let heard = Heard {
+            journal,
+            provider: &self.provider,
+            model: &request.model,
+            failed: Lock::new(None),
+        };
+        let answering = stop.unless_asked(provider.complete_reporting(request, &heard));
+        let reply = stop.within(self.budget.time, answering).await;
+        // A retry that could not be recorded closed the stream: that reaches the caller.
+        if let Some(error) = heard.failed.with(Option::take) {
+            return Err(error.into());
+        }
+        let reply = match reply {
             Some(Some(reply)) => reply,
             Some(None) => return self.stopped(journal),
             None => return Ok(Step::End(End::TimeLimit)),

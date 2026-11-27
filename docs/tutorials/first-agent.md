@@ -165,7 +165,7 @@ through. When it wants to write, `approval` stops it and asks you:
   ✓ buy milk (+2 lines)
 ▸ write {"path":"count.txt","content":"3\n"}
 ? write {"path":"count.txt","content":"3\n"}
-  approval asks: `write` can change things
+  approval asks (call_1): `write` can change things
   allow? [y/N, or a reason to refuse]
 ```
 
@@ -196,9 +196,9 @@ corduroy run "Add 'post the letter' to todo.txt."
 
 ```text
 ? edit {"path":"todo.txt", …}
-  approval asks: `edit` can change things
+  approval asks (call_2): `edit` can change things
   allow? [y/N, or a reason to refuse]
-waiting for 1 answer(s); run `corduroy continue` to give them
+waiting for 1 answer(s), about call_2; run `corduroy continue` to give them
 ```
 
 The command has exited, but the run has not ended: it is **waiting**, and the wait is in the

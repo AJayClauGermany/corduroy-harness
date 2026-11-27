@@ -384,7 +384,7 @@ Everything else is a plugin, and a plugin may itself offer primitives to other p
 | Conversation projection | built | Messages, and the `compaction` event: the messages before `keep_from` stay in the log and the conversation but are hidden from the model, which sees the summary in their place. The harness cuts where a step begins, inside the current turn too ([Keeping within what the model holds](#keeping-within-what-the-model-holds)); when, and the summary, come from the plugin providing the `compaction` service, asked by a loop step (`CompactOperation`). |
 | Model access | built | The loop asks the provider registered under a name in `Providers`, on every request, so a plugin supplies the model and unloading it takes the model away. `Harness::new` registers its argument there for convenience. For plugins, the core's `Models` registry: one completion, synchronously, of a model named `<provider>/<model>`; a `provider` plugin serves its provider's models there. The loop and plugins fill in one request and read one reply, the core's (`ModelRequest`, `ModelReply`, with `Usage` and `StopReason`), and a model describes itself (`ModelInfo`). *Planned:* the general typed part, a cost on the usage, and listing models through `llm` ([What the core is made of](#what-the-core-is-made-of)). |
 | Secrets and outbound requests | built | `Secrets` and `HttpClients` registries. The core checks and records; native plugins hold the values and send the requests, so an HTTP client is a plugin like a kernel is. |
-| Versioning | WIT package version, log schema version | Built: a schema version in each log's header (2, which added the time; 1 is still read), and the rule for the world in [What is stable](#what-is-stable). and the check of the world's version when an add-on is loaded ([How the plugin world grows](#how-the-plugin-world-grows)). Still to do: a version on each plugin's stored state. |
+| Versioning | WIT package version, log schema version | Built: a schema version in each log's header (3, which holds a payload as JSON; 2 added the time; 1 and 2 are still read), and the rule for the world in [What is stable](#what-is-stable). and the check of the world's version when an add-on is loaded ([How the plugin world grows](#how-the-plugin-world-grows)). Still to do: a version on each plugin's stored state. |
 
 **Child sessions, a service rather than a capability (built).** The plan was a `session`
 capability to start a child session and await it. It became a service the harness
@@ -1417,6 +1417,21 @@ included. What follows is decided; which parts are built is said for each.
 **Everything that can be logged is logged.** That is the working assumption every other
 answer here is read against. What should be kept *out* (a private value in a prompt or a
 tool call) is not decided, and stays in [Open questions](open-questions.md) (C6).
+
+**A payload is JSON.** An event's payload is text in the core, which has no parser, and
+by contract JSON for every topic the core and the loop define: an object that gains fields
+and loses none. An add-on's own topics may hold any text; JSON is the convention there and
+nothing checks it. A store keeps the text as it likes. The JSON Lines file holds a payload
+as the JSON it is (schema version 3), so that a reader of the file decodes a line once, and
+as a string wherever nesting it would not give the same text back: what is read from a log
+is byte for byte what was committed (built).
+
+**Every tool call has a result, and every retry is said.** A call that waited gets its
+`tool/result` with the signal that brings it, so a reader has one rule for calls. A model
+request made again after a failed attempt is recorded as `model/retry`, with why, how long
+was waited and who retried: a provider tells the harness, which records it, and never
+writes to the stream itself (`Provider::complete_reporting`; built). What the client
+library beneath a provider retries by itself is not seen, and so not recorded.
 
 **How it is read.** By session, filtered, in order: the tool calls, the asks and their
 answers, where a run stopped. A reader wants the shape of a run first (search, reproduce,

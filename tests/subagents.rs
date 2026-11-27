@@ -190,6 +190,28 @@ async fn a_call_waiting_for_a_signal_waits_in_the_log_until_it_comes() {
         }
     );
     assert_eq!(results(&again, MAIN), ["green"]);
+
+    // The call that waited has a result on the stream like any other, stored with the
+    // signal and caused by its call.
+    let stored = again.events().events();
+    let call = stored.iter().find(|event| event.topic == "tool/call");
+    let signal = stored.iter().position(|event| event.topic == SIGNAL);
+    let result = &stored[signal.unwrap() + 1];
+    assert_eq!(result.topic, "tool/result");
+    assert_eq!(result.cause, call.map(|call| call.id));
+    let payload: serde_json::Value = serde_json::from_str(&result.payload).unwrap();
+    assert_eq!(
+        payload,
+        json!({"id": "c1", "tool": "ci", "ok": true, "output": "green", "signal": "ci/done"})
+    );
+    let all = stored.iter().filter(|event| event.topic == "tool/result");
+    assert_eq!(all.count(), 1);
+
+    // A log from before the result was stored holds the signal alone, and reads the same.
+    let before = stored.iter().filter(|event| event.topic != "tool/result");
+    let old = harness_from(&EventStream::load(before.cloned()), &model);
+    assert_eq!(results(&old, MAIN), ["green"]);
+    assert!(!old.journal(&main).unwrap().unfinished());
 }
 
 #[tokio::test]

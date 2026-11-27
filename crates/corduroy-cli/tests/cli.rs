@@ -130,9 +130,16 @@ fn corduroy_with(
     typed: &str,
     env: &[(&str, &str)],
 ) -> std::io::Result<Output> {
+    // Everything on standard output, as at a terminal, unless the test says otherwise.
+    let together: &[&str] = if args.contains(&"--progress") {
+        &[]
+    } else {
+        &["--progress", "stdout"]
+    };
     let mut child = Command::new(env!("CARGO_BIN_EXE_corduroy"))
         .arg("--workspace")
         .arg(workspace)
+        .args(together)
         .args(args)
         .env_remove("ANTHROPIC_API_KEY")
         .env_remove("OPENAI_API_KEY")
@@ -215,6 +222,7 @@ fn attended(workspace: &Path, args: &[&str]) -> std::io::Result<std::process::Ch
     Command::new(env!("CARGO_BIN_EXE_corduroy"))
         .arg("--workspace")
         .arg(workspace)
+        .args(["--progress", "stdout"])
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -504,6 +512,91 @@ fn a_run_waits_across_processes_for_its_answer() {
     );
     assert!(stdout.contains("Done, once you said so."), "{stdout}");
     assert_eq!(fs::read_to_string(&target).unwrap(), "later");
+}
+
+/// A program that drives the command reads the answer on standard output and nothing else,
+/// and an answer it gives a gate goes to the question it names or to none.
+#[test]
+fn a_program_reads_the_answer_alone_and_answers_a_question_by_its_id() {
+    let workspace = scratch("cli-driven");
+    let plugins = plugin("pi-tools").parent().unwrap().to_owned();
+    let target = workspace.join("later.txt");
+    let (address, _seen) = model(vec![
+        tool_call("write", &json!({"path": target, "content": "later"})),
+        answer("Done, once you said so."),
+    ])
+    .unwrap();
+    fs::write(
+        workspace.join("corduroy.toml"),
+        agent_file(address, &plugins),
+    )
+    .unwrap();
+    // Standard output is a pipe here, so progress is kept apart without being asked.
+    let driven = |args: &[&str], typed: &str| {
+        let mut all = vec!["--progress", "stderr"];
+        all.extend_from_slice(args);
+        corduroy(&workspace, &all, typed).unwrap()
+    };
+
+    let first = driven(&["run", "write", "later"], "");
+    assert_eq!(first.status.code(), Some(7));
+    assert_eq!(text(&first.stdout), "", "nothing was answered yet");
+    let progress = text(&first.stderr);
+    assert!(
+        progress.contains("▸ write") && progress.contains("approval asks (call_1):"),
+        "{progress}"
+    );
+    assert!(progress.contains("about call_1"), "{progress}");
+
+    // Answers prepared for other questions are given to none, however many there are.
+    let wrong = driven(&["continue"], "@call_9 y\n@call_8 y\n");
+    assert_eq!(wrong.status.code(), Some(7), "{}", text(&wrong.stderr));
+    assert!(
+        text(&wrong.stderr).contains("no question `call_9` is waiting"),
+        "{}",
+        text(&wrong.stderr)
+    );
+    assert!(!target.exists());
+
+    let right = driven(&["continue"], "@call_1 y\n");
+    assert!(right.status.success(), "{}", text(&right.stderr));
+    assert_eq!(text(&right.stdout), "Done, once you said so.\n");
+    assert!(text(&right.stderr).contains("✓"), "{}", text(&right.stderr));
+    assert_eq!(fs::read_to_string(&target).unwrap(), "later");
+}
+
+/// Left to itself, the command keeps progress apart whenever its output is not a terminal.
+#[test]
+fn progress_goes_to_standard_error_when_the_output_is_piped() {
+    let workspace = scratch("cli-piped");
+    let plugins = plugin("pi-tools").parent().unwrap().to_owned();
+    let (address, _seen) = model(vec![
+        tool_call("read", &json!({"path": "notes.txt"})),
+        answer("It says hello."),
+    ])
+    .unwrap();
+    fs::write(workspace.join("notes.txt"), "hello").unwrap();
+    fs::write(
+        workspace.join("corduroy.toml"),
+        agent_file(address, &plugins),
+    )
+    .unwrap();
+
+    let piped = Command::new(env!("CARGO_BIN_EXE_corduroy"))
+        .arg("--workspace")
+        .arg(&workspace)
+        .args(["run", "what does notes.txt say?"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+
+    assert!(piped.status.success(), "{}", text(&piped.stderr));
+    assert_eq!(text(&piped.stdout), "It says hello.\n");
+    assert!(
+        text(&piped.stderr).contains("▸ read"),
+        "{}",
+        text(&piped.stderr)
+    );
 }
 
 #[test]
@@ -910,7 +1003,8 @@ fn ends(workspace: &Path) -> Vec<String> {
         .filter_map(|line| serde_json::from_str::<Vec<Value>>(line).ok())
         .flatten()
         .filter(|event| event.get("topic").and_then(Value::as_str) == Some("turn/end"))
-        .filter_map(|event| event.get("payload")?.as_str().map(str::to_owned))
+        // The payload is the JSON itself in the file, read in one go.
+        .filter_map(|event| event.get("payload").map(Value::to_string))
         .collect()
 }
 

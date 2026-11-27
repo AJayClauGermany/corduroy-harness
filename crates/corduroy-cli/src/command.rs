@@ -24,7 +24,15 @@
 //! corduroy codes [N]                 what each exit code of this command means, or what N does
 //!
 //! options: --agent <file>  --workspace <dir>  --session <name>  --model <name>  --provider <name>
+//!          --progress stdout|stderr
 //! ```
+//!
+//! While runs are driven (`run`, `continue`, and the conversation), what the agent answers
+//! is written to standard output. Everything else said on the way is progress: the tools it
+//! calls and what they return, a gate's question, how the run ended. Progress goes to
+//! standard output too when that is a terminal, and to standard error when it is not, so
+//! that a program reading the command's output reads the answer and nothing else.
+//! `--progress` says which, whatever standard output is.
 //!
 //! The command is a library function, [`main_standard`], so that a binary of your own can be
 //! the same command with other [standard extensions](corduroy_std::Standard): more
@@ -54,7 +62,7 @@ use crate::report::{below, report, stamp};
 use crate::terminal::{self, Lines, Out, say};
 
 const USAGE: &str = "usage: corduroy [--agent FILE] [--workspace DIR] [--session NAME] \
-                     [--model NAME] [--provider NAME] [--version] [run PROMPT | continue | stop | check | sessions | \
+                     [--model NAME] [--provider NAME] [--progress stdout|stderr] [--version] [run PROMPT | continue | stop | check | sessions | \
                      sessions remove NAME | log | report [N] | doctor | \
                      init [anthropic|openai|chatgpt|ollama] [--secrets keychain|env] | \
                      secrets | secrets set [SECRET] | secrets remove [SECRET] | \
@@ -78,6 +86,8 @@ struct Options {
     session: Option<String>,
     model: Option<String>,
     provider: Option<String>,
+    /// Where progress is written, if the command line says: `true` for standard error.
+    progress_apart: Option<bool>,
     version: bool,
     command: Vec<String>,
 }
@@ -92,6 +102,17 @@ fn options(mut args: impl Iterator<Item = String>) -> Result<Options, String> {
             "--session" => options.session = Some(value("--session")?),
             "--model" => options.model = Some(value("--model")?),
             "--provider" => options.provider = Some(value("--provider")?),
+            "--progress" => {
+                options.progress_apart = Some(match value("--progress")?.as_str() {
+                    "stdout" => false,
+                    "stderr" => true,
+                    other => {
+                        return Err(format!(
+                            "--progress takes stdout or stderr, not `{other}`\n{USAGE}"
+                        ));
+                    }
+                });
+            }
             "-h" | "--help" | "help" => return Err(USAGE.to_owned()),
             "-V" | "--version" => options.version = true,
             // `cargo corduroy -- check` passes one on; it means nothing here.
@@ -121,6 +142,8 @@ pub fn main_standard(standard: &Standard) -> ExitCode {
     let console = Console {
         input: Box::new(io::BufReader::new(io::stdin())),
         out: Arc::new(Mutex::new(io::stdout())),
+        err: Arc::new(Mutex::new(io::stderr())),
+        piped: !io::stdout().is_terminal(),
         hidden: io::stdin().is_terminal(),
     };
     match run_on(standard, std::env::args().skip(1), console) {
@@ -136,8 +159,14 @@ pub fn main_standard(standard: &Standard) -> ExitCode {
 pub struct Console {
     /// What the person types: prompts, answers to a gate, and a secret's value.
     pub input: Box<dyn BufRead + Send>,
-    /// Where the command writes.
+    /// Where the command writes: its output, and what the agent answers.
     pub out: Out,
+    /// Where progress is written when it is kept apart from the answer: the tools called,
+    /// a gate's question, how a run ended.
+    pub err: Out,
+    /// Whether `out` is something other than a terminal, read by a program: progress is
+    /// then kept apart from the answer unless the command line says otherwise.
+    pub piped: bool,
     /// Whether a person is typing at a terminal, so that a secret's value is read from it
     /// without being shown. Otherwise the value is a line of `input`.
     pub hidden: bool,
@@ -325,6 +354,19 @@ fn between_runs(
     }
 }
 
+/// Where everything but the agent's answers is written.
+///
+/// While runs are driven that is progress, kept apart from the answers where a program
+/// reads the output, unless the command line says where it goes. Any other command's output
+/// is what it was asked for.
+fn progress(driving: bool, options: &Options, console: &Console) -> Out {
+    if driving && options.progress_apart.unwrap_or(console.piped) {
+        Arc::clone(&console.err)
+    } else {
+        Arc::clone(&console.out)
+    }
+}
+
 async fn run(
     options: Options,
     standard: &Standard,
@@ -339,7 +381,9 @@ async fn run(
     if let Some(done) = between_runs(&command, &options, &workspace, standard, console) {
         return done;
     }
-    let out = &Arc::clone(&console.out);
+    let driving = matches!(command.as_slice(), [] | ["run" | "continue", ..]);
+    let answers = &Arc::clone(&console.out);
+    let out = &progress(driving, &options, console);
     let Loaded { agent, places } = load(&options, workspace, standard, out)?;
     let harness = &agent.harness;
     let session = SessionId::new(options.session.as_deref().unwrap_or(MAIN));
@@ -352,35 +396,31 @@ async fn run(
     // can be answered somewhere else first.
     let typed = std::mem::replace(&mut console.input, Box::new(io::empty()));
     let input = &mut Lines::new(typed);
-    if let [] | ["run" | "continue", ..] = command.as_slice() {
+    if driving {
         announce(&agent.file, unfiled, paid.as_deref(), out);
         open_fronts(harness, out);
     }
     let paid = paid.as_deref();
-    let shown = Shown { out, paid, unfiled };
+    let shown = Shown {
+        out,
+        answers,
+        paid,
+        unfiled,
+    };
     match command.as_slice() {
         [] => chat(harness, session, input, &shown).await,
         ["run", words @ ..] if !words.is_empty() => {
-            let _shown = terminal::watch(harness, &session, out);
+            let _shown = terminal::watch(harness, &session, answers, out);
             let prompt = words.join(" ");
             let outcome = terminal::prompt(harness, &session, &prompt, input, out).await?;
             Ok(finish(&outcome.status, &shown))
         }
         ["continue"] => {
-            let _shown = terminal::watch(harness, &session, out);
+            let _shown = terminal::watch(harness, &session, answers, out);
             let outcome = terminal::resume(harness, &session, input, out).await?;
             Ok(finish(&outcome.status, &shown))
         }
-        ["stop"] => {
-            let stopped = harness.stop(&session)?;
-            let said = if stopped {
-                format!("stopped the run of `{session}`")
-            } else {
-                format!("`{session}` has no run to stop")
-            };
-            say(out, &said);
-            Ok(ExitCode::SUCCESS)
-        }
+        ["stop"] => stop(harness, &session, out),
         ["check"] => Ok(check(&agent, out)),
         ["doctor"] => Ok(doctor::doctor(&agent, &places, standard, out)),
         ["sessions"] => Ok(list_sessions(harness, out)),
@@ -390,6 +430,17 @@ async fn run(
         ["report", count] => print_report(&agent, &session, count, out),
         _ => Err(USAGE.into()),
     }
+}
+
+/// End the unfinished run of `session` without finishing it, and say whether there was one.
+fn stop(harness: &Harness, session: &SessionId, out: &Out) -> Done {
+    let said = if harness.stop(session)? {
+        format!("stopped the run of `{session}`")
+    } else {
+        format!("`{session}` has no run to stop")
+    };
+    say(out, &said);
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Print the sessions in the log, each with the session it was started from.
@@ -513,10 +564,12 @@ fn default_agent(file: &AgentFile) -> String {
 const INIT: &str = "`corduroy init` writes an agent for Anthropic, OpenAI, a ChatGPT plan or \
                     Ollama, to edit";
 
-/// Where a run's end is said, what its model is paid through, if that is signed in to, and
-/// whether the agent is the default one, used for want of an agent file.
+/// Where a run's progress and end are said, where its answers are written, what its model
+/// is paid through, if that is signed in to, and whether the agent is the default one, used
+/// for want of an agent file.
 struct Shown<'a> {
     out: &'a Out,
+    answers: &'a Out,
     paid: Option<&'a dyn SignIn>,
     unfiled: bool,
 }
@@ -689,7 +742,7 @@ async fn chat(
         out,
         "corduroy: type a prompt, /help for commands, /exit or ctrl-d to leave",
     );
-    let mut shown = terminal::watch(harness, &session, out);
+    let mut shown = terminal::watch(harness, &session, ends.answers, out);
     let outcome = terminal::resume(harness, &session, input, out).await?;
     let started = !outcome.session.conversation().is_empty();
     if started {
@@ -731,7 +784,7 @@ async fn chat(
                 }
                 harness.events().unsubscribe(shown);
                 session = next;
-                shown = terminal::watch(harness, &session, out);
+                shown = terminal::watch(harness, &session, ends.answers, out);
             }
             Typed::Prompt(prompt) => {
                 let outcome = terminal::prompt(harness, &session, prompt, input, out).await?;
@@ -774,6 +827,7 @@ mod tests {
             written.lock().unwrap().clear();
             Shown {
                 out: &out,
+                answers: &out,
                 paid: None,
                 unfiled,
             }
@@ -792,6 +846,18 @@ mod tests {
             "{line}"
         );
         assert!(line.contains("for `qwen3` and reads no key") && line.contains("corduroy init"));
+    }
+
+    #[test]
+    fn progress_is_sent_where_the_command_line_says() {
+        let read = |args: &[&str]| options(args.iter().map(|arg| (*arg).to_owned()));
+        assert_eq!(read(&["run", "hi"]).unwrap().progress_apart, None);
+        let apart = read(&["--progress", "stderr", "run", "hi"]).unwrap();
+        assert_eq!(apart.progress_apart, Some(true));
+        let together = read(&["--progress", "stdout", "run", "hi"]).unwrap();
+        assert_eq!(together.progress_apart, Some(false));
+        let error = read(&["--progress", "nowhere", "run", "hi"]).unwrap_err();
+        assert!(error.contains("stdout or stderr"), "{error}");
     }
 
     #[test]

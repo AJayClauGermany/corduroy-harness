@@ -48,6 +48,8 @@ fn corduroy(standard: &Standard, workspace: &Path, args: &[&str], typed: &str) -
     let console = Console {
         input: Box::new(Cursor::new(typed.as_bytes().to_vec())),
         out: Arc::<Mutex<Vec<u8>>>::clone(&written),
+        err: Arc::<Mutex<Vec<u8>>>::clone(&written),
+        piped: false,
         // Nobody is at a terminal: a value is a line of what was typed.
         hidden: false,
     };

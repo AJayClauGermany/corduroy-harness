@@ -16,14 +16,15 @@
 //! | `gate/decision` | `host` | `{"point", "id", "tool", "verdict", "reason", "gate", "caller"}`, caused by its `tool/call`: what the gates said |
 //! | `gate/answer` | `user` | `{"id", "tool", "allow", "reason"}`, caused by its `tool/call`: a person's answer to a gate that asked |
 //! | `tool/start` | `host` | `{"id", "tool"}`, caused by its `tool/call`: the tool is about to run |
-//! | `tool/result` | `environment` | `{"id", "tool", "ok", "output"}`, and `"content"` when the result is not one block of text, caused by its `tool/call` |
+//! | `tool/result` | `environment` | `{"id", "tool", "ok", "output"}`, and `"content"` when the result is not one block of text, caused by its `tool/call`; with `"signal"` where the call waited and this is what the signal of that name brought |
 //! | `model/request` | `host` | `{"provider", "model", "messages", "tools"}`: the model is about to be asked, with that many messages and tools; what follows it in the session (the model's `message`, or a `turn/end`) says when the answer came |
+//! | `model/retry` | `host` | `{"provider", "model", "attempt", "kind", "reason", "delay_ms", "by"}`: an attempt at the request failed for `reason` (of `kind`, as a failed `turn/end` names them) and it is made again after `delay_ms`; `attempt` counts the retries from 1, and `by` says who retries (`provider`) |
 //! | `usage` | `agent` | `{"model", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens", "stop"}`, each count only if the provider gave it; the cache counts are part of `input_tokens` and the reasoning count of `output_tokens`; `stop` is why the model stopped (`finished`, `limit`, `tool_calls` or `refused`), if the provider said |
 //! | `turn/end` | `host` | `{"status"}`: `finished`, `cut-off` (the answer stopped at the most the model may write), `turn-limit`, `time-limit`, `output-limit`, `failed` (with `"reason"`, and `"kind"` where the model gave no answer: `context-overflow`, `rate-limit`, `auth`, `timeout`, `unreachable` or `other`), `stopped` or `yielded` |
 //! | `run/restart` | `host` | `{"attempt"}`: an unfinished run was picked up again |
 //! | `run/stop` | `user` | `{}`: a person asked the run to stop |
 //! | `tool/wait` | `host` | `{"id", "tool", "signal"}`, caused by its `tool/call`: the call's result comes with the signal |
-//! | `signal` | `environment` | `{"name", "payload"}`: what a waiting call was waiting for |
+//! | `signal` | `environment` | `{"name", "payload"}`: what a waiting call was waiting for; the `tool/result` of each call that waited follows it in the same commit |
 //! | `compaction` | `host` | `{"summary", "keep_from", "by"}`: the messages before the `message` event `keep_from` are summarised |
 //!
 //! Two belong to no session: each process that opens the log records what it runs as, and a
@@ -62,7 +63,8 @@
 //! [`corduroy_core::call::wait_for`], that its result will come with a signal. The call
 //! gets a placeholder result and a `tool/wait`, and the run stops before the model is asked
 //! again; when a `signal` of that name is stored, its payload takes the placeholder's place
-//! and the run can go on. A child session's end is such a signal (`session/<id>/end`), so a
+//! and the run can go on. The call's `tool/result` is stored with the signal, so every
+//! call has one; a log from before that has the `signal` alone, and reads the same. A child session's end is such a signal (`session/<id>/end`), so a
 //! parent run waits for a child in the log, as it waits for a person's answer.
 //!
 //! A `compaction` stands a summary in for the messages before `keep_from`. They stay in the
@@ -96,7 +98,7 @@ use serde_json::{Value, json};
 
 use crate::harness::HarnessError;
 use crate::message::{decode, decode_content, encode, encode_content};
-use crate::provider::{ProviderError, ProviderErrorKind};
+use crate::provider::{ProviderError, ProviderErrorKind, Retry};
 
 /// Topic of the events that make up the conversation.
 pub const MESSAGE: &str = "message";
@@ -109,6 +111,9 @@ const USAGE: &str = "usage";
 
 /// Topic of the event that records a request going out to the model.
 pub const MODEL_REQUEST: &str = "model/request";
+
+/// Topic of the event that records a model request being made again after a failed attempt.
+pub const MODEL_RETRY: &str = "model/retry";
 
 /// Topic of the event that records an unfinished run being picked up again.
 const RESTART: &str = "run/restart";
@@ -866,9 +871,27 @@ struct State {
 /// A tool call that waited for a signal.
 struct Waited {
     tool: String,
+    /// The call's `tool/call` event, if the call was open when it began to wait.
+    event: Option<EventId>,
     signal: String,
     /// The signal's payload, once it came.
     payload: Option<String>,
+}
+
+impl Waited {
+    /// The `tool/result` of the call `call`, which waited for this: what its signal
+    /// brought as `payload`, caused by the call where that is known.
+    fn brought(&self, call: &str, payload: &str) -> Draft {
+        let mut result = result_payload(call, &self.tool, true, &ToolOutput::text(payload));
+        if let Some(fields) = result.as_object_mut() {
+            fields.insert("signal".to_owned(), json!(self.signal));
+        }
+        let draft = Draft::new(Source::Environment, "tool/result").payload(result.to_string());
+        match self.event {
+            Some(event) => draft.cause(event),
+            None => draft,
+        }
+    }
 }
 
 /// One step's worth of events, and what they change in the projection once stored.
@@ -961,6 +984,7 @@ impl State {
             call.to_owned(),
             Waited {
                 tool: tool.to_owned(),
+                event: self.calls.get(call).map(|open| open.event),
                 signal: signal.to_owned(),
                 payload: None,
             },
@@ -1607,18 +1631,30 @@ impl Journal {
     /// Store the signal `name`, bringing `payload` to whichever calls of this session wait
     /// for it. Returns whether any did; if none did, nothing is stored.
     ///
+    /// Each call that waited gets its `tool/result` in the same commit, caused by its
+    /// `tool/call`, so that every call has one whether or not it waited. The conversation
+    /// is still rebuilt from the `signal` alone, as a log written before this holds no
+    /// such result.
+    ///
     /// # Errors
     ///
     /// Fails if the signal cannot be stored.
     pub fn signal(&self, name: &str, payload: &str) -> Result<bool> {
-        let awaited = self.awaiting().iter().any(|wait| wait.signal == name);
-        if !awaited {
+        let results: Vec<Draft> = self.state(|state| {
+            state
+                .waits
+                .iter()
+                .filter(|(_, waited)| waited.signal == name && waited.payload.is_none())
+                .map(|(call, waited)| waited.brought(call, payload).session(self.id.clone()))
+                .collect()
+        });
+        if results.is_empty() {
             return Ok(false);
         }
         let draft = Draft::new(Source::Environment, SIGNAL)
             .session(self.id.clone())
             .payload(json!({"name": name, "payload": payload}).to_string());
-        self.events.emit(draft)?;
+        self.events.commit(core::iter::once(draft).chain(results))?;
         self.state(|state| state.resolve(name, payload));
         Ok(true)
     }
@@ -1668,6 +1704,25 @@ impl Journal {
             "tools": request.tools.len(),
         });
         let draft = Draft::new(Source::Host, MODEL_REQUEST)
+            .session(self.id.clone())
+            .payload(payload.to_string());
+        self.events.emit(draft)?;
+        Ok(())
+    }
+
+    /// Record that the request to `model` of `provider` failed and is being made again:
+    /// which retry it is, why the attempt failed, how long is waited first, and who retries.
+    pub(crate) fn retried(&self, provider: &str, model: &str, retry: &Retry) -> Result<()> {
+        let payload = json!({
+            "provider": provider,
+            "model": model,
+            "attempt": retry.attempt,
+            "kind": retry.error.kind().name(),
+            "reason": retry.error.to_string(),
+            "delay_ms": u64::try_from(retry.delay.as_millis()).unwrap_or(u64::MAX),
+            "by": retry.by,
+        });
+        let draft = Draft::new(Source::Host, MODEL_RETRY)
             .session(self.id.clone())
             .payload(payload.to_string());
         self.events.emit(draft)?;

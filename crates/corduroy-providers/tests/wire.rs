@@ -116,6 +116,46 @@ fn sing(stream: &mut TcpStream) -> io::Error {
     }
 }
 
+/// An endpoint that refuses its first `refused` requests as coming too fast, to be tried
+/// again at once, and answers the rest. Its port.
+fn refusing_first(refused: usize) -> io::Result<u16> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let port = listener.local_addr()?.port();
+    thread::spawn(move || {
+        for (count, mut stream) in listener.incoming().flatten().enumerate() {
+            if body_of(&stream).is_err() {
+                continue;
+            }
+            let (status, answer) = if count < refused {
+                (
+                    "429 Too Many Requests\r\nretry-after: 0",
+                    json!({"error": {"message": "slow down", "type": "rate_limit_error"}}),
+                )
+            } else {
+                (
+                    "200 OK",
+                    json!({
+                        "id": "1", "object": "chat.completion", "created": 0, "model": "local",
+                        "choices": [{
+                            "index": 0, "finish_reason": "stop",
+                            "message": {"role": "assistant", "content": "hello"},
+                        }],
+                        "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
+                    }),
+                )
+            };
+            let answer = answer.to_string();
+            let _sent = write!(
+                stream,
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
+                 connection: close\r\n\r\n{answer}",
+                answer.len()
+            );
+        }
+    });
+    Ok(port)
+}
+
 fn asking() -> ModelRequest {
     ModelRequest::new("local", "be brief", vec![Message::user().text("hi")])
 }
@@ -189,4 +229,44 @@ async fn an_answer_that_never_ends_is_ended_at_the_timeout() {
     let end: Value = serde_json::from_str(&ends.last().unwrap().payload).unwrap();
     assert_eq!(end["status"], "failed");
     assert_eq!(end["kind"], "timeout");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_made_again_is_recorded_with_who_retried() {
+    // oi-kit's own client tries a refused request four times before it gives the error up;
+    // the fifth request is the retry made here, and the one that is told.
+    let port = refusing_first(4).unwrap();
+    let built = build("local", &spec(port, false)).unwrap();
+    let events = Arc::new(EventStream::new());
+    let harness = Harness::open(Arc::clone(&events))
+        .unwrap()
+        .with_model("local");
+    harness.plugin(provider("default", built));
+
+    let outcome = harness.run("hi").await.unwrap();
+
+    assert_eq!(
+        outcome.status,
+        Status::Finished {
+            answer: "hello".to_owned()
+        }
+    );
+    let retries = events.matching(&Pattern::new("model/retry"));
+    assert_eq!(retries.len(), 1, "{retries:?}");
+    let retry: Value = serde_json::from_str(&retries[0].payload).unwrap();
+    assert_eq!(retry["attempt"], 1);
+    assert_eq!(retry["kind"], "rate-limit");
+    assert_eq!(retry["by"], "provider");
+    assert_eq!(retry["provider"], "default");
+    assert_eq!(retry["model"], "local");
+    assert!(retry["delay_ms"].is_u64(), "{retry}");
+    assert!(retry["reason"].is_string(), "{retry}");
+    // Between the request and its answer, in the session that asked.
+    let stored = events.events();
+    let topics: Vec<&str> = stored
+        .iter()
+        .map(|event| event.topic.as_str())
+        .filter(|topic| topic.starts_with("model/") || *topic == "usage")
+        .collect();
+    assert_eq!(topics, ["model/request", "model/retry", "usage"]);
 }

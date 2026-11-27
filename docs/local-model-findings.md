@@ -213,7 +213,7 @@ happened. It works. What the other harness has to know or work around:
 | --- | --- | --- |
 | How the run ended | exit 0, 1 or 130 | 1 is *failed*, *turn limit* and *waiting for an answer* alike. Telling them apart means reading `turn/end` in the log, or finding there is none |
 | The answer | standard output | Mixed with the `▸`/`✓` lines of every tool call. The bench reads the last assistant `message` from the log instead |
-| The log | `.corduroy/log.jsonl` | Each `payload` is JSON kept as a string inside JSON, so it is decoded twice ([C7](open-questions.md#c7-is-an-events-payload-json-by-contract-or-by-convention)) |
+| The log | `.corduroy/log.jsonl` | Each `payload` is JSON kept as a string inside JSON, so it is decoded twice (C7, since decided: [the payload](reference/events.md#the-payload)) |
 | A tool call's result | `tool/result` | A call that waited (`delegate`) has none. Its result is a `signal`, which carries neither the call's id nor whether it worked. The bench's first version counted every delegation as failed for this |
 | Answering a gate | `continue` with `y` on standard input | Works, and is not counted as a restart. But answers are taken in order with no way to say which question one is for, so a caller that pipes `y` three times approves whatever comes (finding 3). There is no "answer question *id*" outside the page |
 | A conversation | prompts on standard input, then `/exit` | Works (`conversation_piped`) |

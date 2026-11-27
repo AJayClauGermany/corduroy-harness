@@ -29,7 +29,6 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::error::Error;
 use core::fmt;
-#[cfg(feature = "tokio")]
 use core::time::Duration;
 #[cfg(feature = "tokio")]
 use std::sync::mpsc;
@@ -150,11 +149,65 @@ impl fmt::Display for ProviderError {
 
 impl Error for ProviderError {}
 
+/// One attempt at a request that failed and is about to be made again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Retry {
+    /// Which retry this is of the request, counting from 1.
+    pub attempt: u32,
+    /// Why the attempt before it failed.
+    pub error: ProviderError,
+    /// How long is waited before the request is made again.
+    pub delay: Duration,
+    /// Who makes the request again: [`BY_PROVIDER`] for a provider's own retry.
+    pub by: String,
+}
+
+/// Who retried, where a provider did so by its own policy. A loop that asks again, or
+/// anything else that does, names itself otherwise.
+pub const BY_PROVIDER: &str = "provider";
+
+impl Retry {
+    /// The `attempt`th retry of a request, by the provider itself, after `error` and a wait
+    /// of `delay`.
+    #[must_use]
+    pub fn new(attempt: u32, error: ProviderError, delay: Duration) -> Self {
+        Self {
+            attempt,
+            error,
+            delay,
+            by: BY_PROVIDER.to_owned(),
+        }
+    }
+
+    /// The same retry, made by `by` and not by the provider.
+    #[must_use]
+    pub fn by(mut self, by: impl Into<String>) -> Self {
+        self.by = by.into();
+        self
+    }
+}
+
+/// What a provider tells whoever asked while it answers a request. The harness records what
+/// it hears; a provider never writes to the event stream itself.
+///
+/// Every method has a default that does nothing, so one more thing to tell is an addition.
+pub trait Reports: Send + Sync {
+    /// An attempt failed and the request is about to be made again.
+    fn retry(&self, retry: &Retry) {
+        let _: &Retry = retry;
+    }
+}
+
+/// Hears nothing.
+impl Reports for () {}
+
 /// A model the loop can ask.
 ///
-/// A provider retries what is worth retrying itself (a rate limit, a dropped connection);
-/// an error it returns ends the run. The loop may stop waiting for an answer, when a person
-/// stops the run, so a provider must not rely on being awaited to the end.
+/// A provider retries what is worth retrying itself (a rate limit, a dropped connection),
+/// saying so through [`Provider::complete_reporting`]; an error it returns ends the run.
+/// The loop may stop waiting for an answer, when a person stops the run, so a provider must
+/// not rely on being awaited to the end.
 #[async_trait]
 pub trait Provider: Send + Sync {
     /// Answer `request`.
@@ -163,6 +216,23 @@ pub trait Provider: Send + Sync {
     ///
     /// Returns a [`ProviderError`] if the model could not be reached or did not answer.
     async fn complete(&self, request: &ModelRequest) -> Result<ModelReply, ProviderError>;
+
+    /// Answer `request`, telling `reports` what happens on the way: each attempt that is
+    /// made again. This is what the loop calls. By default nothing is told and the answer
+    /// is [`complete`](Self::complete)'s; a provider that retries implements this and has
+    /// `complete` call it with `&()`.
+    ///
+    /// # Errors
+    ///
+    /// As [`complete`](Self::complete).
+    async fn complete_reporting(
+        &self,
+        request: &ModelRequest,
+        reports: &dyn Reports,
+    ) -> Result<ModelReply, ProviderError> {
+        let _: &dyn Reports = reports;
+        self.complete(request).await
+    }
 
     /// What is known about `model`, by the provider's own name for it: what it takes and how
     /// much it holds. Nothing, unless the provider says; a reader has to cope with that.
@@ -268,6 +338,14 @@ struct Described {
 impl Provider for Described {
     async fn complete(&self, request: &ModelRequest) -> Result<ModelReply, ProviderError> {
         self.provider.complete(request).await
+    }
+
+    async fn complete_reporting(
+        &self,
+        request: &ModelRequest,
+        reports: &dyn Reports,
+    ) -> Result<ModelReply, ProviderError> {
+        self.provider.complete_reporting(request, reports).await
     }
 
     fn describe(&self, model: &str) -> ModelInfo {

@@ -555,13 +555,6 @@ person passed through to a shell is such a value as soon as the model prints it
 another is the answer (listeners would still see the value). Checkpoints of live output
 pass the same point, so one answer has to cover them.
 
-### C7. Is an event's payload JSON by contract or by convention?
-
-`Event::payload` is a `String`, "by convention JSON" (`core/event.rs:160`).
-
-*Direction.* Make it the contract for every topic the core and the loop define; say what an
-add-on's own topics may hold.
-
 ### C8. Who may emit which topics?
 
 `events.emit` refuses `state/*` and nothing else. The session projection ignores events
@@ -1041,8 +1034,18 @@ A package's ask adds a case ([How people meet it](design.md#how-people-meet-it))
 one host, the person may want to allow that host or any, so an answer can be wider or
 narrower than what was asked.
 
+One thing waits on this. A small model refused a `write` by a person does the same thing
+with `bash`, and the second question shows a shell command with nothing to say that it
+follows a refusal ([what a small model does](local-model-findings.md)). That a question
+follows a refusal of the same target is to be said by the gate that asks, and not worked
+out by a front end, so that the terminal, the page and anything else show it alike. It is
+built together with the answers below, since a remembered refusal is the same mechanism as
+a remembered "always allow", pointing the other way.
+
 *Direction.* Decide with [D1](#d1-is-a-verdict-allow-ask-or-deny-for-good), and say whether
-an answer may change the scope that was asked for.
+an answer may change the scope that was asked for. Then the forms beyond allow and deny
+once ("always allow", "always deny", within a pattern), each kept by the gate's own memory,
+and with them the flag on a question that repeats what was refused.
 
 ### G7. Is `anyhow` part of the contract?
 
@@ -1160,12 +1163,19 @@ clock and has its own count of tokens), and the unit a budget of cost is written
 
 ### G21. Who retries, and who falls back?
 
-Retries are inside the provider's adapter (`crates/corduroy-providers/src/adapter.rs:99`).
-A model that still fails ends the run as failed; there is no falling back to another model
-or provider.
+Retries are the provider's, and each is recorded with who made it (`model/retry`, `by`):
+see [What the record promises](design.md#what-the-record-promises). A model that still
+fails ends the run as failed; there is no falling back to another model or provider.
 
-*Direction.* Decide whether that is the provider's for good, or the loop's (which needs the
-error kinds of [G10](#g10-why-did-the-model-stop-and-why-did-it-fail)).
+Two things are left. oi-kit's client retries a failed request by itself before the
+provider's adapter hears of it, and the adapter then retries the whole of that, so a
+refused connection is tried sixteen times over about 36 seconds and only the adapter's
+three retries are recorded. And nothing falls back.
+
+*Direction.* Decide whether the adapter's own retries stay on top of the client's, since
+one of the two is enough and only ours can be recorded. Then whether falling back is the
+provider's for good, or the loop's, which now has the error kinds to go by and would say
+`by` its own name.
 
 ### G22. Is the event stream the only way to observe a run?
 

@@ -116,10 +116,10 @@ pub use loops::{DEFAULT_LOOP, LOOPS, Loop, Loops, Run, StandardLoop, Step};
 pub use operation::{Next, Operation};
 pub use outside::{FRONTS, Front, Fronts, OUTSIDE, Outside};
 pub use provider::{
-    DEFAULT_PROVIDER, PROVIDERS, Provider, ProviderError, ProviderErrorKind, ProviderPlugin,
-    Providers, provider,
+    BY_PROVIDER, DEFAULT_PROVIDER, PROVIDERS, Provider, ProviderError, ProviderErrorKind,
+    ProviderPlugin, Providers, Reports, Retry, provider,
 };
 pub use session::{
-    Answer, Ask, COMPACTION, Effect, End, Journal, MAIN, MODEL_REQUEST, PROCESS_START, ProcessInfo,
-    Removal, SESSION_REMOVED, SIGNAL, Session, SessionInfo, Sessions, Wait, removal,
+    Answer, Ask, COMPACTION, Effect, End, Journal, MAIN, MODEL_REQUEST, MODEL_RETRY, PROCESS_START,
+    ProcessInfo, Removal, SESSION_REMOVED, SIGNAL, Session, SessionInfo, Sessions, Wait, removal,
 };

@@ -217,18 +217,30 @@ pub fn describe(event: &Event) -> Option<String> {
     }
 }
 
-/// Show what happens in `session`, in the sub-agents it starts, and to the plugins, on
-/// `out` as it is committed. A sub-agent's lines are indented under its session's name.
-pub fn watch(harness: &Harness, session: &SessionId, out: &Out) -> ListenerId {
+/// Whether `event` is an answer of the agent's: something it said without asking for a
+/// tool. What it says on the way to calling one is progress.
+fn answers(event: &Event) -> bool {
+    event.topic == "message"
+        && event.source == Source::Agent
+        && decode(&event.payload).is_ok_and(|message| message.tool_calls().next().is_none())
+}
+
+/// Show what happens in `session`, in the sub-agents it starts, and to the plugins, as it
+/// is committed.
+///
+/// What the session's agent answers is written to `answers`, and everything else to `out`,
+/// which may be the same. A sub-agent's lines are indented under its session's name.
+pub fn watch(harness: &Harness, session: &SessionId, answers: &Out, out: &Out) -> ListenerId {
     let session = session.clone();
     let below = format!("{session}/");
-    let out = Arc::clone(out);
+    let (answered, out) = (Arc::clone(answers), Arc::clone(out));
     harness.events().subscribe(Pattern::any(), move |event| {
         let Some(text) = describe(event) else {
             return;
         };
         match &event.session {
             None => say(&out, &text),
+            Some(id) if *id == session && self::answers(event) => say(&answered, &text),
             Some(id) if *id == session => say(&out, &text),
             Some(id) if id.as_str().starts_with(&below) => {
                 let indented = text.replace('\n', "\n    ");
@@ -278,7 +290,9 @@ async fn hear(harness: &Harness, ask: &Ask, input: &mut Lines, answered: &Notify
 /// Ask a person about each tool call `outcome` waits on, until the run no longer waits.
 ///
 /// `y` allows a call; anything else refuses it, and any text other than `n` is the reason the
-/// model is given. A question answered at a front end meanwhile (the agent's page, say) is
+/// model is given. A line that begins `@<id>` is for the question about that tool call
+/// alone: it is given to that one, and to none if no such question waits. A question
+/// answered at a front end meanwhile (the agent's page, say) is
 /// answered: the run is taken on from there, and what was being typed goes to the next
 /// question. When the input ends the run is left waiting, in the log, for `corduroy
 /// continue` in this process or another.
@@ -309,6 +323,28 @@ pub async fn settle(
     settled
 }
 
+/// What a line typed at a question says: whether the call is allowed, and which question
+/// the line is for, if it says.
+///
+/// `y` allows; anything else refuses, and any text other than `n` is the reason the model
+/// is given. A line that begins `@<id>` answers the question about the tool call `<id>`
+/// and no other, so that an answer prepared for one question is never taken for the next.
+fn answer_of(line: &str) -> (Option<&str>, Answer) {
+    let line = line.trim();
+    let (id, said) = line.strip_prefix('@').map_or((None, line), |addressed| {
+        let (id, said) = addressed
+            .split_once(char::is_whitespace)
+            .unwrap_or((addressed, ""));
+        (Some(id), said.trim())
+    });
+    let answer = match said {
+        "y" | "Y" | "yes" => Answer::Allow,
+        "" | "n" | "N" | "no" => Answer::Deny("the user declined".to_owned()),
+        reason => Answer::Deny(reason.to_owned()),
+    };
+    (id, answer)
+}
+
 async fn ask_each(
     harness: &Harness,
     mut outcome: Outcome,
@@ -323,10 +359,11 @@ async fn ask_each(
         say(
             out,
             &format!(
-                "? {} {}\n  {} asks: {}\n  allow? [y/N, or a reason to refuse]",
+                "? {} {}\n  {} asks ({}): {}\n  allow? [y/N, or a reason to refuse]",
                 ask.tool,
                 short(&ask.input, 300),
                 ask.gate,
+                ask.call,
                 ask.reason
             ),
         );
@@ -336,15 +373,29 @@ async fn ask_each(
             // Nobody is there to answer. The run waits in the log for whoever is next.
             Heard::Nobody => break,
         };
-        let answer = typed.map(|line| match line.trim() {
-            "y" | "Y" | "yes" => Answer::Allow,
-            "" | "n" | "N" | "no" => Answer::Deny("the user declined".to_owned()),
-            reason => Answer::Deny(reason.to_owned()),
-        });
-        let session = &ask.session;
+        // An answer that names a question is given to that one, wherever it stands among
+        // those waiting, and to none if no such question waits.
+        let answer = match typed.as_deref().map(answer_of) {
+            None => None,
+            Some((None, answer)) => Some((ask.clone(), answer)),
+            Some((Some(id), answer)) => {
+                let Some(named) = asks.iter().find(|ask| ask.call == id) else {
+                    say(
+                        out,
+                        &format!("  ! no question `{id}` is waiting: nothing was answered"),
+                    );
+                    continue;
+                };
+                Some((named.clone(), answer))
+            }
+        };
+        let session = answer
+            .as_ref()
+            .map_or_else(|| ask.session.clone(), |(asked, _)| asked.session.clone());
+        let session = &session;
         let typed = match answer {
-            Some(answer) => {
-                let run = harness.answer(session, &ask.call, answer);
+            Some((asked, answer)) => {
+                let run = harness.answer(session, &asked.call, answer);
                 Some(stoppable(harness, session, run).await)
             }
             None => None,
@@ -549,10 +600,14 @@ pub fn ending(status: &Status) -> Option<String> {
             let signals: Vec<&str> = waits.iter().map(|wait| wait.signal.as_str()).collect();
             Some(format!("waiting for {}", signals.join(", ")))
         }
-        Status::Waiting { asks, .. } => Some(format!(
-            "waiting for {} answer(s); run `corduroy continue` to give them",
-            asks.len()
-        )),
+        Status::Waiting { asks, .. } => {
+            let ids: Vec<&str> = asks.iter().map(|ask| ask.call.as_str()).collect();
+            Some(format!(
+                "waiting for {} answer(s), about {}; run `corduroy continue` to give them",
+                asks.len(),
+                ids.join(", ")
+            ))
+        }
         other => Some(other.to_string()),
     }
 }
@@ -683,6 +738,24 @@ mod tests {
         assert_eq!(
             ending(&failed).as_deref(),
             Some("the run failed: Overloaded (overloaded_error)")
+        );
+    }
+
+    #[test]
+    fn a_typed_answer_may_name_its_question() {
+        let refused = |reason: &str| Answer::Deny(reason.to_owned());
+        assert_eq!(answer_of("y\n"), (None, Answer::Allow));
+        assert_eq!(answer_of("\n"), (None, refused("the user declined")));
+        assert_eq!(answer_of("use b.txt"), (None, refused("use b.txt")));
+        assert_eq!(answer_of("@call_1 y\n"), (Some("call_1"), Answer::Allow));
+        assert_eq!(
+            answer_of("@call_1 no, use b.txt"),
+            (Some("call_1"), refused("no, use b.txt"))
+        );
+        // Named and nothing said: refused, as an empty line is.
+        assert_eq!(
+            answer_of("@call_1"),
+            (Some("call_1"), refused("the user declined"))
         );
     }
 
