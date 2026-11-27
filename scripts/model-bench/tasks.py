@@ -5,6 +5,12 @@ Tier 1  one ability each: does the model reach every part of the agent?
 Tier 2  gates, grants and what the harness must hold whatever the model does
 Tier 3  being driven: interrupted, stopped, continued, limited
 Tier 4  real work, as far as the model can be pushed
+Tier 5  past what tier 4 asks, to find where it stops
+Tier 6  where the shell and the tools themselves get awkward, and larger programs
+
+Tiers 1, 4, 5 and 6 are the ladder (`LADDER`): each asks more of the model than the one
+before, and how far up a model gets is what one model is compared with another by. Tiers 0,
+2 and 3 ask about the harness, and should hold whatever the model is.
 
 A task takes a `Trial` (bench.py), sets up, drives, and says what it `expect`s. It checks
 outcomes, never phrasing, except where the outcome *is* what the model says (it must not
@@ -27,6 +33,17 @@ import subprocess
 import time
 
 TASKS: list[dict] = []
+
+TIERS = {
+    0: "the command itself",
+    1: "one ability each",
+    2: "gates and grants",
+    3: "being driven",
+    4: "real work",
+    5: "past that",
+    6: "awkward tools, larger programs",
+}
+LADDER = (1, 4, 5, 6)
 
 
 def task(tier: int, about: str):
@@ -77,9 +94,7 @@ def doctor_command(t):
 
 @task(0, "a model that is not there: exit 1 soon, the reason said and recorded")
 def model_unreachable(t):
-    t.configure(old=":8080/", new=":9/") if ":8080/" in t.agent_text else t.configure(
-        old=t.config.url, new="http://127.0.0.1:9/v1/chat/completions"
-    )
+    t.unreachable()
     ran = t.run("Say hello.", timeout=120)
     t.expect(ran.code == 1, f"exited {ran.code}, expected 1")
     t.expect(ran.seconds < 60, f"took {ran.seconds:.0f}s to give up")
@@ -152,7 +167,13 @@ def bash(t):
     content = t.token(64)
     t.write("data.txt", content)
     digest = hashlib.sha256(content.encode()).hexdigest()
-    finished(t, t.run("What is the SHA-256 of data.txt? Use sha256sum and give me the full hash."))
+    finished(
+        t,
+        t.run(
+            "What is the SHA-256 of data.txt? Use sha256sum (or `shasum -a 256`, where there "
+            "is no sha256sum) and give me the full hash."
+        ),
+    )
     t.expect(digest in t.answer(), f"the answer lacks the hash: {t.answer()[:200]!r}")
     t.expect(t.used("bash"), "bash never ran successfully")
 
@@ -601,7 +622,10 @@ def crash_continue(t):
 
 @task(3, "SIGINT stops a run inside a long command: exit 130, `stopped`, promptly")
 def interrupt(t):
-    process = t.start("Run `sleep 300` in the shell, then say done.")
+    # A length of its own, so that a bench running beside this one (another model, the same
+    # user) is neither counted nor killed.
+    seconds = random.randint(300, 9999)
+    process = t.start(f"Run `sleep {seconds}` in the shell, then say done.")
     seen = t.wait_for(
         lambda events: any(
             e.get("topic") == "tool/start" and e["payload"].get("tool") == "bash" for e in events
@@ -628,14 +652,14 @@ def interrupt(t):
     t.expect(took < 20, f"took {took:.0f}s to stop")
     t.expect(t.last_status() == "stopped", f"the run's status is {t.last_status()}")
     gone = time.monotonic()
-    leftover = t.sh("pgrep -u $(id -u) -x sleep", timeout=10)
+    leftover = t.sh(f"pgrep -u $(id -u) -f '^sleep {seconds}$'", timeout=10)
     while leftover.code == 0 and time.monotonic() - gone < 5:
         time.sleep(0.2)
-        leftover = t.sh("pgrep -u $(id -u) -x sleep", timeout=10)
+        leftover = t.sh(f"pgrep -u $(id -u) -f '^sleep {seconds}$'", timeout=10)
     t.expect(leftover.code != 0, "the sleep is still running five seconds after the stop")
     if time.monotonic() - gone > 1:
         t.note(f"the sleep outlived the command by {time.monotonic() - gone:.1f}s")
-    t.sh("pkill -u $(id -u) -x sleep", timeout=10)
+    t.sh(f"pkill -u $(id -u) -f '^sleep {seconds}$'", timeout=10)
 
 
 @task(3, "two sessions in one workspace, one after the other, stay apart")

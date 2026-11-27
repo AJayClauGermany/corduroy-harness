@@ -46,7 +46,7 @@ bench again, so nothing below says a rate has changed.
 | Not recorded: retries, the size of a tool result, which call a denial belongs to | `model/retry`; `bytes`, `tokens`, `budget` and `cut` on `tool/result`; `call` on `capability/denied` | [Events](reference/events.md) |
 | Not recorded: why a turn-limited run was still going; a run's cost in one place | Left: the second is `corduroy report`'s to add up | [G17](open-questions.md#g17-where-is-usage-added-up) |
 | Smaller things: a denial printed twice, `find` and `[1-8]` | Said once; `find` refuses a pattern it does not support | [Shipped add-ons](reference/shipped-add-ons.md#search) |
-| Any model but this one | Not tried; the candidates are listed | [model-bench](../scripts/model-bench/README.md#models-to-try-next) |
+| Any model but this one | Four more can be served by name, and the bench runs them in turn unattended; none has been through the list | [model-bench](../scripts/model-bench/README.md#the-models) |
 
 ## In short
 
