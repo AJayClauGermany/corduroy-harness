@@ -886,6 +886,14 @@ def main() -> int:
         for model in models:
             local_model("setup", model)
         first = args.port or 8080
+        if not MACOS:
+            # On a processor alone, servers that each take every core starve one another
+            # (a twentieth of the speed, measured): share the cores out. A Mac's GPU does
+            # the work there, and is shared by itself.
+            share = max(1, (os.cpu_count() or 4) // min(args.jobs, len(models)))
+            os.environ["CORDUROY_LOCAL_MODEL_ARGS"] = (
+                os.environ.get("CORDUROY_LOCAL_MODEL_ARGS", "") + f" --threads {share}"
+            ).strip()
         passed = [arg for arg in sys.argv[1:]]
         waiting = list(enumerate(models))
         running: list[subprocess.Popen] = []
