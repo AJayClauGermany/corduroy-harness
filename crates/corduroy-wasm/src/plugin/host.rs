@@ -165,7 +165,16 @@ impl HostState {
                 "`{key}` is protected by the host and out of reach of every plugin"
             )));
         }
-        self.check(capability, &key)?;
+        // A refusal says where paths start from, as a person refusing would: the usual
+        // cause is an absolute path a model made up, and the plain message gives it
+        // nowhere to go but another tool. It says nothing of what the grant covers.
+        self.check(capability, &key).map_err(|error| match error {
+            HostError::Denied(why) => HostError::Denied(format!(
+                "{why}: paths are relative to `{}`, and a relative path is the usual case",
+                paths::scope_key(&self.root)
+            )),
+            failed @ HostError::Failed(_) => failed,
+        })?;
         Ok(resolved)
     }
 }

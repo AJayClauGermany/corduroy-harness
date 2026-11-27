@@ -79,6 +79,16 @@ fn outputs(harness: &Harness) -> Vec<String> {
         .collect()
 }
 
+/// What a tool says when `fs-read` refuses `path` to an add-on working in `work`: where
+/// paths start from, and nothing of what the grant covers.
+fn refused_read(work: &Path, path: &str) -> String {
+    format!(
+        "permission denied: capability `fs-read` does not cover `{path}`: paths are relative \
+         to `{}`, and a relative path is the usual case",
+        work.display()
+    )
+}
+
 #[tokio::test]
 async fn a_task_runs_across_both_plugins_within_their_grants() {
     let work = scratch("task");
@@ -115,13 +125,14 @@ async fn a_task_runs_across_both_plugins_within_their_grants() {
             answer: "three lines".into()
         }
     );
+    let refused = refused_read(&work, "/etc/hostname");
     assert_eq!(
         outputs(&agent.harness),
         [
             "Wrote 14 bytes to notes.txt",
             "",
             "3\n",
-            "permission denied: capability `fs-read` does not cover `/etc/hostname`",
+            &refused,
             "Created skill `count-lines`.",
         ]
     );
