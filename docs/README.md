@@ -98,3 +98,6 @@ Working on corduroy itself:
   belongs on.
 - [Trials](trials.md): the open questions that can be tried both ways today, with the
   commands for each way and a line for what you found.
+- [What a small local model does in the harness](local-model-findings.md): the command
+  driven from outside through 75 tasks against the local model, several times each: what
+  works, what fails and how often, and what the log does not record.
