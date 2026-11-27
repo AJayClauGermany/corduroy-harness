@@ -37,7 +37,7 @@ Source: the table in [`src/session.rs`](../../src/session.rs).
 | `message` | user, agent or environment | the message: `{"role", "parts"}` |
 | `tool/call` | agent | `{"id", "tool", "input"}`, caused by its `message` |
 | `gate/decision` | host | `{"point", "id", "tool", "verdict", "reason", "gate", "caller"}`, caused by its `tool/call` |
-| `gate/answer` | user | `{"id", "tool", "allow", "reason"}`: a person's answer to a gate that asked |
+| `gate/answer` | user | `{"id", "tool", "allow", "reason"}`: a person's answer to a gate that asked; with `"via"`, the plugin it was given through (the page), where it was not typed at the terminal |
 | `tool/start` | host | `{"id", "tool"}`: the tool is about to run |
 | `tool/result` | environment | `{"id", "tool", "ok", "output"}`, plus `"content"` when the result is not one block of text |
 | `tool/wait` | host | `{"id", "tool", "signal"}`: the call's result comes with that signal |

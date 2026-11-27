@@ -186,9 +186,11 @@ answer is the call's result. Grants: `service` on `sessions`.
 
 ## viewer
 
-The log as a page in a browser: `<dir>/index.html`. An add-on cannot listen on a port, so
-nothing is served: the page is files, opened as files, and it follows a run as it goes by
-loading them again every two seconds.
+The log as a page in a browser, as files: `<dir>/index.html`. An add-on cannot listen on a
+port, so nothing is served: the page is files, opened as files, and it follows a run as it
+goes by loading them again every two seconds. The [`page` extension](agent-file.md#extensionsname)
+serves the same page while `corduroy` runs, where a gate's question can be answered; this
+one is there when it does not.
 
 | View | Shows |
 | --- | --- |
@@ -198,8 +200,8 @@ loading them again every two seconds.
 | Every event | the log as `corduroy log` prints it, filtered as you type |
 
 It only shows. While a gate's question waits, a bar over every view says which session
-waits, about what, and where to answer. A gate's question is answered, and a prompt typed, in the terminal: a page
-that can be talked through is a front end, which listens on a socket and so is an extension
+waits, about what, and where to answer: in the terminal, or on the page the `page`
+extension serves. A page that takes an answer listens on a socket, and so is an extension
 ([How people meet it](../design.md#how-people-meet-it)).
 
 - **It holds a copy of the log**, a payload over 256 KB cut short. Whatever can read `dir`
@@ -212,7 +214,7 @@ that can be talked through is a front end, which listens on a socket and so is a
   and its content policy lets it load only the files beside it and reach nothing else. The
   page's own files are written again at every start.
 
-It says once, during the first run in a workspace, where the page is. Config: `dir` (`viewer`, in the
+Config: `dir` (`viewer`, in the
 workspace; the default agent uses `{data}/viewer`). Grants: `log-read` on everything it
 should show (`"*"`, or narrower to keep sessions or topics off the page), `fs-read` and
 `fs-write` on `dir`, `log`.

@@ -42,6 +42,10 @@ gate asking you first. If you switch `approval` to `auto`, `bash` is unconfined.
   whatever a grant says. An add-on cannot rewrite the record or its own grants. A copy an
   add-on was granted to make is not the log: the [`viewer`](../reference/shipped-add-ons.md#viewer)
   page is ordinary files, as readable and writable as their directory's grants say.
+- **A gate's question is the person's to answer.** No capability and no service an add-on
+  can reach answers one. The `page` extension, which takes an answer from a browser, lets
+  in only who holds an address with a token in it, new at every start, shown at the
+  terminal and never written to the log, where the agent's tools could read it.
 - **Processes start only through kernels.** No capability starts a process another way, so a
   sandboxed kernel also sandboxes MCP servers started through it.
 - **No amplification.** An add-on that loads another grants it at most what it holds itself,

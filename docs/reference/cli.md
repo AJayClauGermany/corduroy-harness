@@ -190,7 +190,9 @@ one.
 | text | what the model said |
 | `▸ tool {input}` | the model called a tool |
 | `  ✓ output` / `  ✗ output` | the tool returned / failed (the model sees the full text) |
-| `? tool {input}` then `allow? [y/N, or a reason to refuse]` | a gate asks you. `y` runs the call; Enter or `n` refuses it; any other text refuses it and is the reason the model is given; Ctrl-D leaves the run waiting |
+| `the agent's page is at http://127.0.0.1:<port>/<token>/ …` | before a run, where the agent file has a [`page`](agent-file.md#extensionsname) extension: the address to open in a browser. It is a new one each time, it lets in whoever has it, and it is never written to the log |
+| `? tool {input}` then `allow? [y/N, or a reason to refuse]` | a gate asks you. `y` runs the call; Enter or `n` refuses it; any other text refuses it and is the reason the model is given; Ctrl-D leaves the run waiting. With a page, the question is on it too, and the first answer given, here or there, is the answer |
+| `  ✓ allowed on <page>` / `  ✗ refused on <page>: reason` | the question was answered on the page; what you were typing here goes to the next one |
 | `  ✗ denied by <gate>: reason` | a gate refused the call |
 | `  ! <plugin> was refused <capability> on <resource>` | an add-on asked for something its grant does not reach |
 | `  [plugin:<name>] message` | an add-on wrote to its log |
@@ -238,7 +240,7 @@ several. The agent is not put together for this.
 | `<workspace>/.corduroy/log.jsonl` | the event log (the agent file's `log` moves it) |
 | `<workspace>/.corduroy/cache/` | compiled add-ons, so a second start is fast |
 | `<workspace>/.corduroy/skills/`, `memory/` | what the default agent's `skills` and `memory` add-ons keep |
-| `<workspace>/.corduroy/viewer/` | the [`viewer`](shipped-add-ons.md#viewer) add-on's page of the log: open `index.html` in a browser. A copy of the log, which add-ons granted the workspace can read |
+| `<workspace>/.corduroy/viewer/` | the [`viewer`](shipped-add-ons.md#viewer) add-on's page of the log, as files, for when `corduroy` is not running: open `index.html` in a browser. A copy of the log, which add-ons granted the workspace can read |
 | `~/.config/corduroy/` (`$XDG_CONFIG_HOME/corduroy`; on Windows `%APPDATA%\corduroy`) | what is yours whatever you work on: `chatgpt/<secret>.json`, a ChatGPT sign-in (readable by you alone) where its entry says `keep = "file"`, and `host-id`, a random name for this computer that the sign-in sends |
 | your keychain, service `corduroy` | the values of `kind = "keychain"` secrets, each under its secret's name, and the ChatGPT sign-ins kept there, as `chatgpt-sign-in.<secret>`: in the macOS Keychain (Keychain Access shows them), the Windows Credential Manager (as `<name>.corduroy`) or the Secret Service on Linux (`secret-tool search service corduroy`) |
 

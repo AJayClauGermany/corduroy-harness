@@ -171,6 +171,7 @@ know.
 | `mcp` | as `[mcp.*]` | one MCP server's tools |
 | `env-secret` | `env` | one secret |
 | `http-client` | none | the client the `http` capability sends through; every agent gets it already |
+| `page` | `port` (any free one by default) | the agent's [page in a browser](../how-to/watch-a-run-in-a-browser.md), served on `127.0.0.1` while `corduroy` runs the agent: what it does as it does it, and a gate's question answered there. The command says its address when it starts |
 
 A command of your own can add kinds; see [Add an extension kind](../how-to/add-an-extension-kind.md).
 
