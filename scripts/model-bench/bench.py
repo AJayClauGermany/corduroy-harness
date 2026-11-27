@@ -201,6 +201,10 @@ class Trial:
         self.commands: list[dict] = []
         self._own(self.dir)
         self._own(self.ws)
+        if config.user:
+            # Models served side by side each have a user of their own (`--jobs`): a trial
+            # is its agent's alone, so that none finds a neighbour's work while it is made.
+            os.chmod(self.dir, 0o700)
 
     # -- setting up ---------------------------------------------------------------------
 
@@ -714,6 +718,12 @@ def run_model(args, chosen: list[dict], tasks, model: str | None) -> Path:
         sys.stderr.write("no wall: the agent runs as you and could read the checks\n")
     if args.fresh and results.exists():
         results.unlink()
+    if config.user:
+        # A trial that was running when the bench was stopped was never closed: close what
+        # is left of it now, before any agent runs.
+        for left in (config.out / "trials").glob("*/*"):
+            os.chown(left, 0, 0)
+            os.chmod(left, 0o700)
     done = {(record["task"], record["trial"]) for record in read_results(results)}
 
     # Trial by trial, so that a run cut short has tried everything once. Climbing goes tier
@@ -904,7 +914,8 @@ def main() -> int:
                 running.append(
                     subprocess.Popen(
                         [sys.executable, "-u", __file__, *passed, "--models", model,
-                         "--port", str(first + index), "--jobs", "1", "--quiet"]
+                         "--port", str(first + index), "--jobs", "1", "--quiet",
+                         "--user", f"{args.user}-{index + 1}"]
                     )
                 )
             time.sleep(1)

@@ -179,6 +179,10 @@ It is not one of `--models`: its runtime is fetched by its own package, not pinn
   macOS the agent runs under `sandbox-exec` with the same places denied, and finished trials
   are moved under `<out>/private/trials`. Where there is neither (Linux without root) there
   is no wall, and every record says `"isolated": false`.
+- **Agents cannot read each other.** With `--jobs`, each model's agent is a user of its own
+  (`corduroy-bench-1`, `-2`, ...) and a trial's directory is its agent's alone, so one model
+  cannot find another's workspace while it is being worked in. A trial left open by a bench
+  that was stopped is closed when the bench next starts.
 - **Values are made per trial** (a code in a file, a port, a CSV), so nothing can be known
   beforehand, and a pass cannot be a memory of the last run.
 - **Work is judged by tests the agent never saw**, run on a copy of its workspace, as its own
@@ -225,3 +229,28 @@ Where a machine does not last as long as the bench (a cloud sandbox is reclaimed
 two hours), `piece.sh MINUTES [options]` runs it for that long and keeps the results in
 [`results/`](results/README.md), from where the next piece goes on. What has been kept so
 far, and what it shows, is on that page.
+
+## On GitHub's runners
+
+[`.github/workflows/model-bench.yml`](../../.github/workflows/model-bench.yml) runs a piece
+on a hosted runner: Actions, *Model bench*, *Run workflow*, with the models, tiers, trials
+and minutes to spend. Each model is a job of its own, alone on its runner, so its times are
+not those of two models sharing a sandbox's cores.
+
+It is written to stay a small guest of a free service, and the limits are its own, set
+under GitHub's (which change: see GitHub's documentation on Actions limits before raising
+any of them):
+
+| What | Here | Why |
+| --- | --- | --- |
+| When it runs | only when a person starts it | hours of a runner are never spent by a push |
+| Runs at once | one; within it, two models at a time | a run of all seven does not take seven runners |
+| A job's clock | `minutes` (at most 300) of bench, 345 in all | under the six hours a job is allowed, with what was found kept when the clock ends it |
+| Downloads | the server's build and each model are cached | Hugging Face and PyPI are asked once a model; the caches (about 8 GB for all seven) fit the repository's allowance, and the least used are dropped first |
+| What is kept | one artifact a model, 30 days | results are a few hundred kilobytes |
+| Default | one model, tier 1, one trial | the smallest run that says something |
+
+The workflow commits nothing. To keep a job's results, take `<model>.jsonl` from its
+artifact into `results/` and commit it; the next piece, on a runner or anywhere else, goes
+on from there. It has not been run yet: a workflow can only be started by hand once it is on
+the default branch, so its first run is its test.
