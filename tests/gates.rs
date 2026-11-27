@@ -1,8 +1,10 @@
 //! Gates deciding whether the model's tool calls run, and runs that wait for a person.
 //! No WebAssembly, network or LLM.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, mpsc};
+use std::thread;
+use std::time::Duration;
 
 use corduroy_harness::core::{
     EventStream, GATES, Gate, Gates, Pattern, Plugin, SessionId, TOOL_CALL, TOOLS, ToolSpec, Tools,
@@ -339,6 +341,78 @@ async fn a_stop_asked_from_outside_ends_a_run_that_waits() {
     // The session takes a new prompt.
     let next = harness.run("and now?").await.unwrap();
     assert!(matches!(next.status, Status::Finished { .. }));
+}
+
+/// Run `work` to its end on a runtime of this thread's own.
+fn block<T>(work: impl Future<Output = T>) -> std::io::Result<T> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    Ok(runtime.block_on(work))
+}
+
+/// A host that hears `topic` and takes the main session's run on from another thread, at
+/// once, while whatever recorded the event is held up inside the listener: the worst a
+/// host can time it. Returns where the status it ends with arrives.
+fn hasty_host(harness: &Arc<Harness>, topic: &str) -> mpsc::Receiver<Status> {
+    let (done, status) = mpsc::channel();
+    let (host, woken) = (Arc::clone(harness), AtomicUsize::new(0));
+    harness.events().subscribe(topic, move |_| {
+        if woken.fetch_add(1, Ordering::SeqCst) > 0 {
+            return;
+        }
+        let (host, done) = (Arc::clone(&host), done.clone());
+        thread::spawn(move || {
+            let taken = block(host.take_on(&SessionId::new(MAIN)));
+            if let Ok(Ok(outcome)) = taken {
+                drop(done.send(outcome.status));
+            }
+        });
+        // Long enough for that thread to have read the session, were it not made to wait.
+        thread::sleep(Duration::from_millis(200));
+    });
+    status
+}
+
+#[test]
+fn a_host_woken_while_a_message_is_being_recorded_still_runs_it() {
+    let runs = Arc::new(AtomicUsize::new(0));
+    let harness = Arc::new(harness(EventStream::new(), [say("hello")], &runs).unwrap());
+    let outside = harness.app().service::<Outside>(OUTSIDE).unwrap();
+    harness.takes_messages(true);
+    let taken = hasty_host(&harness, "message");
+
+    outside
+        .say("page", &SessionId::new(MAIN), "say hello")
+        .unwrap();
+
+    // It waited for the message to be recorded whole, and so found a run to take on.
+    let status = taken.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(
+        status,
+        Status::Finished {
+            answer: "hello".into()
+        }
+    );
+}
+
+#[test]
+fn a_host_woken_while_a_stop_is_being_recorded_does_not_run_what_was_stopped() {
+    let runs = Arc::new(AtomicUsize::new(0));
+    let replies = [call("c1", "poke", &json!({})), say("never asked for")];
+    let harness = Arc::new(harness(EventStream::new(), replies, &runs).unwrap());
+    let outside = harness.app().service::<Outside>(OUTSIDE).unwrap();
+    block(harness.run("poke it")).unwrap().unwrap();
+    let taken = hasty_host(&harness, "turn/end");
+
+    assert!(outside.stop("page", &SessionId::new(MAIN)).unwrap());
+
+    // It waited for the run to be ended whole, and so found nothing to drive: the model
+    // was asked the once, before the stop.
+    let status = taken.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(status, Status::Stopped);
+    assert_eq!(payloads(&harness, "model/request").len(), 1);
+    assert_eq!(runs.load(Ordering::SeqCst), 0);
 }
 
 #[test]

@@ -195,7 +195,9 @@ as design guidance, not noise.
   a message, a stop) goes through `Outside`, which records and returns; the host then
   takes the run on (`Harness::take_on`). A host that will do that for messages says so
   (`Harness::takes_messages`), and `Outside::say` refuses until one has. Never run a loop, or call `Harness::answer`, from a front end's
-  own thread. `Outside` and `Fronts` are provided to native plugins by name and are not in
+  own thread. An event is heard before the call that records it has returned, so a host
+  takes a run on from whatever its listener woke, never inside the listener; `take_on`
+  waits for the recording to be whole. `Outside` and `Fronts` are provided to native plugins by name and are not in
   the `Services` registry: do not put there anything that answers a gate's question, which
   is the person's to answer.
 - **What lets a person in is never recorded.** A front end's address, token or anything

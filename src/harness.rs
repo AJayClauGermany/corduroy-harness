@@ -832,10 +832,17 @@ impl Harness {
     /// loop goes on as after [`answer`](Self::answer), and with it each session up the
     /// chain that waited. Nothing is counted as a restart.
     ///
+    /// A host learns that something was recorded from an event, which it hears while the
+    /// recording is still under way. This waits for the recording to be whole, so call it
+    /// from whatever the listener woke and never from the listener itself, where it would
+    /// wait for the very call that is telling it.
+    ///
     /// # Errors
     ///
     /// As [`run_in`](Self::run_in).
     pub async fn take_on(&self, session: &SessionId) -> Result<Outcome, HarnessError> {
+        // What woke the caller may still be midway through being recorded.
+        self.outside.recorded();
         let journal = self.journal(session)?;
         if !journal.waiting().is_empty() || !journal.unfinished() {
             return Ok(self.outcome_of(&journal));

@@ -12,6 +12,12 @@
 //! one when it is about to drive runs, not when the agent is merely put together to be
 //! looked at.
 //!
+//! What is recorded is heard at once by whoever listens to the stream, the host among them,
+//! while the call that records it has not yet returned. So neither side acts from inside a
+//! listener: the host does not take a run on there (it would wait for the recording it is
+//! being told of), and an extension does not record there. A listener wakes something, and
+//! that acts.
+//!
 //! Both are for extensions only. They are provided to native plugins by name ([`OUTSIDE`],
 //! [`FRONTS`]) and are not in the [`Services`](corduroy_core::Services) registry, so no
 //! add-on reaches them: a gate's question is the person's to answer, and an add-on that
@@ -110,6 +116,10 @@ pub struct Outside {
     pub(crate) runs: Runs,
     /// Whether the host takes on a message recorded here.
     heard: AtomicBool,
+    /// Held while something is being recorded here. An event is stored, and heard by
+    /// whoever listens, before the session's own account of itself has caught up with it;
+    /// a host woken by the event waits on this, and so finds the whole of it recorded.
+    recording: Lock<()>,
 }
 
 impl core::fmt::Debug for Outside {
@@ -124,7 +134,14 @@ impl Outside {
             runs: Runs::new(Arc::clone(&sessions)),
             sessions,
             heard: AtomicBool::new(false),
+            recording: Lock::new(()),
         }
+    }
+
+    /// Wait until nothing is midway through being recorded here. The host calls this
+    /// before it reads a session to take its run on.
+    pub(crate) fn recorded(&self) {
+        self.recording.with(|()| ());
     }
 
     /// Note whether the host takes on a message recorded through [`say`](Self::say).
@@ -171,7 +188,10 @@ impl Outside {
         answer: &Answer,
     ) -> Result<(), HarnessError> {
         let journal = self.sessions.journal(session)?;
-        if journal.answer(call, answer, Some(via))? {
+        let answered = self
+            .recording
+            .with(|()| journal.answer(call, answer, Some(via)))?;
+        if answered {
             Ok(())
         } else {
             Err(HarnessError::NotAsked {
@@ -207,6 +227,13 @@ impl Outside {
             return Err(HarnessError::Run("there is nothing to say".into()));
         }
         let journal = self.sessions.journal(session)?;
+        self.recording.with(|()| self.begin(&journal, text, via))
+    }
+
+    /// Record `text` as said to the session of `journal` through `via`, if it is doing
+    /// nothing.
+    fn begin(&self, journal: &Journal, text: &str, via: &str) -> Result<(), HarnessError> {
+        let session = journal.id();
         if !journal.waiting().is_empty() || !journal.awaiting().is_empty() {
             return Err(HarnessError::Waiting(session.clone()));
         }
@@ -231,7 +258,7 @@ impl Outside {
     /// Returns [`HarnessError::UnknownSession`] if there is no such session, or
     /// [`HarnessError::Log`] if the stop could not be recorded.
     pub fn stop(&self, via: &str, session: &SessionId) -> Result<bool, HarnessError> {
-        self.runs.stop(session, Some(via))
+        self.recording.with(|()| self.runs.stop(session, Some(via)))
     }
 }
 
