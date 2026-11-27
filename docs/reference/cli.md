@@ -21,6 +21,7 @@ corduroy [options] secrets remove [name]
                                    take it out again
 corduroy [options] login [name]    sign in for a secret that needs it (a ChatGPT plan)
 corduroy [options] logout [name]   sign out again
+corduroy codes [N]                 what each exit code of this command means, or what N does
 corduroy --version                 print the version (and commit) of this build
 ```
 
@@ -211,6 +212,8 @@ one.
 | `  [<session>] …` | a line from a sub-agent's session |
 | `no corduroy.toml here: this is the default agent, …` | before a run, when there is no agent file: the model is one Ollama serves on this machine, no key is read, and `corduroy init` writes an agent for another |
 | `Using ChatGPT plan. Manage usage: <address>` | before a run, when the model's provider is paid by a [ChatGPT sign-in](agent-file.md#secretsname): whose account the run is on, and where to see and limit what it uses |
+| `stopped: the turn limit was reached` | the run reached `max_turns`; likewise `the time limit` (`max_seconds`) and `the model had written all it may in one run` (`max_output_tokens`) |
+| `  ! the answer was cut off at the most the model may write: …` then `cut off: …` | the model's answer stopped at its `max_tokens`, so the run did not finish: say "go on", or raise the limit |
 | `the run failed: …` | the run ended as failed, with why. Where the service's own answer came quoted as JSON, its message and its code are shown in its place; the log has the reason whole |
 | a line after `the run failed: …` | when such a run fails for a reason that is the plan's (its usage limit, a sign-in no longer accepted, something a plan does not pay for): what you can do about it. Where OpenAI's reason carries no code, the line is a guess and says "if" |
 
@@ -220,11 +223,32 @@ unfinished until `continue` or `stop`.
 
 ## Exit codes
 
-| Code | When |
-| --- | --- |
-| 0 | the run finished, or the command did what it was asked |
-| 1 | the run failed, reached the turn limit, or is waiting; `check` found a plugin that did not start; any error |
-| 130 | the run was stopped (as after Ctrl-C) |
+What `run` and `continue` exit with says how the run ended, so that a program which started
+the command (a script, or another agent through its shell tool) can tell the endings apart
+without reading the log. Each ending has a number of its own, and a number keeps its
+meaning: a new ending takes a new number.
+
+| Code | Ending | When |
+| --- | --- | --- |
+| 0 | `finished` | the run ended with the model's answer, or with nothing left to do; or the command did what it was asked |
+| 1 | `failed` | the run failed (the model could not be asked or gave no answer, or the run was picked up too often); `check` found a plugin that did not start; any error of the command itself, said on standard error after `corduroy: ` |
+| 3 | `turn-limit` | the model was still working at [`max_turns`](agent-file.md#top-level-keys) |
+| 4 | `time-limit` | the model was still working at `max_seconds` |
+| 5 | `output-limit` | the model was still working when it had written `max_output_tokens` |
+| 6 | `cut-off` | the model answered, and the answer stopped at the most it may write in one answer (`max_tokens`), so it is not whole |
+| 7 | `waiting` | the run is not over: it waits, in the log, for an answer to a gate's question or for a signal. `continue` takes it on; `stop` ends it |
+| 130 | `stopped` | the run was stopped, by Ctrl-C or `stop` (as a program interrupted from the keyboard exits) |
+
+The names are the `status` of the run's [`turn/end`](events.md) event, except `waiting`: a
+run that waits has no `turn/end` yet. Code 2 is left free, since shells and many commands
+give it to a mistake in how they were called; so are 126 to 165, which are the shell's and
+signals'. After 3, 4 and 5 what the run did is done and recorded, and another `run` goes on
+in the same conversation.
+
+**`codes [N]`** Print that table as the command itself has it, one line a code (number,
+ending, meaning), or the one line for code `N`. It reads no agent file. It is there for
+whatever drives the command: an agent that ran `corduroy` through a shell and got 6 back
+can ask `corduroy codes 6` what that was and what to do next.
 
 **`login [name]`** Sign in for a secret of the agent file whose kind is signed in to: a
 [`kind = "chatgpt"`](agent-file.md#secretsname) secret, which is a ChatGPT plan. A key is

@@ -487,7 +487,11 @@ fn a_run_waits_across_processes_for_its_answer() {
     .unwrap();
 
     let first = corduroy(&workspace, &["run", "write", "later"], "").unwrap();
-    assert!(!first.status.success());
+    assert_eq!(
+        first.status.code(),
+        Some(7),
+        "waiting has a code of its own"
+    );
     assert!(text(&first.stdout).contains("corduroy continue"));
     assert!(!target.exists());
 
@@ -897,4 +901,93 @@ fn without_an_agent_file_no_key_is_read_and_the_agent_says_what_it_is() {
             .stdout,
     );
     assert!(!log.contains("sk-ant-unused") && !said.contains("sk-ant-unused"));
+}
+
+/// The log's `turn/end` payloads, in order.
+fn ends(workspace: &Path) -> Vec<String> {
+    let log = fs::read_to_string(workspace.join(".corduroy/log.jsonl")).unwrap_or_default();
+    log.lines()
+        .filter_map(|line| serde_json::from_str::<Vec<Value>>(line).ok())
+        .flatten()
+        .filter(|event| event.get("topic").and_then(Value::as_str) == Some("turn/end"))
+        .filter_map(|event| event.get("payload")?.as_str().map(str::to_owned))
+        .collect()
+}
+
+/// Each way a run ends short of an answer has an exit code of its own, which `corduroy
+/// codes` explains, so a program that started the command can tell them apart.
+#[test]
+fn a_run_cut_short_exits_with_the_code_of_what_cut_it() {
+    let plugins = plugin("pi-tools").parent().unwrap().to_owned();
+    let reads = || tool_call("tree", &json!({}));
+    let cut = completion(
+        &json!({"role": "assistant", "content": "Half of"}),
+        "length",
+    );
+    let cases = [
+        (
+            "turns",
+            "max_turns = 1\n",
+            vec![reads(), reads()],
+            3,
+            "turn-limit",
+        ),
+        (
+            "time",
+            "max_seconds = 0\n",
+            vec![answer("never asked")],
+            4,
+            "time-limit",
+        ),
+        // Each reply of the fake model is five tokens written.
+        (
+            "output",
+            "max_output_tokens = 5\n",
+            vec![reads(), reads()],
+            5,
+            "output-limit",
+        ),
+        ("cut", "", vec![cut], 6, "cut-off"),
+    ];
+    for (name, limit, replies, code, status) in cases {
+        let workspace = scratch(&format!("cli-code-{name}"));
+        let (address, seen) = model(replies).unwrap();
+        let file = format!("{limit}{}", agent_file(address, &plugins).trim_start());
+        fs::write(workspace.join("corduroy.toml"), file).unwrap();
+
+        let ran = corduroy(&workspace, &["run", "look", "around"], "").unwrap();
+
+        let stdout = text(&ran.stdout);
+        assert_eq!(ran.status.code(), Some(code), "{name}: {stdout}");
+        assert_eq!(ends(&workspace), [format!(r#"{{"status":"{status}"}}"#)]);
+        // Out of time before the first request, the model is never asked.
+        let asked = seen.lock().unwrap().len();
+        assert_eq!(asked, usize::from(name != "time"), "{name}");
+
+        let explained = corduroy(&workspace, &["codes", &code.to_string()], "").unwrap();
+        let line = text(&explained.stdout);
+        assert!(explained.status.success());
+        assert!(line.starts_with(&format!("{code:<3} {status}")), "{line}");
+    }
+}
+
+#[test]
+fn codes_lists_every_exit_code_without_an_agent() {
+    let workspace = scratch("cli-codes");
+    // A broken agent file is not read: the table is the command's, not an agent's.
+    fs::write(workspace.join("corduroy.toml"), "not toml [").unwrap();
+
+    let all = corduroy(&workspace, &["codes"], "").unwrap();
+
+    let stdout = text(&all.stdout);
+    assert!(all.status.success(), "{}", text(&all.stderr));
+    let numbers: Vec<&str> = stdout
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .collect();
+    assert_eq!(numbers, ["0", "1", "3", "4", "5", "6", "7", "130"]);
+
+    let unknown = corduroy(&workspace, &["codes", "2"], "").unwrap();
+    assert_eq!(unknown.status.code(), Some(1));
+    assert!(text(&unknown.stderr).contains("not a code this command exits with"));
 }

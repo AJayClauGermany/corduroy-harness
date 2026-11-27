@@ -61,6 +61,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use corduroy_harness::core::{FiberId, FiberState, ModelInfo, Scope};
 use corduroy_harness::wasm::{CAPABILITIES, WORLD, WasmRuntime};
@@ -90,6 +91,12 @@ pub struct AgentFile {
     /// Model turns a run may take without answering.
     #[serde(default)]
     pub max_turns: Option<u32>,
+    /// Seconds a run may be driven for without answering. Unlimited if not given.
+    #[serde(default)]
+    pub max_seconds: Option<u64>,
+    /// Tokens the model may write in a run without answering. Unlimited if not given.
+    #[serde(default)]
+    pub max_output_tokens: Option<u64>,
     /// The event log, `{data}/log.jsonl` by default.
     #[serde(default)]
     pub log: Option<String>,
@@ -948,6 +955,12 @@ pub fn assemble_from(
     }
     if let Some(max_turns) = file.max_turns {
         harness = harness.with_max_turns(max_turns);
+    }
+    if let Some(seconds) = file.max_seconds {
+        harness = harness.with_time_limit(Duration::from_secs(seconds));
+    }
+    if let Some(tokens) = file.max_output_tokens {
+        harness = harness.with_output_limit(tokens);
     }
     let mut failed = natives(&harness, file, places, standard)?;
     failed.extend(extend(&harness, file, places, standard)?);

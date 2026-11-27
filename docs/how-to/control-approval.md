@@ -82,7 +82,7 @@ A waiting run survives the process. Answer whenever you like:
 corduroy continue
 ```
 
-A run that waits with no terminal (`corduroy run … < /dev/null`) exits with status 1 and
+A run that waits with no terminal (`corduroy run … < /dev/null`) exits with status 7 and
 `waiting for 1 answer(s)`. To abandon it instead:
 
 ```bash

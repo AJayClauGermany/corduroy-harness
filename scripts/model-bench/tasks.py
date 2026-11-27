@@ -402,7 +402,7 @@ def gate_no_with_reason(t):
     )
 
 
-@task(2, "nobody at the terminal: the run waits (exit 1), `continue` asks again and finishes")
+@task(2, "nobody at the terminal: the run waits (exit 7), `continue` asks again and finishes")
 def gate_unattended(t):
     t.configure(*SMART)
     code = t.token()
@@ -410,7 +410,7 @@ def gate_unattended(t):
     if not asked(t):
         t.expect(False, f"no gate asked (exit {ran.code}): the model made no call that changes anything")
         return
-    t.expect(ran.code == 1, f"the waiting run exited {ran.code}, expected 1")
+    t.expect(ran.code == 7, f"the waiting run exited {ran.code}, expected 7")
     t.expect(t.read("later.txt") is None, "the file was written before anyone answered")
     t.expect(t.last_status() is None, f"a waiting run has a turn/end: {t.last_status()}")
     again = t.corduroy("continue", stdin="y\ny\ny\ny\n")
@@ -462,7 +462,7 @@ def gate_inspect(t):
         return
     t.expect(asked(t, "inspect"), f"inspect did not ask: {[e['payload'] for e in t.events(topic='gate/decision')]}")
     t.expect(not started, "the force push started without an answer")
-    t.expect(ran.code == 1, f"the waiting run exited {ran.code}, expected 1")
+    t.expect(ran.code == 7, f"the waiting run exited {ran.code}, expected 7")
     stop = t.corduroy("stop")
     t.expect(stop.code == 0, f"stop exited {stop.code}")
     t.expect(t.last_status() == "stopped", f"after stop the run's status is {t.last_status()}")
@@ -547,15 +547,15 @@ def three_files(t):
         t.expect((t.read(name) or "").strip() == value, f"{name} holds {t.read(name)!r}")
 
 
-@task(3, "the turn limit ends a run as `turn-limit`, exit 1")
+@task(3, "the turn limit ends a run as `turn-limit`, exit 3")
 def turn_limit(t):
-    t.configure("max_turns = 20", "max_turns = 2")
+    t.configure("max_turns = 50", "max_turns = 2")
     ran = t.run(THREE_FILES)
     if t.last_status() == "finished":
         t.note("the model finished inside two turns, so the limit was not reached")
         return
     t.expect(t.last_status() == "turn-limit", f"the run's status is {t.last_status()}")
-    t.expect(ran.code == 1, f"exited {ran.code}, expected 1")
+    t.expect(ran.code == 3, f"exited {ran.code}, expected 3")
 
 
 @task(3, "killed mid-run (SIGKILL), then `continue` finishes the work")
@@ -1631,7 +1631,7 @@ def request_timeout(t):
     t.expect(t.last_status() == "failed", f"the run's status is {t.last_status()}")
 
 
-@task(0, "`max_tokens` cuts an answer short, and the log says that is why it stopped")
+@task(0, "`max_tokens` cuts an answer short: `cut-off`, exit 6, and the log says why it stopped")
 def output_limit(t):
     t.configure("timeout_seconds = 300", "timeout_seconds = 300\nmax_tokens = 120")
     ran = t.run(ESSAY, timeout=400)
@@ -1639,3 +1639,5 @@ def output_limit(t):
     t.note(f"exit {ran.code}, status {t.last_status()}, usage {usage[-1:]}")
     t.expect(usage and usage[-1].get("output_tokens", 0) <= 130, f"the answer took {usage[-1].get('output_tokens') if usage else None} tokens")
     t.expect(usage and usage[-1].get("stop") == "limit", f"the stop recorded is {usage[-1].get('stop') if usage else None}")
+    t.expect(t.last_status() == "cut-off", f"the run's status is {t.last_status()}")
+    t.expect(ran.code == 6, f"exited {ran.code}, expected 6")

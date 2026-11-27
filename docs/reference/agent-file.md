@@ -29,7 +29,13 @@ Every string in the file (paths, grants, configuration) may use:
 | `provider` | string | required | The provider the loop asks: the name of a `[providers.<name>]` entry. `--provider` overrides it. |
 | `model` | string | required | The model to ask that provider for. `--model` overrides it. |
 | `system` | string | none | The start of every system prompt. Plugins' prompt parts follow it. |
-| `max_turns` | integer | 25 (the default agent sets 50) | Model turns a run may take before it ends as `turn limit reached`. |
+| `max_turns` | integer | 25 (the default agent sets 50) | Model turns a run may take before it ends as `turn-limit`. |
+| `max_seconds` | integer | none: no limit | How long a run may go on before it ends as `time-limit`. Looked at before each request to the model, and a request still being answered when the time is up is dropped; a tool call under way is not cut short. Counted from when the command takes the run on, the sub-agents it runs included: time spent waiting for your answer is not counted, and `continue` gives a run its whole time again. |
+| `max_output_tokens` | integer | none: no limit | How many tokens the model may write in a run, thinking included, before it ends as `output-limit`. Looked at before each request, so the request that passes it is answered whole and its tools are called. Counted from your last prompt, as the provider reports them, so `continue` goes on from what the run had written. Not the same as a provider's [`max_tokens`](#providersname), which is the most *one answer* may take. |
+
+A run that reaches one of the three is not a failed run: what it did is done and recorded,
+and the next prompt goes on in the same conversation. The command says which it was, and
+[exits with a code of its own](cli.md#exit-codes) for each.
 | `log` | string | `{data}/log.jsonl` | The event log. A relative path is in the workspace. |
 
 ## `[providers.<name>]`

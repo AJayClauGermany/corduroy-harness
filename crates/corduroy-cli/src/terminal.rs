@@ -535,7 +535,15 @@ pub fn ending(status: &Status) -> Option<String> {
     match status {
         Status::Finished { .. } | Status::Yielded => None,
         Status::Stopped => Some("stopped".to_owned()),
+        Status::CutOff { .. } => Some(
+            "cut off: the answer stopped at the most the model may write, and is not whole"
+                .to_owned(),
+        ),
         Status::TurnLimitReached => Some("stopped: the turn limit was reached".to_owned()),
+        Status::TimeLimitReached => Some("stopped: the time limit was reached".to_owned()),
+        Status::OutputLimitReached => {
+            Some("stopped: the model had written all it may in one run".to_owned())
+        }
         Status::Failed { reason } => Some(format!("the run failed: {}", plain(reason))),
         Status::Waiting { asks, waits } if asks.is_empty() => {
             let signals: Vec<&str> = waits.iter().map(|wait| wait.signal.as_str()).collect();

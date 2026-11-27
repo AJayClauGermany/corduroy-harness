@@ -21,6 +21,7 @@
 //!                                    take it out again
 //! corduroy [options] login [name]    sign in for a secret of the agent that needs it (a ChatGPT plan)
 //! corduroy [options] logout [name]   sign out again: revoke and forget what was kept
+//! corduroy codes [N]                 what each exit code of this command means, or what N does
 //!
 //! options: --agent <file>  --workspace <dir>  --session <name>  --model <name>  --provider <name>
 //! ```
@@ -31,6 +32,7 @@
 //! keychain. [`run_on`] is the same with the arguments, what is typed and where it writes
 //! handed over, which is how the tests drive it.
 
+pub mod codes;
 mod doctor;
 mod init;
 mod secrets;
@@ -56,7 +58,7 @@ const USAGE: &str = "usage: corduroy [--agent FILE] [--workspace DIR] [--session
                      sessions remove NAME | log | report [N] | doctor | \
                      init [anthropic|openai|chatgpt|ollama] [--secrets keychain|env] | \
                      secrets | secrets set [SECRET] | secrets remove [SECRET] | \
-                     login [SECRET] | logout [SECRET]]";
+                     login [SECRET] | logout [SECRET] | codes [CODE]]";
 
 /// `corduroy` and its version, with the commit it was built from when the build said
 /// (`CORDUROY_COMMIT`, set by the release workflow).
@@ -298,6 +300,8 @@ fn between_runs(
     let out = Arc::clone(&console.out);
     match command {
         ["init", words @ ..] => Some(init::init(words, workspace, standard, &out)),
+        ["codes"] => Some(codes::codes(None, &out)),
+        ["codes", code] => Some(codes::codes(Some(code), &out)),
         ["secrets"] => {
             Some(described().and_then(|described| secrets::list(&described, standard, &out)))
         }
@@ -536,14 +540,11 @@ impl Shown<'_> {
     }
 }
 
+/// Say how a run ended and give the code the command exits with for it
+/// ([`codes::CODES`]).
 fn finish(status: &Status, shown: &Shown<'_>) -> ExitCode {
     shown.end(status);
-    match status {
-        Status::Finished { .. } | Status::Yielded => ExitCode::SUCCESS,
-        // As a program interrupted by Ctrl-C does.
-        Status::Stopped => ExitCode::from(130),
-        _ => ExitCode::FAILURE,
-    }
+    codes::of(status).into()
 }
 
 /// What the agent has, a line each: the file it was read from, its model, log, registries,
