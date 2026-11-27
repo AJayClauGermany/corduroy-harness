@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -13,7 +14,7 @@ use corduroy_harness::core::{EventStream, Message, ModelInfo, ModelRequest, Patt
 use corduroy_harness::{
     Checkpoints, Harness, MAIN, Piece, ProviderErrorKind, Seen, Status, provider,
 };
-use corduroy_providers::{ProviderSpec, build};
+use corduroy_providers::{BY_CLIENT, ProviderSpec, build};
 use serde_json::{Value, json};
 
 /// The JSON body of the request on `stream`.
@@ -119,15 +120,18 @@ fn sing(stream: &mut TcpStream) -> io::Error {
 }
 
 /// An endpoint that refuses its first `refused` requests as coming too fast, to be tried
-/// again at once, and answers the rest. Its port.
-fn refusing_first(refused: usize) -> io::Result<u16> {
+/// again at once, and answers the rest. Its port, and how many requests it has had.
+fn refusing_first(refused: usize) -> io::Result<(u16, Arc<AtomicUsize>)> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
+    let asked = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&asked);
     thread::spawn(move || {
         for (count, mut stream) in listener.incoming().flatten().enumerate() {
             if body_of(&stream).is_err() {
                 continue;
             }
+            counted.fetch_add(1, Ordering::SeqCst);
             let (status, answer) = if count < refused {
                 (
                     "429 Too Many Requests\r\nretry-after: 0",
@@ -155,7 +159,7 @@ fn refusing_first(refused: usize) -> io::Result<u16> {
             );
         }
     });
-    Ok(port)
+    Ok((port, asked))
 }
 
 fn asking() -> ModelRequest {
@@ -334,9 +338,9 @@ async fn a_streamed_answer_is_told_piece_by_piece_and_returned_whole() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_request_made_again_is_recorded_with_who_retried() {
-    // oi-kit's own client tries a refused request four times before it gives the error up;
-    // the fifth request is the retry made here, and the one that is told.
-    let port = refusing_first(4).unwrap();
+    // oi-kit's own client makes a refused request again, three times at most. Each time is
+    // heard and told, as the client's.
+    let (port, asked) = refusing_first(3).unwrap();
     let built = build("local", &spec(port, false)).unwrap();
     let events = Arc::new(EventStream::new());
     let harness = Harness::open(Arc::clone(&events))
@@ -352,16 +356,23 @@ async fn a_request_made_again_is_recorded_with_who_retried() {
             answer: "hello".to_owned()
         }
     );
-    let retries = events.matching(&Pattern::new("model/retry"));
-    assert_eq!(retries.len(), 1, "{retries:?}");
-    let retry: Value = serde_json::from_str(&retries[0].payload).unwrap();
-    assert_eq!(retry["attempt"], 1);
-    assert_eq!(retry["kind"], "rate-limit");
-    assert_eq!(retry["by"], "provider");
-    assert_eq!(retry["provider"], "default");
-    assert_eq!(retry["model"], "local");
-    assert!(retry["delay_ms"].is_u64(), "{retry}");
-    assert!(retry["reason"].is_string(), "{retry}");
+    assert_eq!(asked.load(Ordering::SeqCst), 4);
+    let retries: Vec<Value> = events
+        .matching(&Pattern::new("model/retry"))
+        .iter()
+        .map(|event| serde_json::from_str(&event.payload).unwrap())
+        .collect();
+    assert_eq!(retries.len(), 3, "{retries:?}");
+    for (retry, attempt) in retries.iter().zip(1..) {
+        assert_eq!(retry["attempt"], attempt, "{retry}");
+        assert_eq!(retry["kind"], "rate-limit");
+        assert_eq!(retry["by"], BY_CLIENT);
+        assert_eq!(retry["provider"], "default");
+        assert_eq!(retry["model"], "local");
+        // The wait the endpoint asked for, read from what the client said of the refusal.
+        assert_eq!(retry["delay_ms"], 0, "{retry}");
+        assert!(retry["reason"].is_string(), "{retry}");
+    }
     // Between the request and its answer, in the session that asked.
     let stored = events.events();
     let topics: Vec<&str> = stored
@@ -369,5 +380,40 @@ async fn a_request_made_again_is_recorded_with_who_retried() {
         .map(|event| event.topic.as_str())
         .filter(|topic| topic.starts_with("model/") || *topic == "usage")
         .collect();
-    assert_eq!(topics, ["model/request", "model/retry", "usage"]);
+    assert_eq!(
+        topics,
+        [
+            "model/request",
+            "model/retry",
+            "model/retry",
+            "model/retry",
+            "usage"
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_is_made_again_by_one_layer_only() {
+    // An endpoint that never stops refusing is asked four times: once, and the three
+    // retries of the one policy. What the client gave up on is not tried again above it.
+    let (port, asked) = refusing_first(usize::MAX).unwrap();
+    let built = build("local", &spec(port, false)).unwrap();
+    let events = Arc::new(EventStream::new());
+    let harness = Harness::open(Arc::clone(&events))
+        .unwrap()
+        .with_model("local");
+    harness.plugin(provider("default", built));
+
+    let outcome = harness.run("hi").await.unwrap();
+
+    assert!(
+        matches!(outcome.status, Status::Failed { .. }),
+        "{:?}",
+        outcome.status
+    );
+    assert_eq!(asked.load(Ordering::SeqCst), 4);
+    assert_eq!(events.matching(&Pattern::new("model/retry")).len(), 3);
+    let ends = events.matching(&Pattern::new("turn/end"));
+    let end: Value = serde_json::from_str(&ends[0].payload).unwrap();
+    assert_eq!(end["kind"], "rate-limit", "{end}");
 }

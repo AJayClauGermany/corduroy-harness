@@ -62,6 +62,7 @@ ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
 async-trait = "0.1"
 # The trait of oi-kit's streamed answers, to read one piece by piece.
 futures-core = "0.3"
+tracing-core = "0.1"
 serde = { version = "1", features = ["derive"] }
 # Keys in the order they were written, so log payloads read naturally (`id` first).
 serde_json = { version = "1", default-features = false, features = ["alloc", "preserve_order"] }

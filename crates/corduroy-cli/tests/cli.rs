@@ -792,6 +792,37 @@ fn check_says_what_the_agent_has_and_a_plugin_cannot_read_the_agent_file() {
 }
 
 #[test]
+fn certificates_that_cannot_be_read_stop_a_request_and_not_the_command() {
+    let workspace = scratch("cli-certificates");
+    let plugins = plugin("pi-tools").parent().unwrap().to_owned();
+    let (address, _seen) = model(vec![answer("never asked")]).unwrap();
+    fs::write(
+        workspace.join("corduroy.toml"),
+        agent_file(address, &plugins),
+    )
+    .unwrap();
+    let missing = workspace.join("no-such-certificates.pem");
+    // Both places certificates are looked for: a test run is given a directory of them.
+    let env = [
+        ("SSL_CERT_FILE", missing.to_str().unwrap()),
+        ("SSL_CERT_DIR", missing.to_str().unwrap()),
+    ];
+
+    // A command that asks no model says what the agent has, as ever.
+    let check = corduroy_with(&workspace, &["check"], "", &env).unwrap();
+    let report = text(&check.stdout);
+    assert!(check.status.success(), "{report}\n{}", text(&check.stderr));
+    assert!(report.contains("tool      read (read-only)"), "{report}");
+
+    // The first request is where it fails, saying which variable to look at.
+    let run = corduroy_with(&workspace, &["run", "hi"], "", &env).unwrap();
+    let said = format!("{}{}", text(&run.stdout), text(&run.stderr));
+    assert_eq!(run.status.code(), Some(1), "{said}");
+    assert!(said.contains("SSL_CERT_FILE names"), "{said}");
+    assert!(said.contains("no-such-certificates.pem"), "{said}");
+}
+
+#[test]
 fn a_broken_agent_file_is_reported_with_where() {
     let workspace = scratch("cli-broken");
     fs::write(

@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::future::poll_fn;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -15,7 +15,7 @@ use corduroy_harness::core::{
     AUDIO, Content, IMAGE, Message, PDF, Part, Role, TEXT, ToolCall, ToolSpec, VIDEO,
 };
 use corduroy_harness::{
-    CallPiece, ModelInfo, ModelReply, ModelRequest, Piece, Provider, ProviderError,
+    Asking, CallPiece, ModelInfo, ModelReply, ModelRequest, Piece, Provider, ProviderError,
     ProviderErrorKind, Reports, Retry, StopReason, Usage,
 };
 use futures_core::Stream;
@@ -36,6 +36,7 @@ use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock, JsonObjec
 use serde_json::Value;
 
 use crate::Thinking;
+use crate::heard::{ClientRetry, Heard};
 
 /// What every request to a provider asks for, from its [`ProviderSpec`](crate::ProviderSpec).
 #[derive(Debug, Clone, PartialEq)]
@@ -111,6 +112,36 @@ impl Settings {
 }
 
 impl Settings {
+    /// What a request for `model` is sent with, for whoever records the request: the limit
+    /// on its answer as the request carries it (none, for a request to the Responses API
+    /// whose entry sets none), the temperature and thinking the entry sets, and the time
+    /// one attempt has.
+    fn said(&self, model: &str) -> Asking {
+        let limit = if self.responses(model) {
+            self.max_tokens.map(u64::from)
+        } else {
+            let default = u64::try_from(self.default_max_tokens(model)).ok();
+            self.max_tokens.map(u64::from).or(default)
+        };
+        let mut said = Asking::new().timeout(self.timeout);
+        if let Some(limit) = limit {
+            said = said.max_tokens(limit);
+        }
+        if let Some(temperature) = self.temperature {
+            said = said.temperature(temperature);
+        }
+        if let Some(thinking) = self.thinking {
+            said = said.thinking(match thinking {
+                Thinking::Off => "off",
+                Thinking::Low => "low",
+                Thinking::Medium => "medium",
+                Thinking::High => "high",
+                Thinking::Max => "max",
+            });
+        }
+        said
+    }
+
     /// Whether a request for `model` goes to the Responses API, by oi-kit's own rule: a path
     /// that names an API decides, and the standard chat-completions path leaves it to the
     /// model's name.
@@ -166,26 +197,161 @@ fn catalog_max_tokens(provider: &str, model: &str) -> Option<i32> {
         .and_then(|output| i32::try_from(output).ok())
 }
 
+/// Makes the oi-kit provider, or says why it cannot be made.
+pub(crate) type Make = Box<dyn Fn() -> Result<Arc<dyn OiKitProvider>, String> + Send + Sync>;
+
+/// The oi-kit provider behind an [`Adapted`]: made already, or made when first asked.
+pub(crate) enum Source {
+    /// Made when the provider was built.
+    Built(Arc<dyn OiKitProvider>),
+    /// Not made yet: its HTTP client could not be set up when the provider was built, which
+    /// is tried again at each request until it can.
+    Later {
+        /// Makes it.
+        make: Make,
+        /// The provider, once made.
+        made: OnceLock<Arc<dyn OiKitProvider>>,
+    },
+}
+
+impl Source {
+    /// A provider to be made by `make` when first asked.
+    pub(crate) fn later(make: Make) -> Self {
+        Self::Later {
+            make,
+            made: OnceLock::new(),
+        }
+    }
+
+    /// The provider, made now if it was not.
+    fn get(&self) -> Result<&Arc<dyn OiKitProvider>, ProviderError> {
+        match self {
+            Self::Built(provider) => Ok(provider),
+            Self::Later { make, made } => {
+                if let Some(provider) = made.get() {
+                    return Ok(provider);
+                }
+                let provider = make().map_err(ProviderError::new)?;
+                Ok(made.get_or_init(|| provider))
+            }
+        }
+    }
+}
+
 /// An oi-kit provider, speaking the harness's messages.
 pub(crate) struct Adapted {
-    provider: Arc<dyn OiKitProvider>,
+    provider: Source,
     settings: Settings,
 }
 
 impl Adapted {
     /// `provider`, asked with `settings`.
-    pub(crate) fn new(provider: Arc<dyn OiKitProvider>, settings: Settings) -> Self {
+    pub(crate) const fn new(provider: Source, settings: Settings) -> Self {
         Self { provider, settings }
     }
 }
 
-/// How one attempt at a request ended, where it did not answer.
-enum Missed {
-    /// It was still going when its time ran out. Not tried again: a model that never
-    /// stops writing would not stop the next time either.
-    TimedOut,
-    /// oi-kit said why.
-    Failed(OiKitError),
+/// Who retried, where oi-kit's own HTTP client made a request again inside one attempt of
+/// the provider's: see [`Retry::by`].
+pub const BY_CLIENT: &str = "client";
+
+/// Where an attempt at a request failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// While the request was sent: the part oi-kit's client tries again by itself.
+    Sending,
+    /// While the answer was read.
+    Reading,
+}
+
+/// A request as oi-kit takes it.
+struct Asked<'request> {
+    config: &'request ModelConfig,
+    system: &'request str,
+    messages: &'request [OiKitMessage],
+    tools: &'request [Tool],
+}
+
+impl Adapted {
+    /// The answer oi-kit gives to a request, tried again as its policy says.
+    async fn answer(
+        &self,
+        asked: &Asked<'_>,
+        reports: &dyn Reports,
+    ) -> Result<(OiKitMessage, ProviderUsage), ProviderError> {
+        let provider = self.provider.get()?;
+        let bound = self.settings.timeout;
+        // The answer is read as oi-kit's stream of it, each piece told as it comes, whether
+        // or not the provider's API streams: one that does not gives the whole as one piece.
+        // Each attempt has the whole of the bound, whether its answer is streamed or not:
+        // oi-kit bounds only the gap between two pieces of a stream, which a model that
+        // never stops writing never exceeds. An attempt that runs out is dropped, which
+        // closes its connection, and is not tried again.
+        //
+        // A request is made again by one layer. oi-kit's client tries a refused request
+        // again by itself, inside the call that sends it; each such retry is heard and told
+        // (`BY_CLIENT`), and a failure it gave up on is not tried again here. What the
+        // client does not retry (an answer that breaks off while it is read, or a provider
+        // whose client retries nothing) is tried again here, by the same policy (oi-kit's
+        // `should_retry` and its delays), and told as the provider's own. The retries of
+        // both count against the policy's one limit. A retry is told before the next
+        // attempt writes anything, so whoever heard pieces of the failed one knows they are
+        // void.
+        let policy = provider.retry_config();
+        let mut retries: usize = 0;
+        loop {
+            let before = retries;
+            let attempt = async {
+                let stream = provider
+                    .stream(asked.config, asked.system, asked.messages, asked.tools)
+                    .await
+                    .map_err(|error| (Phase::Sending, error))?;
+                read(stream, reports)
+                    .await
+                    .map_err(|error| (Phase::Reading, error))
+            };
+            let mut heard: usize = 0;
+            let listened = Heard::new(attempt, |retry: ClientRetry| {
+                heard += 1;
+                let delay = retry
+                    .asked
+                    .unwrap_or_else(|| policy.delay_for_attempt(retry.attempt));
+                let attempt = u32::try_from(before + heard).unwrap_or(u32::MAX);
+                reports.retry(&Retry::new(attempt, retry.error, delay).by(BY_CLIENT));
+            });
+            let (phase, error, by_client) = match tokio::time::timeout(bound, listened).await {
+                Ok((Ok(answer), _)) => return Ok(answer),
+                Ok((Err((phase, error)), by_client)) => (phase, error, by_client),
+                Err(_elapsed) => {
+                    return Err(ProviderError::new(format!(
+                        "the model had not finished answering after {} seconds (the \
+                         provider's timeout_seconds)",
+                        bound.as_secs()
+                    ))
+                    .of(ProviderErrorKind::Timeout));
+                }
+            };
+            retries += by_client;
+            let said = ProviderError::new(error.to_string()).of(kind_of_error(&error));
+            // The client made this request again and still failed: it is not made again.
+            let given_up = phase == Phase::Sending && by_client > 0;
+            if given_up || !should_retry(&error, &policy) || retries >= policy.max_retries() {
+                return Err(said);
+            }
+            retries += 1;
+            // The provider's own word on how long to wait comes first.
+            let delay = match &error {
+                OiKitError::RateLimitExceeded {
+                    retry_delay: Some(delay),
+                    ..
+                } => *delay,
+                _ => policy.delay_for_attempt(retries),
+            };
+            let attempt = u32::try_from(retries).unwrap_or(u32::MAX);
+            reports.retry(&Retry::new(attempt, said, delay));
+            tokio::time::sleep(delay).await;
+        }
+    }
 }
 
 #[async_trait]
@@ -206,58 +372,17 @@ impl Provider for Adapted {
             .iter()
             .map(tool_of)
             .collect::<Result<Vec<Tool>, ProviderError>>()?;
-        let provider = &self.provider;
-        let bound = self.settings.timeout;
-        // The answer is read as oi-kit's stream of it, each piece told as it comes, whether
-        // or not the provider's API streams: one that does not gives the whole as one piece.
-        // Rate limits, server errors and dropped connections are tried again, as the
-        // provider's own policy says (oi-kit's `should_retry` and its delays), each retry
-        // told to whoever asked. Each attempt has the whole of the bound, whether its
-        // answer is streamed or not: oi-kit bounds only the gap between two pieces of a
-        // stream, which a model that never stops writing never exceeds. An attempt that
-        // runs out is dropped, which closes its connection, and is not tried again. A retry
-        // is told before the next attempt writes anything, so whoever heard pieces of the
-        // failed one knows they are void.
-        let policy = provider.retry_config();
-        let mut retries: usize = 0;
-        let (message, usage) = loop {
-            let attempt = async {
-                let stream = provider.stream(&config, system, &messages, &tools).await?;
-                read(stream, reports).await
-            };
-            let missed = match tokio::time::timeout(bound, attempt).await {
-                Ok(Ok(answer)) => break answer,
-                Ok(Err(error)) => Missed::Failed(error),
-                Err(_elapsed) => Missed::TimedOut,
-            };
-            let error = match missed {
-                Missed::TimedOut => {
-                    return Err(ProviderError::new(format!(
-                        "the model had not finished answering after {} seconds (the \
-                         provider's timeout_seconds)",
-                        bound.as_secs()
-                    ))
-                    .of(ProviderErrorKind::Timeout));
-                }
-                Missed::Failed(error) => error,
-            };
-            let said = ProviderError::new(error.to_string()).of(kind_of_error(&error));
-            if !should_retry(&error, &policy) || retries >= policy.max_retries() {
-                return Err(said);
-            }
-            retries += 1;
-            // The provider's own word on how long to wait comes first.
-            let delay = match &error {
-                OiKitError::RateLimitExceeded {
-                    retry_delay: Some(delay),
-                    ..
-                } => *delay,
-                _ => policy.delay_for_attempt(retries),
-            };
-            let attempt = u32::try_from(retries).unwrap_or(u32::MAX);
-            reports.retry(&Retry::new(attempt, said, delay));
-            tokio::time::sleep(delay).await;
-        };
+        let (message, usage) = self
+            .answer(
+                &Asked {
+                    config: &config,
+                    system,
+                    messages: &messages,
+                    tools: &tools,
+                },
+                reports,
+            )
+            .await?;
         if let Some(error) = message.error() {
             return Err(ProviderError::new(error.message.clone()));
         }
@@ -270,6 +395,10 @@ impl Provider for Adapted {
 
     fn describe(&self, model: &str) -> ModelInfo {
         describe(&self.settings.provider, model)
+    }
+
+    fn asking(&self, model: &str) -> Asking {
+        self.settings.said(model)
     }
 }
 

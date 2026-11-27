@@ -23,6 +23,8 @@ rmcp = { workspace = true }
 async-trait = { workspace = true }
 # An answer is read from oi-kit as a stream, a piece at a time.
 futures-core = { workspace = true }
+# The one sign oi-kit's client gives of a retry it makes by itself is a line it logs.
+tracing-core = { workspace = true }
 anyhow = { workspace = true }
 # A secret is revealed on the blocking pool of the runtime oi-kit's client already needs,
 # and a request is bounded by its clock.
