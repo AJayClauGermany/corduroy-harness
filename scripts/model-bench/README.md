@@ -33,9 +33,33 @@ is written to `<out>/summary.md`.
 
 The macOS side (the build with Metal, `sandbox-exec`, `caffeinate`) was written on Linux
 and has not been run on a Mac yet: the first run there is its test. The bench checks its own
-wall before it starts and says so if the sandbox does not hold. Two tasks (`interrupt`,
-`background_server`) clean up with `pkill` by name, which on a machine that is also your
-desk reaches any `sleep` of your own.
+wall before it starts and says so if the sandbox does not hold.
+
+### Several at once
+
+```bash
+scripts/model-bench/run.sh --models all --jobs 4 --climb 0.25
+```
+
+`--jobs N` runs that many models side by side, each served on a port of its own (8080 and
+up). The models here take about 9 GB between them at a 16k context, so memory is not what
+limits it; the processor is. Models that share one are each slower, and what a task allows
+in seconds (`--timeout`, 900 for a command) does not stretch: a model that passes alone may
+time out beside three others. Compare runs made with the same `--jobs`, and raise
+`--timeout` if the log shows commands being killed.
+
+### What to hand over
+
+Every run ends by writing two files into `<out>`, and `--compare <out>` writes them again
+at any time (while runs are still going, too):
+
+- `summary.md`: the comparison table.
+- `collected.jsonl`: every record of every model under `<out>`, one a line, with the model
+  and the platform in each. This is the one file to give to whoever analyses the runs.
+  On Linux under `sudo` it is root's; copy it out.
+
+The trials themselves (workspaces, each run's full event log) stay under `<out>/<model>/`
+and are only needed to look closely at one failure.
 
 To lay two machines side by side, give each its own `--out` (or copy `<out>` over) and
 print the comparison for each: every record says which platform it ran on.
@@ -61,12 +85,14 @@ sudo python3 scripts/model-bench/bench.py --trials 3
 | Option | Meaning |
 | --- | --- |
 | `--models a,b` or `all` | serve each of these in turn (names: `scripts/local-model.sh models`); results go under `<out>/<model>` |
+| `--jobs N` | run that many of `--models` at once, each on its own port |
+| `--provider KIND --model-id ID` | a hosted model in the local one's place (see below); `--api-key-env` names its key's variable |
 | `--climb RATE` | go tier by tier, and stop going up the ladder after a tier where less than this share of trials passed |
 | `--list` | the tasks, with their tier |
 | `--only a,b`, `--tier 1,2` | some of them |
 | `--trials N` | how often each is tried (3). One pass or one failure says little |
 | `--fresh` | forget earlier results instead of going on from them |
-| `--compare DIR` | print the models under a directory side by side |
+| `--compare DIR` | print the models under a directory side by side, and write `summary.md` and `collected.jsonl` there |
 | `--summary FILE` | print the table for one results file again |
 | `--label NAME` | what a model served by hand is called in its records |
 | `--workspace-name NAME` | what the workspace directory is called (`workspace`) |
@@ -83,6 +109,8 @@ and SHA-256 and served with the sampling its makers recommend:
 | `lfm3-1.7b` | 1.7B | 4-bit, 1.1 GB | the one the [findings](../../docs/local-model-findings.md) are of |
 | `qwen3-0.6b` | 0.6B | 8-bit, 0.6 GB | thinks before it answers |
 | `qwen3-1.7b` | 1.7B | 8-bit, 1.8 GB | thinks before it answers |
+| `qwen3.5-0.8b` | 0.8B | 4-bit, 0.5 GB | the generation after; answers without thinking by default. Quantized by Unsloth: Qwen publishes no GGUF of it |
+| `qwen3.5-2b` | 1.9B | 4-bit, 1.3 GB | as above |
 | `minicpm5-1b` | 1.1B | 4-bit, 0.7 GB | |
 | `minicpm5-2b` | 2.5B | 4-bit, 1.6 GB | the largest here |
 
@@ -107,6 +135,31 @@ The ladder is meant to end where a small hosted model (Claude Haiku) starts to f
 that, the question is no longer about models that run on one's own machine. Where that is
 has not been measured, since no hosted model has been through the list; tier 6 is the top
 for now, and a tier above it is to be written once one has.
+
+## A hosted model beside them
+
+```bash
+python3 scripts/model-bench/bench.py --provider anthropic --model-id claude-haiku-5-5
+```
+
+The same agent with its provider's kind and its model's name changed, and nothing else:
+the same prompt, tools, add-ons and limits, so that what differs is the model. Results go
+under `<out>/claude-haiku-5-5` (or `--label`), where `--compare` finds them beside the
+local ones. It can run while `--models` does: it needs no port and next to no processor.
+
+- **The key** is read from `ANTHROPIC_API_KEY` in the bench's environment (`--api-key-env`
+  names another variable) and handed to the command alone. The agent's shell starts from
+  an empty environment and never has it; `environment_kept` checks that on every run.
+  Under `sudo`, the variable has to survive it: `sudo --preserve-env=ANTHROPIC_API_KEY`.
+- **Thinking** is off, as the agent file leaves it. That is the baseline to compare with;
+  a second pass with thinking on would be a different column, not a better one of this.
+- **Context** is the model's own, not the 16k the local models are held to: the tasks that
+  ask what happens when a context overflows (`context_overflow`, `many_reads`, the
+  compaction ones) ask a hosted model something easier. Read those rows with that in mind.
+- **Cost**: each record has its tokens in and out. One pass of the whole list with the local
+  model took a few million input tokens; try `--tier 1 --trials 1` first to see the rate.
+- **What it does not test**: `request_timeout` and `output_limit` were written for a slow
+  model; against a fast one a fifteen-second limit may never be reached.
 
 ## Models that only call tools
 

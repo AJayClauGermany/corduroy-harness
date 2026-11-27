@@ -22,7 +22,8 @@
 #   CORDUROY_LOCAL_MODEL        which known model to serve (lfm3-1.7b); see `models`
 #   CORDUROY_LOCAL_MODEL_ARGS   more arguments for llama-server, after the model's own
 #   CORDUROY_LOCAL_MODEL_DIR    cache for the build and the model (~/.cache/corduroy/local-model)
-#   CORDUROY_LOCAL_MODEL_PORT   port on 127.0.0.1 (8080)
+#   CORDUROY_LOCAL_MODEL_PORT   port on 127.0.0.1 (8080); one server a port, so several models
+#                               can be served side by side
 #   CORDUROY_LOCAL_MODEL_CTX    context window in tokens (16384)
 #   CORDUROY_LOCAL_MODEL_REPO, CORDUROY_LOCAL_MODEL_FILE, CORDUROY_LOCAL_MODEL_SHA256
 #                               another GGUF to serve; without a SHA-256 it is not verified
@@ -40,6 +41,8 @@ catalogue() {
 lfm3-1.7b|1.7B|1.1 GB|LiquidAI/LFM3-1.7B-GGUF|cd0c74c575b5c416f3011b5b4c298077f26ca8c2|LFM3-1.7B-Q4_K_M.gguf|3793e1e6e2266919d6e015287221b41100175a98eddaba92e111aed3b05c93c4|--temp 0.1 --top-k 50 --repeat-penalty 1.1
 qwen3-0.6b|0.6B|0.6 GB|Qwen/Qwen3-0.6B-GGUF|23749fefcc72300e3a2ad315e1317431b06b590a|Qwen3-0.6B-Q8_0.gguf|9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031|--temp 0.6 --top-k 20 --top-p 0.95 --min-p 0 --presence-penalty 1.5
 qwen3-1.7b|1.7B|1.8 GB|Qwen/Qwen3-1.7B-GGUF|90862c4b9d2787eaed51d12237eafdfe7c5f6077|Qwen3-1.7B-Q8_0.gguf|061b54daade076b5d3362dac252678d17da8c68f07560be70818cace6590cb1a|--temp 0.6 --top-k 20 --top-p 0.95 --min-p 0 --presence-penalty 1.5
+qwen3.5-0.8b|0.8B|0.5 GB|unsloth/Qwen3.5-0.8B-GGUF|6ab461498e2023f6e3c1baea90a8f0fe38ab64d0|Qwen3.5-0.8B-Q4_K_M.gguf|bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517|--temp 1.0 --top-p 1.0 --top-k 20 --min-p 0 --presence-penalty 2.0
+qwen3.5-2b|1.9B|1.3 GB|unsloth/Qwen3.5-2B-GGUF|f6d5376be1edb4d416d56da11e5397a961aca8ae|Qwen3.5-2B-Q4_K_M.gguf|aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223|--temp 1.0 --top-p 1.0 --top-k 20 --min-p 0 --presence-penalty 2.0
 minicpm5-1b|1.1B|0.7 GB|openbmb/MiniCPM5-1B-GGUF|5385560dd3e232bcc3577fd9442c332cad2facbd|MiniCPM5-1B-Q4_K_M.gguf|81b64d05a23b17b34c475f42b3e72fbde62d4b92cc34541f7a8031d0752deafa|--temp 0.9 --top-p 0.95
 minicpm5-2b|2.5B|1.6 GB|openbmb/MiniCPM5-2B-GGUF|8ad02b786ab81e33d465e1c80562640c55ab2877|MiniCPM5-2B-Q4_K_M.gguf|ec2d5801640099e97d8d7e8003ad4d81f336e757811f03a26173dddf386602fd|--temp 0.9 --top-p 0.95
 END
@@ -70,6 +73,8 @@ source_dir=$dir/llama_cpp_python-$llama_version/vendor/llama.cpp
 server=$source_dir/build/bin/llama-server
 model=$dir/models/$file
 url=http://127.0.0.1:$port/v1/chat/completions
+# What a running server leaves behind is named by its port, so that several can run at once.
+state=$dir/server-$port
 
 step() { printf '\n==> %s\n' "$*" >&2; }
 
@@ -141,20 +146,20 @@ case ${1:-} in
   start)
     healthy && { step "already serving at $url"; exit 0; }
     setup
-    "$server" "${server_args[@]}" >"$dir/server.log" 2>&1 &
-    echo $! >"$dir/server.pid"
-    echo "$name" >"$dir/server.model"
+    "$server" "${server_args[@]}" >"$state.log" 2>&1 &
+    echo $! >"$state.pid"
+    echo "$name" >"$state.model"
     for _ in $(seq 1 120); do
-      healthy && { step "serving $file at $url (log: $dir/server.log)"; exit 0; }
-      kill -0 "$(cat "$dir/server.pid")" 2>/dev/null || fail "the server exited: see $dir/server.log"
+      healthy && { step "serving $file at $url (log: $state.log)"; exit 0; }
+      kill -0 "$(cat "$state.pid")" 2>/dev/null || fail "the server exited: see $state.log"
       sleep 1
     done
-    fail "the server did not become healthy in 120s: see $dir/server.log"
+    fail "the server did not become healthy in 120s: see $state.log"
     ;;
   stop)
-    [ -f "$dir/server.pid" ] || fail "no server started by this script"
-    kill "$(cat "$dir/server.pid")" 2>/dev/null || true
-    rm -f "$dir/server.pid" "$dir/server.model"
+    [ -f "$state.pid" ] || fail "no server started by this script"
+    kill "$(cat "$state.pid")" 2>/dev/null || true
+    rm -f "$state.pid" "$state.model"
     # The port is free only once the process is gone, and the next model wants it.
     for _ in $(seq 1 30); do healthy || break; sleep 1; done
     ;;
@@ -164,6 +169,6 @@ case ${1:-} in
       printf '%-12s %5s  %6s  %s/%s\n' "$known" "$parameters" "$size" "$known_repo" "$known_file"
     done
     ;;
-  serving) healthy && cat "$dir/server.model" 2>/dev/null ;;
+  serving) healthy && cat "$state.model" 2>/dev/null ;;
   *) sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
 esac

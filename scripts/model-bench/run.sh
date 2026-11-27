@@ -8,6 +8,8 @@
 # Usage: scripts/model-bench/run.sh [bench.py's options]
 #        scripts/model-bench/run.sh --models all --climb 0.25
 #        nohup scripts/model-bench/run.sh --models qwen3-0.6b,lfm3-1.7b --tier 1,4 &
+#        scripts/model-bench/run.sh --models all --jobs 4      several models side by side
+#        scripts/model-bench/run.sh --provider anthropic --model-id claude-haiku-5-5
 #
 # Without --models it runs every model `scripts/local-model.sh models` lists. On Linux, run
 # it as root (or through sudo) for the agent to be walled off from the checks; on macOS it
@@ -22,7 +24,7 @@ models=
 previous=
 for argument in "$@"; do
   [ "$previous" = --out ] && out=$argument
-  case $argument in --models | --models=*) models=yes ;; --out=*) out=${argument#--out=} ;; esac
+  case $argument in --models | --models=* | --provider | --provider=*) models=yes ;; --out=*) out=${argument#--out=} ;; esac
   previous=$argument
 done
 mkdir -p "$out"

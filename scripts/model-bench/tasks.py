@@ -94,9 +94,7 @@ def doctor_command(t):
 
 @task(0, "a model that is not there: exit 1 soon, the reason said and recorded")
 def model_unreachable(t):
-    t.configure(old=":8080/", new=":9/") if ":8080/" in t.agent_text else t.configure(
-        old=t.config.url, new="http://127.0.0.1:9/v1/chat/completions"
-    )
+    t.unreachable()
     ran = t.run("Say hello.", timeout=120)
     t.expect(ran.code == 1, f"exited {ran.code}, expected 1")
     t.expect(ran.seconds < 60, f"took {ran.seconds:.0f}s to give up")
@@ -624,7 +622,10 @@ def crash_continue(t):
 
 @task(3, "SIGINT stops a run inside a long command: exit 130, `stopped`, promptly")
 def interrupt(t):
-    process = t.start("Run `sleep 300` in the shell, then say done.")
+    # A length of its own, so that a bench running beside this one (another model, the same
+    # user) is neither counted nor killed.
+    seconds = random.randint(300, 9999)
+    process = t.start(f"Run `sleep {seconds}` in the shell, then say done.")
     seen = t.wait_for(
         lambda events: any(
             e.get("topic") == "tool/start" and e["payload"].get("tool") == "bash" for e in events
@@ -651,14 +652,14 @@ def interrupt(t):
     t.expect(took < 20, f"took {took:.0f}s to stop")
     t.expect(t.last_status() == "stopped", f"the run's status is {t.last_status()}")
     gone = time.monotonic()
-    leftover = t.sh("pgrep -u $(id -u) -x sleep", timeout=10)
+    leftover = t.sh(f"pgrep -u $(id -u) -f '^sleep {seconds}$'", timeout=10)
     while leftover.code == 0 and time.monotonic() - gone < 5:
         time.sleep(0.2)
-        leftover = t.sh("pgrep -u $(id -u) -x sleep", timeout=10)
+        leftover = t.sh(f"pgrep -u $(id -u) -f '^sleep {seconds}$'", timeout=10)
     t.expect(leftover.code != 0, "the sleep is still running five seconds after the stop")
     if time.monotonic() - gone > 1:
         t.note(f"the sleep outlived the command by {time.monotonic() - gone:.1f}s")
-    t.sh("pkill -u $(id -u) -x sleep", timeout=10)
+    t.sh(f"pkill -u $(id -u) -f '^sleep {seconds}$'", timeout=10)
 
 
 @task(3, "two sessions in one workspace, one after the other, stay apart")

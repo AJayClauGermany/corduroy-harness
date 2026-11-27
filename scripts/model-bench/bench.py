@@ -77,6 +77,12 @@ class Config:
         self.binary = Path(args.binary).resolve()
         self.plugins = Path(args.plugins).resolve()
         self.model: str = args.label
+        # A hosted model in the local one's place: the provider's kind and the model's name.
+        self.provider: str | None = args.provider
+        self.model_id: str | None = args.model_id
+        self.key_env: str | None = args.api_key_env or (
+            {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}.get(args.provider or "")
+        )
         self.platform = f"{platform.system()} {platform.machine()}"
         # macOS: no user to drop to without an administrator's tools, but a sandbox profile
         # that denies the same places, for which nobody has to be root.
@@ -126,6 +132,20 @@ class Config:
         profile = f"(version 1)(allow default)(deny file-read* file-write* {denied})"
         return ["sandbox-exec", "-p", profile]
 
+    def hosted(self, text: str) -> str:
+        """Agent-file text written for the local model, as it reads for a hosted one: the
+        provider keeps its name (`local`), so only its kind and the model's name change."""
+        if not self.provider:
+            return text
+        key = f'\napi_key_env = "{self.key_env}"' if self.key_env else ""
+        text = text.replace(
+            f'kind = "openai-compatible"\nbase_url = "{DEFAULT_URL}"',
+            f'kind = "{self.provider}"{key}',
+        )
+        text = text.replace('model = "local" ', f'model = "{self.model_id}" ')
+        text = text.replace("[providers.local.models.local]\ncontext_tokens = 16384", "")
+        return text.replace("local/local", f"local/{self.model_id}")
+
     def demote(self) -> dict:
         """Arguments for `subprocess` that run a child as the agent's user."""
         if not self.user:
@@ -140,6 +160,10 @@ class Config:
             "LANG": "C.UTF-8",
             "CORDUROY_PLUGIN_PATH": str(self.plugins),
         }
+        # The command reads a hosted model's key from its environment; a kernel starts from
+        # an empty one, so the agent's shell never has it (`environment_kept` checks).
+        if self.provider and self.key_env and self.key_env in os.environ:
+            env[self.key_env] = os.environ[self.key_env]
         env.update(extra or {})
         return env
 
@@ -171,7 +195,7 @@ class Trial:
         self.private.mkdir(mode=0o700)
         self.agent = self.dir / "corduroy.toml"
         base = (ROOT / "examples/local-model/corduroy.toml").read_text()
-        self.agent_text = base.replace(DEFAULT_URL, config.url) + EXTRA_PLUGINS
+        self.agent_text = config.hosted(base).replace(DEFAULT_URL, config.url) + EXTRA_PLUGINS
         self.failures: list[str] = []
         self.notes: list[str] = []
         self.commands: list[dict] = []
@@ -208,11 +232,25 @@ class Trial:
     def configure(self, old: str | None = None, new: str = "", append: str = "") -> None:
         """Change the agent file: replace `old` with `new`, or add `append` at its end
         (top-level keys cannot be appended: replace them)."""
+        old, new, append = (
+            None if old is None else self.config.hosted(old),
+            self.config.hosted(new),
+            self.config.hosted(append),
+        )
         if old is not None:
             if old not in self.agent_text:
                 raise RuntimeError(f"the agent file has no {old!r}")
             self.agent_text = self.agent_text.replace(old, new)
         self.agent_text += append
+
+    def unreachable(self) -> None:
+        """Point the agent at a model that is not there."""
+        nowhere = "http://127.0.0.1:9/v1/chat/completions"
+        if self.config.provider:
+            kind = f'kind = "{self.config.provider}"'
+            self.agent_text = self.agent_text.replace(kind, f'{kind}\nbase_url = "{nowhere}"', 1)
+        else:
+            self.agent_text = self.agent_text.replace(self.config.url, nowhere)
 
     def sh(
         self, command: str, cwd: Path | None = None, timeout: int = 60, private: bool = False
@@ -594,11 +632,34 @@ def compare(out: Path, tiers: dict[int, str], ladder: tuple[int, ...]) -> str:
     return "\n".join(lines)
 
 
-def local_model(action: str, model: str, check: bool = True) -> str:
+def collect(out: Path, tiers: dict[int, str], ladder: tuple[int, ...]) -> str:
+    """The comparison, written to `<out>/summary.md`, and every record of every model under
+    `out` in one file, `<out>/collected.jsonl`: the file to hand to whoever reads the runs."""
+    table = compare(out, tiers, ladder)
+    records = [
+        record
+        for path in sorted(out.glob("*/private/results.jsonl"))
+        for record in read_results(path)
+    ]
+    try:
+        (out / "summary.md").write_text(table + "\n")
+        with (out / "collected.jsonl").open("w") as file:
+            for record in records:
+                file.write(json.dumps(record) + "\n")
+        table += f"\n\n{len(records)} records collected in {out / 'collected.jsonl'}"
+    except OSError as error:
+        table += f"\n\nnot collected: {error}"
+    return table
+
+
+def local_model(action: str, model: str, check: bool = True, port: int | None = None) -> str:
     """Run `scripts/local-model.sh` for one of the models it knows by name."""
+    env = {**os.environ, "CORDUROY_LOCAL_MODEL": model}
+    if port:
+        env["CORDUROY_LOCAL_MODEL_PORT"] = str(port)
     done = subprocess.run(
         [str(LOCAL_MODEL), action],
-        env={**os.environ, "CORDUROY_LOCAL_MODEL": model},
+        env=env,
         stdout=subprocess.PIPE,
         # Stopping what may not be running is said to nobody.
         stderr=None if check else subprocess.DEVNULL,
@@ -623,12 +684,16 @@ def healthy(url: str) -> bool:
 def run_model(args, chosen: list[dict], tasks, model: str | None) -> Path:
     """Every chosen task, `--trials` times, against one model; returns the results file.
     With `model`, the bench serves it itself and results go under `<out>/<model>`."""
+    port = args.port
     if model:
         args.label = model
         args.out = str(Path(args.base) / model)
-        local_model("stop", model, check=False)
-        local_model("start", model)
-        args.url = local_model("url", model)
+        local_model("stop", model, check=False, port=port)
+        local_model("start", model, port=port)
+        args.url = local_model("url", model, port=port)
+    elif args.provider:
+        args.label = args.label or args.model_id
+        args.out = str(Path(args.out).resolve() / args.label)
     config = Config(args)
     config.out.mkdir(parents=True, exist_ok=True)
     config.stage()
@@ -679,8 +744,8 @@ def run_model(args, chosen: list[dict], tasks, model: str | None) -> Path:
                     continue
         if model and not healthy(config.url):
             sys.stdout.write(f"{model}: the server is not answering; starting it again\n")
-            local_model("stop", model, check=False)
-            local_model("start", model, check=False)
+            local_model("stop", model, check=False, port=port)
+            local_model("start", model, check=False, port=port)
         trial = Trial(config, task["name"], number)
         started = time.monotonic()
         crashed = None
@@ -709,7 +774,7 @@ def run_model(args, chosen: list[dict], tasks, model: str | None) -> Path:
         )
         sys.stdout.flush()
     if model:
-        local_model("stop", model, check=False)
+        local_model("stop", model, check=False, port=port)
     sys.stdout.write(f"\n## {config.model}\n\n" + summarize(results, config.isolated) + "\n\n")
     sys.stdout.flush()
     return results
@@ -728,7 +793,21 @@ def main() -> int:
         help="models `scripts/local-model.sh` knows, separated by commas, or `all`: each is "
         "served in turn and its results go under <out>/<model>",
     )
-    parser.add_argument("--label", default="model", help="what to call the model in the records, without --models")
+    parser.add_argument("--label", help="what to call the model in the records, without --models")
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        help="how many of --models to run at once, each served on a port of its own",
+    )
+    parser.add_argument("--port", type=int, help="the port a model of --models is served on (8080)")
+    parser.add_argument(
+        "--provider",
+        help="a hosted model in the local one's place: the provider's kind (`anthropic`, "
+        "`openai`), with --model-id; results go under <out>/<label>",
+    )
+    parser.add_argument("--model-id", help="the hosted model's name, as its provider knows it")
+    parser.add_argument("--api-key-env", help="the variable holding the key (the kind's own by default)")
     parser.add_argument(
         "--climb",
         type=float,
@@ -736,6 +815,7 @@ def main() -> int:
         help="go tier by tier, and stop going up the ladder after a tier where less than "
         "this share of trials passed (0.25, say): the tiers above are not tried",
     )
+    parser.add_argument("--quiet", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--fresh", action="store_true", help="forget earlier results instead of going on from them")
     parser.add_argument("--url", default=os.environ.get("CORDUROY_LOCAL_MODEL_URL", DEFAULT_URL))
     parser.add_argument("--out", default="/var/tmp/corduroy-bench")
@@ -760,8 +840,17 @@ def main() -> int:
     import tasks  # noqa: PLC0415 (after the path is set)
 
     if args.compare:
-        sys.stdout.write(compare(Path(args.compare), tasks.TIERS, tasks.LADDER) + "\n")
+        sys.stdout.write(collect(Path(args.compare), tasks.TIERS, tasks.LADDER) + "\n")
         return 0
+    if bool(args.provider) != bool(args.model_id):
+        parser.error("--provider and --model-id go together")
+    key = args.api_key_env or {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}.get(
+        args.provider or ""
+    )
+    if args.provider and key and not os.environ.get(key) and not args.list:
+        parser.error(f"{key} is not set: a hosted model needs its key in the environment")
+    if args.provider and args.models:
+        parser.error("--provider is one hosted model; run it beside --models, as a command of its own")
     chosen = tasks.TASKS
     if args.only:
         names = args.only.split(",")
@@ -777,7 +866,11 @@ def main() -> int:
         return 0
 
     if not args.models:
+        base = Path(args.out).resolve()
+        args.label = args.label or (None if args.provider else "model")
         run_model(args, chosen, tasks, None)
+        if args.provider:
+            sys.stdout.write(collect(base, tasks.TIERS, tasks.LADDER) + "\n")
         return 0
     known = [line.split()[0] for line in local_model("models", "lfm3-1.7b").splitlines()]
     models = known if args.models == "all" else args.models.split(",")
@@ -787,15 +880,35 @@ def main() -> int:
     if args.results:
         parser.error("--results is one file; with --models each model has its own under --out")
     args.base = str(Path(args.out).resolve())
-    for model in models:
-        try:
-            run_model(args, chosen, tasks, model)
-        except (subprocess.CalledProcessError, OSError) as error:
-            # One model that cannot be fetched or served must not cost the others their turn.
-            sys.stdout.write(f"{model}: not run: {error}\n")
-    table = compare(Path(args.base), tasks.TIERS, tasks.LADDER)
-    (Path(args.base) / "summary.md").write_text(table + "\n")
-    sys.stdout.write(table + "\n")
+    if args.jobs > 1 and len(models) > 1:
+        # Each model is this command again for that model alone, on its own port. The server
+        # is built and the files fetched first, one after another: two builds would collide.
+        for model in models:
+            local_model("setup", model)
+        first = args.port or 8080
+        passed = [arg for arg in sys.argv[1:]]
+        waiting = list(enumerate(models))
+        running: list[subprocess.Popen] = []
+        while waiting or running:
+            running = [child for child in running if child.poll() is None]
+            while waiting and len(running) < args.jobs:
+                index, model = waiting.pop(0)
+                running.append(
+                    subprocess.Popen(
+                        [sys.executable, "-u", __file__, *passed, "--models", model,
+                         "--port", str(first + index), "--jobs", "1", "--quiet"]
+                    )
+                )
+            time.sleep(1)
+    else:
+        for model in models:
+            try:
+                run_model(args, chosen, tasks, model)
+            except (subprocess.CalledProcessError, OSError) as error:
+                # One model that cannot be fetched or served must not cost the others their turn.
+                sys.stdout.write(f"{model}: not run: {error}\n")
+    if not args.quiet:
+        sys.stdout.write(collect(Path(args.base), tasks.TIERS, tasks.LADDER) + "\n")
     return 0
 
 
