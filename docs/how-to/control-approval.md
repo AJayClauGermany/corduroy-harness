@@ -63,8 +63,8 @@ For anything more particular, [write a gate](write-a-gate.md).
 
 ## Answer later
 
-A question is put at the terminal and, where the agent has a `page` extension (the default
-agent does), on [its page](watch-a-run-in-a-browser.md) with **Allow** and **Refuse**. The
+A question is put at the terminal and, where the agent has a `page` extension turned on, on
+[its page](watch-a-run-in-a-browser.md) with **Allow** and **Refuse**. The
 first answer given is the answer.
 
 At the `allow? [y/N, or a reason to refuse]` prompt:

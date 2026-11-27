@@ -1,6 +1,21 @@
 # Watch a run in a browser, and answer it there
 
-The default agent serves a page while it runs. `corduroy` says where when it starts:
+Two things put the agent's record in a browser. The `viewer` add-on, which the default
+agent has, writes it as files you open: it shows. The `page` extension, which you turn on,
+serves the same page while `corduroy` runs: on it you can also answer a gate, type a prompt
+and stop a run.
+
+## Turn the page on
+
+In `corduroy.toml`, take the `#` off these two lines (`corduroy init` writes them commented
+out), or add them:
+
+```toml
+[extensions.page]
+kind = "page"
+```
+
+`corduroy` then says where the page is each time it is about to run the agent:
 
 ```text
 the agent's page is at http://127.0.0.1:41873/8f3c…/ (a gate's question can be answered there as well as here; the address is new each time, and lets in whoever has it)
@@ -21,7 +36,20 @@ waits and about what, and the tab's name begins `(asks you)`.
 
 The terminal asks the same question at the same time. Whichever answer comes first is the
 answer; the terminal then says `✓ allowed on page` or `✗ refused on page: …` and goes on.
-You still type prompts in the terminal.
+
+## Type a prompt, and stop a run
+
+Under a session is a box. In a conversation (`corduroy` with no command), what you type in
+it and send with Enter is a prompt, as if typed at the terminal, where it shows as
+`› … (typed on page)`. The terminal still takes prompts too.
+
+- The box takes a prompt only while the session is doing nothing. While a run goes it is
+  greyed, and **Stop** is beside it.
+- **Stop** ends the session's run, as Ctrl-C at the terminal does: the tool that is
+  running is told, a question that waits is dropped, and the session takes a new prompt.
+- `corduroy run "…"` runs one prompt and leaves, so its page takes no prompts and says so.
+  Its run can still be answered and stopped there.
+- A sub-agent's session has no box: it is spoken to by the agent that started it.
 
 ## Find what went wrong
 
@@ -50,7 +78,7 @@ own questions.
 So an address from an earlier run stops working: open the one `corduroy` says now. A page
 left open from an earlier run says so when you try to answer on it.
 
-## Keep the port, or serve nothing
+## Keep the port
 
 ```toml
 [extensions.page]
@@ -58,13 +86,12 @@ kind = "page"
 port = 4747        # the same port every time; without it, any free one
 ```
 
-The token still changes with every start. Remove the entry and nothing is served: the
-questions are asked in the terminal alone.
+The token still changes with every start.
 
 ## When corduroy is not running
 
 The `viewer` add-on writes the same page as files, so the record can be read with nothing
-running:
+running, and with no page turned on:
 
 ```bash
 open .corduroy/viewer/index.html        # macOS

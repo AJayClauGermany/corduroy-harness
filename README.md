@@ -102,8 +102,8 @@ unless a file says so.
 `corduroy run <prompt>` runs one prompt; `corduroy
 check` says what the agent has without calling a model; `corduroy doctor` tries it for real
 (each key, each kernel, one short question to each model); `corduroy log` prints the event
-log, with the time of each event, which is kept in `.corduroy/log.jsonl`; the same log is a page in a browser, which `corduroy`
-serves while it runs (it says the address when it starts) and on which a gate's question can be allowed or refused. Ctrl-C stops a run (the running tool is told, the rest of its calls do not run); kill
+log, with the time of each event, which is kept in `.corduroy/log.jsonl`; the same log is a page in a browser at
+`.corduroy/viewer/index.html`, and with the `page` extension turned on `corduroy` serves it while it runs, to answer a gate's question, type a prompt or stop a run there. Ctrl-C stops a run (the running tool is told, the rest of its calls do not run); kill
 the process instead and `corduroy continue` picks the run up, or `corduroy stop` ends it; leave a question unanswered and the run waits, in the log, until you do.
 
 ## Extending it
@@ -214,7 +214,7 @@ in [`examples/local-model/`](examples/local-model/corduroy.toml) against Liquid 
 | `crates/corduroy-mcp` | MCP servers (stdio, through a kernel, or streamable HTTP) as plugins |
 | `crates/corduroy-providers` | Model providers from `oi-kit-providers` (Anthropic, OpenAI, Ollama and the providers Goose knows), converted to the harness's own messages at the boundary |
 | `crates/corduroy-http` | The HTTP client behind the `http` capability, which never follows a redirect |
-| `crates/corduroy-page` | The agent's page in a browser, served on this machine while it runs: the record as it grows, and a gate's question answered there |
+| `crates/corduroy-page` | The agent's page in a browser, served on this machine while it runs: the record as it grows, a gate's question answered there, a prompt typed and a run stopped. Opt-in |
 | `crates/corduroy-shell` | A persistent shell as a kernel: POSIX, or PowerShell on Windows |
 | `crates/corduroy-jsonl` | A JSON Lines file as the durable log behind an event stream |
 | `crates/corduroy-wasm` | wasmtime host that loads components as capability-gated plugins |

@@ -235,12 +235,11 @@ stored before the tool could start, your answer is there with the time you gave 
 the conversation the model sees is rebuilt from these events alone. Nothing about a run lives
 anywhere else.
 
-The same record is a page. Each time `corduroy` runs the agent it begins by saying where:
-`the agent's page is at http://127.0.0.1:…`. Open that address during a run and you see
-your prompt, each tool call with what `approval` asked and what you answered, and how long
-each part took; when `approval` asks, **Allow** and **Refuse** on the page answer it as `y`
-and `n` do here. With nothing running, `.corduroy/viewer/index.html` is the same page as
-files. See [Watch a run in a browser](../how-to/watch-a-run-in-a-browser.md).
+The same record is a page. Open `.corduroy/viewer/index.html` in a browser: your prompt,
+each tool call with what `approval` asked and what you answered, and how long each part
+took. Leave it open and it follows the next run as it goes. To answer `approval` on the
+page, type prompts there and stop a run from it, turn on the `page` extension, two lines
+in your agent file: see [Watch a run in a browser](../how-to/watch-a-run-in-a-browser.md).
 
 ## 9. Talk to it
 

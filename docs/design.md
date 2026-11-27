@@ -1912,7 +1912,8 @@ is supported are still open (A11), as is whether a review from outside is a cond
 Five things are decided here: what a person reaches the agent through, what the standard set
 holds at 1.0, where a credential comes from, which parts of a provider's entry are ours, and
 what an add-on is as something kept and passed on. Most of it is *planned*; the keychain is
-built, and so is the page, as far as showing the record and answering a gate's question. The code is as [Three tiers](#three-tiers-core-extensions-add-ons) and the
+built, and so is the page: it shows the record, answers a gate's question, takes a prompt
+and stops a run. The code is as [Three tiers](#three-tiers-core-extensions-add-ons) and the
 [reference](README.md#reference) pages describe it, and [Order of work](#order-of-work)
 lists what is built and what changes.
 
@@ -1935,21 +1936,29 @@ Driving the harness from another program still means linking it.
   contract only when it is said to be, as any standard extension's configuration is, and
   nothing about it is promised before then. *Built:* the `page` extension
   (`crates/corduroy-page`, `[extensions.<name>] kind = "page"`) serves the viewer's page
-  on the loopback interface and takes one thing back, an answer to a gate's question. Its
-  one promise is its entry in the agent file; the scripts it serves and what it is posted
-  are the page's own and may change with it.
+  on the loopback interface and takes three things back: an answer to a gate's question,
+  a message for a session, and a stop. It is not in the default agent: a person turns it
+  on, since a terminal interface may come to stand where it does. Its one promise is its
+  entry in the agent file; the scripts it serves and what it is posted are the page's own
+  and may change with it.
 - *It drives through the handle every extension has.*
   [What an extension can reach](#what-an-extension-can-reach) gives an extension four
   things: start a session, send one a message, raise a signal, and read. A front end also
   has to answer an ask and stop a run, which only the host's `Harness` did. The handle
   gains both, so that a front end can be written without the command changing. *Built:*
-  the first of them. `Outside`, which a native plugin is handed by name, reads the
-  questions that wait and records an answer to one; it only records, and the host, which
-  drives, takes the run on (`Harness::answered`), as
-  [the host takes the run on](#what-an-extension-can-reach) says. It is not in the
-  `Services` registry, so no add-on reaches it: a gate's question is the person's to
-  answer. The answer's event says what it was given through (`via`). Stopping a run, and
-  the four things above, are still to come.
+  `Outside`, which a native plugin is handed by name. It reads the questions that wait,
+  records an answer to one, records a message said to a session, and asks a run to stop.
+  It only records, and the host, which drives, takes the run on (`Harness::take_on`), as
+  [the host takes the run on](#what-an-extension-can-reach) says: no loop runs on a front
+  end's thread. It is not in the `Services` registry, so no add-on reaches it: a gate's
+  question is the person's to answer. Each event says what it was given through (`via`).
+  Two limits stand until the rest of the handle is built. A message is taken only for a
+  session that is doing nothing, since the queue that would keep one for a busy session is
+  not there. And it is taken only from a host that said it takes them
+  (`Harness::takes_messages`): the command does in a conversation and does not when it
+  runs one prompt and leaves, where a message would be recorded and run by nobody.
+  Starting a session, raising a signal and reading as the design has them are still to
+  come.
 - *The host opens a front end when it is about to drive.* *Built:* a front end registers
   in `Fronts` and does nothing until the host opens it, which the command does before a
   run and not when an agent is put together only to be looked at (`check`, `log`). What
