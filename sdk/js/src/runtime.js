@@ -337,6 +337,19 @@ function verdict(answer) {
  * }
  * ```
  */
+// What a tool says about itself beyond the record's own fields, as the world's named values.
+// `result` is how much of the model's context one result should take at most, in tokens of
+// three bytes, and which part of a longer one is kept (`head`, `tail` or `ends`).
+function more(tool) {
+  const said = [];
+  const tokens = tool.result?.tokens;
+  if (Number.isInteger(tokens) && tokens > 0) {
+    said.push({ name: 'result-tokens', value: String(tokens) });
+    said.push({ name: 'result-keep', value: tool.result.keep ?? 'ends' });
+  }
+  return said;
+}
+
 export function exportsFor(plugin) {
   // Read on every call, so that `activate` may fill the plugin in (the script host does).
   const tools = () => plugin.tools ?? {};
@@ -359,11 +372,13 @@ export function exportsFor(plugin) {
           inputSchema: JSON.stringify(tool.input ?? { type: 'object' }),
           replaySafe: tool.replaySafe === true,
           readOnly: tool.readOnly === true,
+          more: more(tool),
         })),
         subscriptions: plugin.subscriptions ?? [],
         prompt: typeof plugin.prompt === 'function',
         gates: Object.keys(gates()),
         provides: Object.keys(services()),
+        more: [],
       };
     },
 

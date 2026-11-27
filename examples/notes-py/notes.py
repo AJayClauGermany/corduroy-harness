@@ -39,7 +39,14 @@ def note_add(input):
     return note_id
 
 
-@plugin.tool(description="List every saved note, oldest first.", read_only=True, replay_safe=True)
+# A long list is cut from its end: the oldest notes are the ones shown.
+@plugin.tool(
+    description="List every saved note, oldest first.",
+    read_only=True,
+    replay_safe=True,
+    result_tokens=4096,
+    result_keep="head",
+)
 def note_list(_input):
     notes = [
         {"id": key[len(PREFIX):], **json.loads(state.get(key))}

@@ -70,6 +70,13 @@ export interface Tool<Input = any> {
   replaySafe?: boolean;
   /** The tool only looks and changes nothing. */
   readOnly?: boolean;
+  /**
+   * The most one result should take of the model's context, in tokens counted as three
+   * bytes of text, and which part of a longer one is kept: the start (`head`), the end
+   * (`tail`) or both with the middle left out (`ends`, the default). The host cuts a longer
+   * result, and holds a call to less for a model that holds little.
+   */
+  result?: { tokens: number; keep?: 'head' | 'tail' | 'ends' };
   run(input: Input): ToolOutput;
 }
 

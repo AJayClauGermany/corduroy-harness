@@ -17,7 +17,7 @@ use std::fmt::Write as _;
 use std::sync::OnceLock;
 
 use corduroy_guest::host::{fs_read, fs_write, kernel};
-use corduroy_guest::{Plugin, PluginInfo, ToolError, ToolSpec, parse};
+use corduroy_guest::{Keep, Plugin, PluginInfo, ToolError, ToolSpec, parse};
 use serde::Deserialize;
 
 /// Lines returned by `read` and kept from `bash` output unless the call asks otherwise.
@@ -227,6 +227,10 @@ fn walk(dir: &str, entries: &[String], prefix: &str, depth: usize, lines: &mut V
     }
 }
 
+/// The most one result should take of the model's context, in tokens of three bytes: what
+/// [`MAX_BYTES`] comes to. The host holds a call to less for a model that holds little.
+const RESULT_TOKENS: u32 = 16_384;
+
 fn specs() -> Vec<ToolSpec> {
     // `(replay_safe, read_only)`. Reading twice, or writing the same content twice, is the
     // same as once; an edit that already happened no longer finds its old text, and a command
@@ -239,7 +243,18 @@ fn specs() -> Vec<ToolSpec> {
         read_only,
         ..ToolSpec::new(name, description, input_schema)
     };
-    vec![
+    // Which part of a result too long for the model is kept: the start of a file or a
+    // listing, the end of a command's output, where the error is. `write` and `edit`
+    // answer in a line.
+    let kept = |spec: ToolSpec| {
+        let keep = match spec.name.as_str() {
+            "read" | "tree" => Keep::Head,
+            "bash" => Keep::Tail,
+            _ => return spec,
+        };
+        spec.result(RESULT_TOKENS, keep)
+    };
+    [
         spec(
             "read",
             (true, true),
@@ -277,4 +292,6 @@ fn specs() -> Vec<ToolSpec> {
             r#"{"type":"object","properties":{"path":{"type":"string","description":"The directory, relative to the working directory (default .)"},"depth":{"type":"integer","description":"Levels to show (default 3, at most 10)"}}}"#,
         ),
     ]
+    .map(kept)
+    .to_vec()
 }

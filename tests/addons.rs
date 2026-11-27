@@ -9,7 +9,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use corduroy_harness::Harness;
-use corduroy_harness::core::{HttpClient, HttpRequest, HttpResponse, Message, Pattern, Scope};
+use corduroy_harness::core::{
+    HttpClient, HttpRequest, HttpResponse, Keep, Message, Pattern, Scope,
+};
 use corduroy_harness::scripted::{ScriptedProvider, call, say};
 use corduroy_harness::wasm::{WasmPlugin, WasmRuntime};
 use corduroy_test_support::{plugin, scratch};
@@ -142,6 +144,9 @@ async fn grep_finds_lines_by_regular_expression_without_a_shell() {
     let specs = harness.tools().specs();
     let grep = specs.iter().find(|spec| spec.name == "grep").unwrap();
     assert!(grep.read_only && grep.replay_safe);
+    // And says how much one result should take, and that the first matches are kept.
+    let result = grep.result.unwrap();
+    assert_eq!((result.tokens, result.keep), (16_384, Keep::Head));
 }
 
 #[tokio::test]

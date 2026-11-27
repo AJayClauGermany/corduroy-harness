@@ -68,8 +68,8 @@ pub mod bindings {
 /// plugin import it, and the host instantiates the plugin only if it granted that capability.
 pub use bindings::corduroy::plugin as host;
 pub use bindings::corduroy::plugin::types::{
-    CallError, Content, Credential, Event, HostError, Image, PluginInfo, ServiceCall, ToolError,
-    ToolSpec, Verdict,
+    CallError, Content, Credential, Event, HostError, Image, NamedValue, PluginInfo, ServiceCall,
+    ToolError, ToolSpec, Verdict,
 };
 
 /// A plugin: the exports of the plugin world. Only [`activate`](Self::activate) has no
@@ -191,6 +191,7 @@ impl PluginInfo {
             prompt: false,
             gates: Vec::new(),
             provides: Vec::new(),
+            more: Vec::new(),
         }
     }
 
@@ -238,6 +239,29 @@ impl PluginInfo {
     }
 }
 
+/// Which part of a tool's result is kept when it is too long for the model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Keep {
+    /// The start: a file read from its top.
+    Head,
+    /// The end: the output of a command, where the error comes last.
+    Tail,
+    /// The start and the end, with the middle left out.
+    Ends,
+}
+
+impl Keep {
+    /// The word the host knows this by.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Head => "head",
+            Self::Tail => "tail",
+            Self::Ends => "ends",
+        }
+    }
+}
+
 impl ToolSpec {
     /// A tool called `name`, with its description and the JSON Schema of its input as JSON
     /// text. It is neither replay-safe nor read-only until said so.
@@ -249,7 +273,31 @@ impl ToolSpec {
             input_schema: input_schema.to_owned(),
             replay_safe: false,
             read_only: false,
+            more: Vec::new(),
         }
+    }
+
+    /// One result should take at most `tokens` tokens of the model's context, counted as
+    /// three bytes of text to a token, and `keep` says which part of a longer one is kept.
+    /// The host cuts a longer result, and holds a call to less for a model that holds
+    /// little; a tool that would rather choose what to leave out asks
+    /// `host::session::result_budget`.
+    #[must_use]
+    pub fn result(self, tokens: u32, keep: Keep) -> Self {
+        self.say("result-tokens", &tokens.to_string())
+            .say("result-keep", keep.as_str())
+    }
+
+    /// Say `value` about the tool under `name`, replacing what was said under it before. A
+    /// host ignores a name it does not know.
+    #[must_use]
+    pub fn say(mut self, name: &str, value: &str) -> Self {
+        self.more.retain(|named| named.name != name);
+        self.more.push(NamedValue {
+            name: name.to_owned(),
+            value: value.to_owned(),
+        });
+        self
     }
 
     /// Calling the tool twice is the same as calling it once, so after a crash the host may

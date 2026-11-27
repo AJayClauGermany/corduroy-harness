@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use corduroy_core::{
     CallError, Context, ContextError, Draft, Event, EventStream, GATES, Gate, Gates, Grants, HTTP,
-    HttpClients, KERNELS, Kernels, LogError, MODELS, Models, PLUGIN_LOAD, PROMPTS, Plugin,
+    HttpClients, KERNELS, Keep, Kernels, LogError, MODELS, Models, PLUGIN_LOAD, PROMPTS, Plugin,
     PluginError, PromptPart, Prompts, Query, SECRETS, SERVICES, Scope, Secrets, Service, Services,
     Source, TOOL_CALL, TOOLS, Tool, ToolError, ToolOutput, ToolSpec, Tools, Verdict,
 };
@@ -330,9 +330,12 @@ impl Plugin for WasmPlugin {
             let name = spec.name.clone();
             let tool = WasmTool {
                 instance: Arc::clone(&instance),
-                spec: ToolSpec::new(spec.name, spec.description, spec.input_schema)
-                    .replay_safe(spec.replay_safe)
-                    .read_only(spec.read_only),
+                spec: said(
+                    ToolSpec::new(spec.name, spec.description, spec.input_schema)
+                        .replay_safe(spec.replay_safe)
+                        .read_only(spec.read_only),
+                    &spec.more,
+                ),
             };
             tools.register(ctx, name, Arc::new(tool))?;
         }
@@ -447,6 +450,23 @@ fn link_error(error: &wasmtime::Error) -> PluginError {
 }
 
 /// Hand an event to a plugin's `on-event`, unless the plugin raised it itself.
+/// `spec` with what an add-on said about its tool by name. A name this host does not know,
+/// or a value it cannot read, is passed over: a later world says more there.
+fn said(spec: ToolSpec, more: &[types::NamedValue]) -> ToolSpec {
+    let value = |name: &str| {
+        more.iter()
+            .find(|named| named.name == name)
+            .map(|named| named.value.as_str())
+    };
+    let Some(tokens) = value(host::RESULT_TOKENS).and_then(|tokens| tokens.parse().ok()) else {
+        return spec;
+    };
+    let keep = value(host::RESULT_KEEP)
+        .and_then(Keep::parse)
+        .unwrap_or_default();
+    spec.result(tokens, keep)
+}
+
 fn deliver(instance: &Instance, event: &Event) {
     if event.source == Source::Plugin(instance.name().to_owned()) {
         return;

@@ -22,7 +22,7 @@ use std::ops::ControlFlow;
 use std::sync::OnceLock;
 
 use corduroy_guest::host::fs_read;
-use corduroy_guest::{HostError, Plugin, PluginInfo, ToolError, ToolSpec, parse};
+use corduroy_guest::{HostError, Keep, Plugin, PluginInfo, ToolError, ToolSpec, parse};
 use regex::{Regex, RegexBuilder};
 use serde::Deserialize;
 
@@ -40,6 +40,11 @@ const MAX_FILES: usize = 20_000;
 const MAX_DEPTH: usize = 40;
 /// Bytes of a result, at most.
 const MAX_OUTPUT: usize = 50 * 1024;
+
+/// The most one result should take of the model's context, in tokens of three bytes: what
+/// [`MAX_OUTPUT`] comes to. The host holds a call to less for a model that holds little, and
+/// keeps the start, where the first matches are.
+const RESULT_TOKENS: u32 = 16_384;
 /// Bytes of text one `grep` reads unless the configuration says otherwise. A call's budget
 /// is spent at about 40 MB by a pattern found in every file, and far later by one found in
 /// few.
@@ -408,7 +413,8 @@ impl Plugin for SearchTools {
                     r#"{"type":"object","properties":{"pattern":{"type":"string","description":"A regular expression, matched against each line"},"path":{"type":"string","description":"The directory or file to search (default: the working directory)"},"glob":{"type":"string","description":"Search only files matching this, such as *.rs or src/**/*.{ts,tsx}"},"ignore_case":{"type":"boolean"},"context":{"type":"integer","description":"Lines to show before and after each match (default 0)"},"limit":{"type":"integer","description":"Most matching lines (default 100)"},"files_only":{"type":"boolean","description":"List the files with a match instead of the lines"}},"required":["pattern"]}"#,
                 )
                 .read_only()
-                .replay_safe(),
+                .replay_safe()
+                .result(RESULT_TOKENS, Keep::Head),
             )
             .tool(
                 ToolSpec::new(
@@ -419,7 +425,8 @@ impl Plugin for SearchTools {
                     r#"{"type":"object","properties":{"pattern":{"type":"string","description":"A file-name pattern; without a / it is matched against the name alone"},"path":{"type":"string","description":"The directory to search (default: the working directory)"},"limit":{"type":"integer","description":"Most files listed (default 200)"}},"required":["pattern"]}"#,
                 )
                 .read_only()
-                .replay_safe(),
+                .replay_safe()
+                .result(RESULT_TOKENS, Keep::Head),
             ))
     }
 

@@ -319,6 +319,10 @@ def world_for(module):
                         input_schema=json.dumps(tool.input),
                         replay_safe=tool.replay_safe,
                         read_only=tool.read_only,
+                        more=[
+                            types.NamedValue(name=name, value=value)
+                            for name, value in tool.more()
+                        ],
                     )
                     for tool in plugin.tools.values()
                 ],
@@ -326,6 +330,7 @@ def world_for(module):
                 prompt=plugin.prompt_fn is not None,
                 gates=list(plugin.gates),
                 provides=list(plugin.services),
+                more=[],
             )
 
         def call_tool(self, name: str, input: str) -> list:

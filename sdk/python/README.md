@@ -36,7 +36,7 @@ python3 -m venv .venv && .venv/bin/pip install -e .
 
 | Decorator | Becomes |
 | --- | --- |
-| `@plugin.tool(name=None, description=, input=, read_only=, replay_safe=)` | a tool; the function takes the parsed input and returns text, anything else as JSON, or content blocks (below) |
+| `@plugin.tool(name=None, description=, input=, read_only=, replay_safe=, result_tokens=, result_keep=)` | a tool; `result_tokens` is the most one result should take of the model's context and `result_keep` which part of a longer one the host keeps (`head`, `tail` or `ends`); the function takes the parsed input and returns text, anything else as JSON, or content blocks (below) |
 | `@plugin.on_activate` | called with the parsed configuration when the plugin starts, and again after a trap |
 | `@plugin.on("turn/end", "tool/*")` | called with each matching event |
 | `@plugin.prompt` | text for the system prompt, or `None` |

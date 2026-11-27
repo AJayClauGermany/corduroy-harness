@@ -64,6 +64,85 @@ pub struct ToolSpec {
     /// Whether the tool only looks and never changes anything. Gates see this, so an
     /// approval policy can let reads through and ask about writes.
     pub read_only: bool,
+    /// How much of the model's context one result should take at most, and which part of a
+    /// longer one is kept. `None` leaves it to whoever runs the call. See [`ResultBudget`].
+    pub result: Option<ResultBudget>,
+}
+
+/// Which part of a tool's result is kept when it is too long for the model.
+///
+/// More ways may follow, so code that reads one needs an arm for the rest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum Keep {
+    /// The start: right for a file read from its top, or a list in order of interest.
+    Head,
+    /// The end: right for the output of a command, where the error comes last.
+    Tail,
+    /// The start and the end, with the middle left out. What is assumed of a tool that
+    /// does not say.
+    #[default]
+    Ends,
+}
+
+impl Keep {
+    /// The word for this in a tool's own description of itself (`result-keep` in the
+    /// plugin world): `head`, `tail` or `ends`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Head => "head",
+            Self::Tail => "tail",
+            Self::Ends => "ends",
+        }
+    }
+
+    /// The way `word` names, if it names one.
+    #[must_use]
+    pub fn parse(word: &str) -> Option<Self> {
+        match word {
+            "head" => Some(Self::Head),
+            "tail" => Some(Self::Tail),
+            "ends" => Some(Self::Ends),
+            _ => None,
+        }
+    }
+}
+
+/// What a tool says about the size of its results: the most one should take of the model's
+/// context, and which part of a longer one is kept.
+///
+/// The size is in tokens, since that is what a model's context is counted in, and a token
+/// is taken to be [`BYTES_PER_TOKEN`] bytes of text: nobody but the model's own tokenizer
+/// knows the real count, and the same bytes come to very different counts (prose near four
+/// bytes to a token, a server's log nearer one and a half). Whoever runs the call cuts a
+/// longer result, and may hold a call to less than its tool asked for when the model holds
+/// little. A tool that would rather choose what to leave out asks what its call may return
+/// ([`call::budget`](crate::call::budget)) and keeps to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ResultBudget {
+    /// The most one result should take, in tokens of [`BYTES_PER_TOKEN`] bytes.
+    pub tokens: u32,
+    /// Which part of a longer result is kept.
+    pub keep: Keep,
+}
+
+/// How many bytes of text are counted as one token wherever a size is estimated.
+pub const BYTES_PER_TOKEN: u32 = 3;
+
+impl ResultBudget {
+    /// At most `tokens` tokens of a result, keeping `keep` of a longer one.
+    #[must_use]
+    pub const fn new(tokens: u32, keep: Keep) -> Self {
+        Self { tokens, keep }
+    }
+
+    /// The budget in bytes of text.
+    #[must_use]
+    pub const fn bytes(self) -> usize {
+        (self.tokens as usize).saturating_mul(BYTES_PER_TOKEN as usize)
+    }
 }
 
 impl ToolSpec {
@@ -82,7 +161,16 @@ impl ToolSpec {
             input_schema: input_schema.into(),
             replay_safe: false,
             read_only: false,
+            result: None,
         }
+    }
+
+    /// Say how much of the model's context one result should take at most, in tokens, and
+    /// which part of a longer one is kept. See [`ResultBudget`].
+    #[must_use]
+    pub const fn result(mut self, tokens: u32, keep: Keep) -> Self {
+        self.result = Some(ResultBudget::new(tokens, keep));
+        self
     }
 
     /// Say whether calling the tool twice is the same as calling it once, so that a call

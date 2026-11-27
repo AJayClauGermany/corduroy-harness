@@ -10,6 +10,15 @@ interface types {
         failed(string),
     }
 
+    /// Something more said about a tool or a plugin, by name. The names a host knows are
+    /// listed where the list is used; a host ignores a name it does not know, so a later
+    /// world says more here without changing a record.
+    record named-value {
+        name: string,
+        /// The value as text: a word, a number in decimal, or JSON text where it has parts.
+        value: string,
+    }
+
     /// How a tool presents itself to the model.
     record tool-spec {
         name: string,
@@ -22,6 +31,14 @@ interface types {
         /// Whether the tool only looks and never changes anything. Gates may let such a
         /// call through where they would ask about one that writes.
         read-only: bool,
+        /// Whatever else the tool says about itself. Known names:
+        ///
+        /// * `result-tokens`: the most one result should take of the model's context, in
+        ///   tokens, counted as three bytes of text to a token. The host cuts a longer
+        ///   result to it, and to less for a model that holds little.
+        /// * `result-keep`: which part of a result too long is kept: `head` (the start),
+        ///   `tail` (the end) or `ends` (both, with the middle left out). `ends` if unsaid.
+        more: list<named-value>,
     }
 
     /// Why a tool call failed. Shown to the model so it can recover.
@@ -121,6 +138,8 @@ interface types {
         gates: list<string>,
         /// Services this plugin answers through `handle-call`, by name.
         provides: list<string>,
+        /// Whatever else the plugin says about itself. No name is known yet.
+        more: list<named-value>,
     }
 }
 
@@ -395,6 +414,12 @@ interface session {
     /// Whether the run being served was asked to stop. A tool that takes long looks now and
     /// then and returns early when it was; what it returns is still recorded.
     stopping: func() -> bool;
+    /// The most the result of the tool call being served should take of the model's
+    /// context, in tokens counted as three bytes of text to a token: the tool's own
+    /// `result-tokens`, or less for a model that holds little. `none` when no call is
+    /// served or nothing bounds it. The host cuts a longer result itself; a tool that asks
+    /// can choose what to leave out.
+    result-budget: func() -> option<u32>;
 }
 
 /// A plugin. Every import is a capability the host must grant before the plugin is

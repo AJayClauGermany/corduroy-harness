@@ -38,7 +38,7 @@ through. See [Grants](agent-file.md#grants) for how to write one in the agent fi
 | `secret` | an opaque handle to a named credential, never its value | secret name | `"github"` |
 | `http` | an HTTP request through the host's client, which writes credentials in and follows no redirects | host name | `"api.github.com"` |
 | `log-read` | read events of any session, by topic, in pages of up to 1000 | `<session>:<topic>` (session percent-encodes `%` and `:`; empty for harness events) | `["*:message", "*:session/start"]` |
-| `session` | which session and tool call it is serving, and whether the run was asked to stop | session id | `"*"` |
+| `session` | which session and tool call it is serving, whether the run was asked to stop, and how much the call's result may take | session id | `"*"` |
 
 Whatever a grant says:
 

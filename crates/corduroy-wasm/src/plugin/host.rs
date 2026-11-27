@@ -349,6 +349,32 @@ impl session::Host for HostState {
     fn stopping(&mut self) -> bool {
         corduroy_core::call::stopping()
     }
+
+    fn result_budget(&mut self) -> Option<u32> {
+        corduroy_core::call::budget()
+    }
+}
+
+/// The name under which a tool says how many tokens one result should take at most.
+pub(super) const RESULT_TOKENS: &str = "result-tokens";
+/// The name under which a tool says which part of a longer result is kept.
+pub(super) const RESULT_KEEP: &str = "result-keep";
+
+/// What the core's `spec` says beyond the record's own fields, as the world's named values.
+fn more(spec: &corduroy_core::ToolSpec) -> Vec<types::NamedValue> {
+    let Some(result) = spec.result else {
+        return Vec::new();
+    };
+    vec![
+        types::NamedValue {
+            name: RESULT_TOKENS.to_owned(),
+            value: result.tokens.to_string(),
+        },
+        types::NamedValue {
+            name: RESULT_KEEP.to_owned(),
+            value: result.keep.as_str().to_owned(),
+        },
+    ]
 }
 
 impl random::Host for HostState {
@@ -472,6 +498,7 @@ impl tools::Host for HostState {
             .into_iter()
             .filter(|spec| self.grants.check("tools", &spec.name).is_ok())
             .map(|spec| ToolSpec {
+                more: more(&spec),
                 name: spec.name,
                 description: spec.description,
                 input_schema: spec.input_schema,

@@ -73,16 +73,22 @@ fn a_plugin_learns_the_session_and_call_it_serves() {
 
     assert_eq!(
         outside,
-        json!({"current": null, "call": null, "stopping": false})
+        json!({"current": null, "call": null, "stopping": false, "budget": null})
     );
     assert_eq!(
         inside.unwrap(),
-        json!({"current": "main/1", "call": "call-7", "stopping": false})
+        json!({"current": "main/1", "call": "call-7", "stopping": false, "budget": null})
     );
     assert_eq!(
         rendering.unwrap(),
-        json!({"current": "main", "call": null, "stopping": false})
+        json!({"current": "main", "call": null, "stopping": false, "budget": null})
     );
+    // A call that was told what its result may take can ask.
+    let bounded = Serve::session(SessionId::new("main"))
+        .call("call-8")
+        .budget(2048);
+    let (told, _) = bounded.run(|| asked(&host));
+    assert_eq!(told.unwrap()["budget"], 2048);
 }
 
 #[test]
