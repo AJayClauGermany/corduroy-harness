@@ -209,6 +209,18 @@ fn a_prompt_runs_through_a_real_provider_tools_and_a_person_answering_the_gate()
     }
 }
 
+/// Start `corduroy` in `workspace` with `args` and somebody at its terminal: what they
+/// type and what it says are the child's pipes.
+fn attended(workspace: &Path, args: &[&str]) -> std::io::Result<std::process::Child> {
+    Command::new(env!("CARGO_BIN_EXE_corduroy"))
+        .arg("--workspace")
+        .arg(workspace)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+}
+
 /// Where `line` says the agent's page is: `127.0.0.1:<port>`, and the token of its address.
 fn page_at(line: &str) -> Option<(String, String)> {
     let address = line
@@ -218,20 +230,118 @@ fn page_at(line: &str) -> Option<(String, String)> {
     Some((parts.next()?.to_owned(), parts.next()?.to_owned()))
 }
 
-/// Allow the call `call_1` of the session `main` on the page at `host`, as its browser
-/// would, and return the status line of the answer.
-fn allow_on_page(host: &str, token: &str) -> std::io::Result<String> {
-    let body = json!({"session": "main", "call": "call_1", "allow": true}).to_string();
+/// Post `body` to `what` of the page at `host`, as its browser would, and return the status
+/// line of the answer.
+fn post_to_page(host: &str, token: &str, what: &str, body: &Value) -> std::io::Result<String> {
+    let body = body.to_string();
     let mut stream = TcpStream::connect(host)?;
     write!(
         stream,
-        "POST /{token}/answer HTTP/1.1\r\nHost: {host}\r\nOrigin: http://{host}\r\n\
+        "POST /{token}/{what} HTTP/1.1\r\nHost: {host}\r\nOrigin: http://{host}\r\n\
          Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     )?;
     let mut answered = String::new();
     stream.read_to_string(&mut answered)?;
     Ok(answered.lines().next().unwrap_or_default().to_owned())
+}
+
+/// Allow the call `call_1` of the session `main` on the page at `host`.
+fn allow_on_page(host: &str, token: &str) -> std::io::Result<String> {
+    let allow = json!({"session": "main", "call": "call_1", "allow": true});
+    post_to_page(host, token, "answer", &allow)
+}
+
+/// Say `text` to the session `main` on the page at `host`, once the session is free: a run
+/// that has said its last word has not quite ended. Returns the status line of the answer.
+fn say_on_page(host: &str, token: &str, text: &str) -> std::io::Result<String> {
+    let said = json!({"session": "main", "text": text});
+    let mut answered = String::new();
+    for _ in 0..100 {
+        answered = post_to_page(host, token, "say", &said)?;
+        if !answered.contains("409") {
+            break;
+        }
+        thread::sleep(std::time::Duration::from_millis(50));
+    }
+    Ok(answered)
+}
+
+/// The lines `lines` gives up to and including the first for which `last` holds.
+fn said_until(
+    lines: &mut impl Iterator<Item = std::io::Result<String>>,
+    last: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    let mut said = Vec::new();
+    for line in lines.map_while(Result::ok) {
+        let done = last(&line);
+        said.push(line);
+        if done {
+            break;
+        }
+    }
+    said
+}
+
+#[test]
+fn a_prompt_typed_on_the_page_runs_in_the_conversation_and_a_stop_ends_what_waits() {
+    let workspace = scratch("cli-page-say");
+    let plugins = plugin("pi-tools").parent().unwrap().to_owned();
+    let target = workspace.join("hello.txt");
+    let (address, _seen) = model(vec![
+        answer("hello from the model"),
+        tool_call("write", &json!({"path": target, "content": "hi\n"})),
+    ])
+    .unwrap();
+    let agent = format!(
+        "{}\n[extensions.page]\nkind = \"page\"\n",
+        agent_file(address, &plugins)
+    );
+    fs::write(workspace.join("corduroy.toml"), agent).unwrap();
+    // A conversation, with somebody at the terminal who types nothing.
+    let mut child = attended(&workspace, &[]).unwrap();
+    let terminal = child.stdin.take().unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let mut said = said_until(&mut lines, |line| line.contains("type a prompt"));
+    let (host, token) = said.iter().find_map(|line| page_at(line)).unwrap();
+
+    let sent = say_on_page(&host, &token, "say hello").unwrap();
+    assert!(sent.contains("200"), "{sent}");
+    said.extend(said_until(&mut lines, |line| {
+        line.contains("hello from the model")
+    }));
+    let sent = say_on_page(&host, &token, "write a file").unwrap();
+    assert!(sent.contains("200"), "{sent}");
+    said.extend(said_until(&mut lines, |line| line.contains("allow?")));
+    // While the question waits the session takes no prompt, and the run can be stopped.
+    let hello = json!({"session": "main", "text": "hello?"});
+    let busy = post_to_page(&host, &token, "say", &hello).unwrap();
+    assert!(busy.contains("409"), "{busy}");
+    let stop = json!({"session": "main"});
+    let stopped = post_to_page(&host, &token, "stop", &stop).unwrap();
+    assert!(stopped.contains("200"), "{stopped}");
+    // The terminal, which was waiting for an answer, says the run has ended, with nothing
+    // typed at it: this line comes while its input is still open.
+    said.extend(said_until(&mut lines, |line| line == "stopped"));
+
+    // The person leaves: the end of what they type.
+    drop(terminal);
+    said.extend(lines.map_while(Result::ok));
+    assert!(child.wait().unwrap().success(), "{said:?}");
+    let said = said.join("\n");
+    for line in [
+        "say hello (typed on page)",
+        "write a file (typed on page)",
+        "■ stopping, as asked on page",
+    ] {
+        assert!(said.contains(line), "{line} missing from\n{said}");
+    }
+    assert!(!target.exists(), "the call that was asked about ran");
+    let log = text(&corduroy(&workspace, &["log"], "").unwrap().stdout);
+    assert!(
+        log.contains(r#""status":"stopped""#) && !log.contains(&token),
+        "{log}"
+    );
 }
 
 #[test]
@@ -249,14 +359,7 @@ fn a_gates_question_is_answered_on_the_page_while_the_terminal_waits() {
         agent_file(address, &plugins)
     );
     fs::write(workspace.join("corduroy.toml"), agent).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_corduroy"))
-        .arg("--workspace")
-        .arg(&workspace)
-        .args(["run", "say", "hi", "in", "a", "file"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child = attended(&workspace, &["run", "say", "hi", "in", "a", "file"]).unwrap();
     // Somebody is at the terminal, and types nothing.
     let terminal = child.stdin.take().unwrap();
     let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();

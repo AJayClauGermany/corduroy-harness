@@ -78,7 +78,7 @@
       const old = state.index;
       const again =
         !old || old.generation !== index.generation || index.chunks < old.chunks || index.last < old.last;
-      if (!again && old.last === index.last && old.behind === index.behind) {
+      if (!again && old.last === index.last && old.behind === index.behind && old.heard === index.heard) {
         tick();
         return;
       }
@@ -475,26 +475,92 @@
     }
   }
 
+  /**
+   * Post `body` to `what` of corduroy (`answer`, `say` or `stop`), which records it and
+   * returns. Resolves to what went wrong, in words to show, or to nothing.
+   */
+  async function post(what, body) {
+    try {
+      const sent = await fetch(what, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (sent.status === 403) return 'this page is from an earlier run: open the address corduroy says now';
+      if (!sent.ok) return (await sent.json().catch(() => ({}))).error || `corduroy answered ${sent.status}`;
+      return '';
+    } catch (error) {
+      return 'corduroy is not running: do it once it is, in its terminal or on its new page';
+    }
+  }
+
   /** Send the person's answer to a gate's question to corduroy, which records it. */
   async function answer(key, session, call, allow) {
     const reason = allow ? '' : (state.reasons.get(key) || '');
-    let trouble = '';
-    try {
-      const sent = await fetch('answer', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session, call, allow, reason }),
-      });
-      if (sent.status === 403) trouble = 'this page is from an earlier run: open the address corduroy says now';
-      else if (!sent.ok) trouble = (await sent.json().catch(() => ({}))).error || `corduroy answered ${sent.status}`;
-    } catch (error) {
-      trouble = 'corduroy is not running: answer once it is, in its terminal or on its new page';
-    }
+    const trouble = await post('answer', { session, call, allow, reason });
     if (trouble) state.trouble.set(key, trouble);
     else state.trouble.delete(key);
     state.asked = '';
     await poll();
     draw();
+  }
+
+  /**
+   * The box a prompt is typed in and the button that stops a run, under a session. Built
+   * once and changed in place, so that what is being typed is not lost when the page draws
+   * again.
+   */
+  function composer() {
+    if (state.composer) return state.composer;
+    const parts = { session: null, trouble: '' };
+    const act = async (what, body) => {
+      parts.trouble = await post(what, body);
+      if (!parts.trouble && what === 'say') parts.text.value = '';
+      await poll();
+      draw();
+    };
+    const send = () => {
+      if (parts.text.value.trim() && !parts.text.disabled) act('say', { session: parts.session, text: parts.text.value });
+    };
+    parts.text = h('textarea', {
+      rows: 2, 'aria-label': 'A prompt for the agent',
+      onkeydown: (pressed) => {
+        if (pressed.key !== 'Enter' || pressed.shiftKey || pressed.isComposing) return;
+        pressed.preventDefault();
+        send();
+      },
+    });
+    parts.send = h('button', { class: 'send', onclick: send }, 'Send');
+    parts.stop = h('button', { class: 'stop', onclick: () => act('stop', { session: parts.session }) }, 'Stop');
+    parts.note = h('div', { class: 'note' });
+    fill(document.getElementById('composer'), h('div', { class: 'row' }, parts.text, parts.send, parts.stop), parts.note);
+    state.composer = parts;
+    return parts;
+  }
+
+  /** Show the composer for the session `s`, as far as it can be said something or stopped. */
+  function drawComposer(s) {
+    const box = document.getElementById('composer');
+    // A sub-agent is spoken to by the agent that started it.
+    box.hidden = !SERVED || !s || Boolean(s.parent);
+    if (box.hidden) return;
+    const parts = composer();
+    if (parts.session !== s.id) parts.trouble = '';
+    parts.session = s.id;
+    const busy = ['running', 'asking', 'waiting', 'unfinished'].includes(s.status);
+    const heard = Boolean(state.index && state.index.heard);
+    parts.text.disabled = busy || !heard;
+    parts.send.disabled = busy || !heard;
+    parts.stop.hidden = !busy;
+    if (busy) parts.text.placeholder = 'the agent is working: Stop ends the run';
+    else if (heard) parts.text.placeholder = `say something to ${s.id}: Enter sends, Shift+Enter is a new line`;
+    else parts.text.placeholder = 'prompts are typed in the terminal';
+    let note = '';
+    if (parts.trouble) note = parts.trouble;
+    else if (s.status === 'asking') note = 'A gate asks about a tool call: answer in the bar at the top, or stop the run.';
+    else if (!heard && !busy) note = 'This corduroy runs one prompt and leaves. Started with no command it is a conversation, and prompts can be typed here.';
+    parts.note.textContent = note;
+    parts.note.className = `note ${parts.trouble ? 'trouble' : 'quiet'}`;
   }
 
   /** What a question is answered with: here if the page is served, else where to go. */
@@ -704,7 +770,7 @@
       s.status === 'asking' && !SERVED ? h('div', { class: 'end warn' }, 'A gate asks you about the call above, and the run waits. This page only shows: answer in the terminal where corduroy runs, or run ', h('code', null, 'corduroy continue'), ' in this workspace to be asked again.') : null,
       s.status === 'unfinished' ? h('div', { class: 'end warn' }, 'This run was cut short. ', h('code', null, 'corduroy continue'), ' picks it up; ', h('code', null, 'corduroy stop'), ' ends it.') : null,
     );
-    return { id: s.id };
+    return { id: s.id, session: s };
   }
 
   function drawProblems(main) {
@@ -814,7 +880,9 @@
     if (current.view === 'problems') drawProblems(main);
     else if (current.view === 'agent') drawAgent(main);
     else if (current.view === 'events') drawEvents(main);
-    else shownSession = drawSession(main, current).id;
+    else shownSession = drawSession(main, current);
+    drawComposer(shownSession && shownSession.session);
+    shownSession = shownSession && shownSession.id;
     drawNav({ view: current.view, id: shownSession });
     drawAsks();
     const process = state.model.agent.processes[state.model.agent.processes.length - 1];

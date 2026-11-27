@@ -23,6 +23,17 @@ const STYLE: &str = include_str!("../../../../plugins/viewer/page/style.css");
 const FILE_POLICY: &str = "default-src 'none'; script-src 'self' file:; style-src 'self' file:; \
                            base-uri 'none'; form-action 'none'";
 
+/// What the page is served under its address, besides the chunks of events.
+const FILES: [&str; 8] = [
+    "",
+    "index.html",
+    "app.js",
+    "style.css",
+    "index.js",
+    "answer",
+    "say",
+    "stop",
+];
 /// The format of the scripts, which the page checks: the `viewer` add-on's.
 const FORMAT: u32 = 1;
 /// Events to a chunk, by id: chunk 0 holds ids 1 to 200.
@@ -75,6 +86,32 @@ fn same(given: &str, token: &str) -> bool {
             .zip(token.bytes())
             .fold(0, |differ, (a, b)| differ | (a ^ b))
             == 0
+}
+
+/// The answer to a request that did not say what it has to.
+fn wanted(what: &str) -> Response {
+    Response::json(400, &json!({"error": what}))
+}
+
+/// The answer to something the page asked to have recorded: `recorded`, or why not, in
+/// words the page shows.
+fn done(recorded: Result<Value, HarnessError>) -> Response {
+    let error = match recorded {
+        Ok(recorded) => return Response::json(200, &recorded),
+        Err(error) => error,
+    };
+    let (status, said) = match &error {
+        HarnessError::NotAsked { .. } => {
+            (409, format!("{error}: it may have been answered already"))
+        }
+        HarnessError::UnknownSession(_) => (404, error.to_string()),
+        // A run is under way, or the host does not take what was asked.
+        HarnessError::Waiting(_) | HarnessError::Unfinished(_) | HarnessError::Run(_) => {
+            (409, error.to_string())
+        }
+        _ => (500, error.to_string()),
+    };
+    Response::json(status, &json!({"error": said}))
 }
 
 /// `event` as the page reads it: its fields, with its payload as the JSON it is, or as
@@ -154,6 +191,8 @@ impl Served {
             "last": last,
             "events": self.events.len(),
             "behind": false,
+            // Whether a message typed on the page would be run.
+            "heard": self.outside.is_heard(),
         });
         Response::new(200, "text/javascript", format!("corduroyIndex({index});\n"))
     }
@@ -174,29 +213,32 @@ impl Served {
         Response::new(200, "text/javascript", script)
     }
 
-    /// Record the answer `request` holds, as the person's, given through this page.
-    fn answer(&self, request: &Request) -> Response {
+    /// What `request`, posted by the page, holds: JSON, from this page and no other.
+    fn posted(&self, request: &Request) -> Result<Value, Response> {
         // A page other than this one cannot say it is this one: the browser says.
         if !self.is_us(request.header("origin")) {
-            return Response::plain(403, "an answer is taken from the page only");
+            return Err(Response::plain(403, "this is taken from the page only"));
         }
         let json = request
             .header("content-type")
             .is_some_and(|kind| kind.to_ascii_lowercase().starts_with("application/json"));
-        let asked: Option<Value> = json
-            .then(|| serde_json::from_slice(&request.body).ok())
-            .flatten();
-        let read = asked.as_ref().and_then(|asked| {
+        json.then(|| serde_json::from_slice(&request.body).ok())
+            .flatten()
+            .ok_or_else(|| Response::json(400, &json!({"error": "the page posts JSON"})))
+    }
+
+    /// Record the answer `asked` holds, as the person's, given through this page.
+    fn answer(&self, asked: &Value) -> Response {
+        let read = (|| {
             Some((
                 asked.get("session")?.as_str()?,
                 asked.get("call")?.as_str()?,
                 asked.get("allow")?.as_bool()?,
                 asked.get("reason").and_then(Value::as_str).unwrap_or(""),
             ))
-        });
+        })();
         let Some((session, call, allow, reason)) = read else {
-            let wanted = "an answer is JSON: {\"session\", \"call\", \"allow\", \"reason\"}";
-            return Response::json(400, &json!({"error": wanted}));
+            return wanted("an answer is {\"session\", \"call\", \"allow\", \"reason\"}");
         };
         let answer = match (allow, reason.trim()) {
             (true, _) => Answer::Allow,
@@ -206,16 +248,35 @@ impl Served {
         let recorded = self
             .outside
             .answer(&self.name, &SessionId::new(session), call, &answer);
-        match recorded {
-            Ok(()) => Response::json(200, &json!({"ok": true})),
-            Err(error @ HarnessError::NotAsked { .. }) => {
-                let said = format!("{error}: it may have been answered already");
+        done(recorded.map(|()| json!({"ok": true})))
+    }
+
+    /// Record what `asked` holds as said to a session by the person, through this page.
+    fn say(&self, asked: &Value) -> Response {
+        let read = (|| {
+            Some((
+                asked.get("session")?.as_str()?,
+                asked.get("text")?.as_str()?,
+            ))
+        })();
+        let Some((session, text)) = read else {
+            return wanted("a message is {\"session\", \"text\"}");
+        };
+        let said = self.outside.say(&self.name, &SessionId::new(session), text);
+        done(said.map(|()| json!({"ok": true})))
+    }
+
+    /// Ask the run of the session `asked` names to stop, through this page.
+    fn stop(&self, asked: &Value) -> Response {
+        let Some(session) = asked.get("session").and_then(Value::as_str) else {
+            return wanted("a stop is {\"session\"}");
+        };
+        match self.outside.stop(&self.name, &SessionId::new(session)) {
+            Ok(false) => {
+                let said = format!("`{session}` has no run to stop");
                 Response::json(409, &json!({"error": said}))
             }
-            Err(error @ HarnessError::UnknownSession(_)) => {
-                Response::json(404, &json!({"error": error.to_string()}))
-            }
-            Err(error) => Response::json(500, &json!({"error": error.to_string()})),
+            stopped => done(stopped.map(|_| json!({"ok": true}))),
         }
     }
 
@@ -247,9 +308,15 @@ impl Served {
             ("GET", "style.css", _) => Response::new(200, "text/css", STYLE),
             ("GET", "index.js", _) => self.index(),
             ("GET", _, Some(number)) => self.chunk(number),
-            ("POST", "answer", _) => self.answer(request),
-            (_, "" | "index.html" | "app.js" | "style.css" | "index.js" | "answer", _)
-            | (_, _, Some(_)) => Response::plain(405, "not that way"),
+            ("POST", "answer" | "say" | "stop", _) => match (self.posted(request), rest) {
+                (Err(refused), _) => refused,
+                (Ok(asked), "answer") => self.answer(&asked),
+                (Ok(asked), "say") => self.say(&asked),
+                (Ok(asked), _) => self.stop(&asked),
+            },
+            (_, file, chunk) if chunk.is_some() || FILES.contains(&file) => {
+                Response::plain(405, "not that way")
+            }
             _ => Response::plain(404, "the page has no such file"),
         }
     }

@@ -2,11 +2,11 @@
 //!
 //! The `viewer` add-on writes the record as a page of files, which shows and cannot be
 //! answered through: an add-on has no way to listen. This is the same page, served, so
-//! that a gate's question can be answered on it. It listens on a socket, so it is an
+//! that a gate's question can be answered on it, a prompt typed, and a run stopped. It listens on a socket, so it is an
 //! extension: [`page`] is the plugin, and `[extensions.<name>] kind = "page"` in an agent
 //! file turns it on.
 //!
-//! It drives nothing. An answer given on the page is recorded through
+//! It drives nothing. What is done on the page (an answer, a message, a stop) is recorded through
 //! [`Outside`](corduroy_harness::Outside) and the request returns; the host, which drives
 //! the runs, takes the run on. It is a [`Front`](corduroy_harness::Front): the host opens it
 //! when it is about to drive runs, and shows the person its address.
@@ -23,8 +23,8 @@
 //! * an answer has to come from the page itself, as the browser says, and as JSON;
 //! * the page is told to load and reach nothing but what is served beside it.
 //!
-//! What it speaks (the scripts the page loads, and `POST answer`) is its own and the
-//! page's, and promised to nobody else.
+//! What it speaks (the scripts the page loads, and `POST answer`, `say` and `stop`) is its
+//! own and the page's, and promised to nobody else.
 
 #![expect(
     clippy::multiple_crate_versions,

@@ -132,10 +132,32 @@ fn stopped(reason: &str) -> Option<&'static str> {
     }
 }
 
+/// How an answer or a stop given at a front end is shown. One typed here needs no line.
+fn given_elsewhere(topic: &str, payload: &Value) -> Option<String> {
+    let via = field(payload, "via");
+    if via.is_empty() {
+        return None;
+    }
+    match topic {
+        "gate/answer" if payload.get("allow") == Some(&Value::Bool(true)) => {
+            Some(format!("  ✓ allowed on {via}"))
+        }
+        "gate/answer" => Some(format!(
+            "  ✗ refused on {via}: {}",
+            field(payload, "reason")
+        )),
+        "run/stop" => Some(format!("■ stopping, as asked on {via}")),
+        _ => None,
+    }
+}
+
 /// How `event` is shown, if it is shown at all.
 #[must_use]
 pub fn describe(event: &Event) -> Option<String> {
     let payload: Value = serde_json::from_str(&event.payload).unwrap_or(Value::Null);
+    if let Some(given) = given_elsewhere(&event.topic, &payload) {
+        return Some(given);
+    }
     match event.topic.as_str() {
         "message" if event.source == Source::Agent => {
             let text = decode(&event.payload).ok()?.text_content();
@@ -160,15 +182,6 @@ pub fn describe(event: &Event) -> Option<String> {
             } else {
                 Some(format!("  ✗ {}", short(output, 200)))
             }
-        }
-        // An answer typed here needs no line; one given elsewhere does.
-        "gate/answer" if !field(&payload, "via").is_empty() => {
-            let (via, reason) = (field(&payload, "via"), field(&payload, "reason"));
-            Some(if payload.get("allow") == Some(&Value::Bool(true)) {
-                format!("  ✓ allowed on {via}")
-            } else {
-                format!("  ✗ refused on {via}: {reason}")
-            })
         }
         "gate/decision" if field(&payload, "verdict") == "deny" => Some(format!(
             "  ✗ denied by {}: {}",
@@ -249,7 +262,8 @@ async fn hear(harness: &Harness, ask: &Ask, input: &mut Lines, answered: &Notify
         }
         tokio::select! {
             line = input.next() => return line.map_or(Heard::Nobody, Heard::Typed),
-            // Some question was answered: look again whether it was this one.
+            // Some question was answered, or a run ended: look again whether this one
+            // still waits.
             () = answered.notified() => {}
         }
     }
@@ -272,13 +286,20 @@ pub async fn settle(
     input: &mut Lines,
     out: &Out,
 ) -> Result<Outcome, HarnessError> {
+    // An answer, or the end of the run, which a stop asked for at a front end brings and
+    // which takes the run's questions with it. Not the stop itself: it is recorded before
+    // the run has ended, when the question still waits.
     let answered = Arc::new(Notify::new());
-    let heard = Arc::clone(&answered);
-    let listener = harness
-        .events()
-        .subscribe("gate/answer", move |_| heard.notify_one());
+    let listeners = ["gate/answer", "turn/end"].map(|topic| {
+        let heard = Arc::clone(&answered);
+        harness
+            .events()
+            .subscribe(topic, move |_| heard.notify_one())
+    });
     let settled = ask_each(harness, outcome, input, out, &answered).await;
-    harness.events().unsubscribe(listener);
+    for listener in listeners {
+        harness.events().unsubscribe(listener);
+    }
     settled
 }
 
@@ -324,10 +345,10 @@ async fn ask_each(
         };
         outcome = match typed {
             Some(Ok(outcome)) => outcome,
-            // Answered at a front end, perhaps in the moment the line was typed: the run
-            // is taken on from what the log holds.
+            // Answered at a front end, perhaps in the moment the line was typed, or the
+            // run was stopped there: it is taken on from what the log holds.
             None | Some(Err(HarnessError::NotAsked { .. })) => {
-                stoppable(harness, session, harness.answered(session)).await?
+                stoppable(harness, session, harness.take_on(session)).await?
             }
             Some(Err(error)) => return Err(error),
         };
@@ -388,6 +409,101 @@ pub async fn prompt(
         return Ok(outcome);
     }
     let outcome = stoppable(harness, session, harness.run_in(session, prompt)).await?;
+    settle(harness, outcome, input, out).await
+}
+
+/// Something said to a session at a front end.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Message {
+    /// The session it was said to.
+    pub session: SessionId,
+    /// What was said.
+    pub text: String,
+    /// The plugin it was given through.
+    pub via: String,
+}
+
+/// What is said to sessions from outside the terminal, at a front end, as it is recorded.
+///
+/// Such a message is in the log already, and the run it began waits for the host to take it
+/// on ([`taken_on`]). The terminal listens while it waits for the person to type.
+#[derive(Debug)]
+pub struct Said {
+    listener: ListenerId,
+    told: Arc<Notify>,
+    waiting: Arc<Mutex<Vec<Message>>>,
+}
+
+impl Said {
+    /// Listen on `harness` for what is said from outside, and tell it that such messages
+    /// are taken on here ([`Harness::takes_messages`]).
+    #[must_use]
+    pub fn listen(harness: &Harness) -> Self {
+        let told = Arc::new(Notify::new());
+        let waiting = Arc::new(Mutex::new(Vec::new()));
+        let (tell, kept) = (Arc::clone(&told), Arc::clone(&waiting));
+        let listener = harness.events().subscribe("message", move |event| {
+            let payload: Value = serde_json::from_str(&event.payload).unwrap_or(Value::Null);
+            // A message typed here names nothing it came through.
+            let (Some(session), via) = (&event.session, field(&payload, "via")) else {
+                return;
+            };
+            if event.source != Source::User || via.is_empty() {
+                return;
+            }
+            let message = Message {
+                session: session.clone(),
+                text: decode(&event.payload)
+                    .map_or_else(|_| String::new(), |said| said.text_content()),
+                via: via.to_owned(),
+            };
+            kept.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(message);
+            tell.notify_one();
+        });
+        harness.takes_messages(true);
+        Self {
+            listener,
+            told,
+            waiting,
+        }
+    }
+
+    /// The next thing said from outside, waiting for one if there is none.
+    pub async fn next(&self) -> Message {
+        loop {
+            let first = {
+                let mut waiting = self.waiting.lock().unwrap_or_else(PoisonError::into_inner);
+                (!waiting.is_empty()).then(|| waiting.remove(0))
+            };
+            if let Some(message) = first {
+                return message;
+            }
+            self.told.notified().await;
+        }
+    }
+
+    /// Stop listening: `harness` takes no more messages from outside.
+    pub fn close(self, harness: &Harness) {
+        harness.takes_messages(false);
+        harness.events().unsubscribe(self.listener);
+    }
+}
+
+/// Take on the run of `session` that something recorded from outside began or let go on (a
+/// message said at a front end, say), and answer what the gates ask.
+///
+/// # Errors
+///
+/// As [`Harness::take_on`].
+pub async fn taken_on(
+    harness: &Harness,
+    session: &SessionId,
+    input: &mut Lines,
+    out: &Out,
+) -> Result<Outcome, HarnessError> {
+    let outcome = stoppable(harness, session, harness.take_on(session)).await?;
     settle(harness, outcome, input, out).await
 }
 

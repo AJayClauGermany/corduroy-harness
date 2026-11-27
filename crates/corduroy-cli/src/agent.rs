@@ -683,11 +683,12 @@ kind = "{{kind}}"   # anthropic, openai, ollama, *-compatible, or a provider oi-
 kind = "{{shell}}"      # a persistent shell in {workspace}: shell (sh) or powershell
 
 # The agent's page in a browser, served on this machine while corduroy runs: what the agent
-# does as it does it, and Allow and Refuse for what a gate asks. corduroy says the address
-# when it starts. It is a new one each time, and whoever has it is let in. Remove this
-# entry to serve nothing; port = 4747 keeps the port the same.
-[extensions.page]
-kind = "page"
+# does as it does it, Allow and Refuse for what a gate asks, a box to type a prompt in and
+# a button that stops a run. Take the # off the two lines below to turn it on. corduroy
+# then says the address when it starts: a new one each time, which lets in whoever has it.
+# A third line, port = 4747, keeps the port the same.
+# [extensions.page]
+# kind = "page"
 
 # read, write, edit and bash, within the workspace. The agent file and the log are out of
 # reach whatever this says.
@@ -806,9 +807,10 @@ path = "compact.wasm"
 config = { model = "main/{{model}}" }
 grants = { llm = "main/{{model}}" }
 
-# The same page as files, for when corduroy is not running: open
-# {data}/viewer/index.html in a browser. It shows and cannot be answered on. The directory
-# holds a copy of the log, so set enabled = false if nothing should hold one.
+# The log as a page, written as files: open {data}/viewer/index.html in a browser to see
+# each session's conversation, tool calls, timings, tokens and what went wrong, following a
+# run as it goes. It shows and cannot be answered on: for that, turn on the page above. The
+# directory holds a copy of the log, so set enabled = false if nothing should hold one.
 [[plugins]]
 name = "viewer"
 path = "viewer.wasm"

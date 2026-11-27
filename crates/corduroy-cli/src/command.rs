@@ -669,14 +669,35 @@ async fn chat(
     if started {
         ends.end(&outcome.status);
     }
+    // What is typed on the agent's page, say, begins a run as what is typed here does.
+    let said = terminal::Said::listen(harness);
     loop {
         say_prompt(out);
-        let Some(line) = input.next().await else {
-            return Ok(ExitCode::SUCCESS);
+        let line = tokio::select! {
+            line = input.next() => Ok(line),
+            message = said.next() => Err(message),
+        };
+        let line = match line {
+            Ok(Some(line)) => line,
+            Ok(None) => break,
+            Err(message) => {
+                let within = if message.session == session {
+                    String::new()
+                } else {
+                    format!("[{}] ", message.session)
+                };
+                say(
+                    out,
+                    &format!("{within}{} (typed on {})", message.text, message.via),
+                );
+                let outcome = terminal::taken_on(harness, &message.session, input, out).await?;
+                ends.end(&outcome.status);
+                continue;
+            }
         };
         match typed(line.trim(), harness, &session, out) {
             Typed::Nothing => {}
-            Typed::Exit => return Ok(ExitCode::SUCCESS),
+            Typed::Exit => break,
             Typed::Switch(name) => {
                 let next = SessionId::new(name);
                 if !harness.session_list().iter().any(|info| info.id == next) {
@@ -692,6 +713,8 @@ async fn chat(
             }
         }
     }
+    said.close(harness);
+    Ok(ExitCode::SUCCESS)
 }
 
 fn say_prompt(out: &Out) {

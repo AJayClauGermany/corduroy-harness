@@ -114,10 +114,15 @@ impl Open {
 
     /// Post `body` as an answer, saying it comes from the page at `origin`.
     fn answer(&self, origin: Option<&str>, body: &Value) -> Result<Got, Box<dyn Error>> {
+        self.post("answer", origin, body)
+    }
+
+    /// Post `body` to `what` of the page, saying it comes from the page at `origin`.
+    fn post(&self, what: &str, origin: Option<&str>, body: &Value) -> Result<Got, Box<dyn Error>> {
         let body = body.to_string();
         let origin = origin.map_or_else(String::new, |origin| format!("Origin: {origin}\r\n"));
         self.send(&format!(
-            "POST /{}/answer HTTP/1.1\r\nHost: {}\r\n{origin}Content-Type: application/json\r\n\
+            "POST /{}/{what} HTTP/1.1\r\nHost: {}\r\n{origin}Content-Type: application/json\r\n\
              Content-Length: {}\r\n\r\n{body}",
             self.token,
             self.host,
@@ -178,7 +183,10 @@ fn the_page_is_served_to_whoever_has_its_address_and_to_nobody_else() {
     }
 
     // Without the token, or with one that is nearly it, nothing says which was wrong.
-    let nearly = format!("/{}0/", open.token.chars().take(31).collect::<String>());
+    // All of the token but its last character, which is another one.
+    let other = if open.token.ends_with('0') { '1' } else { '0' };
+    let start: String = open.token.chars().take(31).collect();
+    let nearly = format!("/{start}{other}/");
     for path in ["/", "/index.html", "/app.js", nearly.as_str(), "/../"] {
         let got = open.get(path).unwrap();
         assert_eq!(got.status, 403, "{path}");
@@ -311,7 +319,7 @@ async fn an_answer_given_on_the_page_is_recorded_and_the_host_takes_the_run_on()
     assert_eq!(again.status, 409);
     assert!(again.body.contains("answered already"), "{}", again.body);
 
-    let outcome = open.harness.answered(&main).await.unwrap();
+    let outcome = open.harness.take_on(&main).await.unwrap();
     assert_eq!(
         outcome.status,
         Status::Finished {
@@ -319,6 +327,70 @@ async fn an_answer_given_on_the_page_is_recorded_and_the_host_takes_the_run_on()
         }
     );
     assert_eq!(open.runs.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_message_typed_on_the_page_begins_a_run_once_the_host_takes_them() {
+    let open = open([say("hello")]).unwrap();
+    let (main, origin) = (SessionId::new(MAIN), open.origin());
+    let hello = json!({"session": MAIN, "text": "say hello"});
+    let post = |what: &str, origin: Option<&str>, body: &Value| open.post(what, origin, body);
+
+    // A host that runs one prompt and leaves: the page says so, and takes no message.
+    let index = &handed(&open.file("index.js").unwrap().body, "corduroyIndex").unwrap()[0];
+    assert_eq!(index["heard"], json!(false));
+    let unheard = post("say", Some(&origin), &hello).unwrap();
+    assert_eq!(unheard.status, 409);
+    assert!(unheard.body.contains("nobody is here"), "{}", unheard.body);
+    open.harness.takes_messages(true);
+    let index = &handed(&open.file("index.js").unwrap().body, "corduroyIndex").unwrap()[0];
+    assert_eq!(index["heard"], json!(true));
+    assert_eq!(post("say", None, &hello).unwrap().status, 403);
+    assert_eq!(
+        post("say", Some(&origin), &json!({"text": "hi"}))
+            .unwrap()
+            .status,
+        400
+    );
+
+    assert_eq!(post("say", Some(&origin), &hello).unwrap().status, 200);
+
+    let said = &open.recorded("message")[0];
+    assert_eq!(said["parts"][0]["text"], json!("say hello"));
+    assert_eq!(said["via"], json!("page"));
+    // The run it began is the host's to take on; until it ends, the session is busy.
+    assert_eq!(post("say", Some(&origin), &hello).unwrap().status, 409);
+    let outcome = open.harness.take_on(&main).await.unwrap();
+    assert_eq!(
+        outcome.status,
+        Status::Finished {
+            answer: "hello".into()
+        }
+    );
+}
+
+#[tokio::test]
+async fn a_stop_asked_on_the_page_ends_a_run_that_waits() {
+    let open = open([call("c1", "poke", &json!({})), say("never said")]).unwrap();
+    let (main, origin) = (SessionId::new(MAIN), open.origin());
+    let stop = json!({"session": MAIN});
+    // Nothing to stop yet.
+    assert_eq!(open.post("stop", Some(&origin), &stop).unwrap().status, 409);
+    open.harness.run("poke it").await.unwrap();
+    assert_eq!(open.post("stop", None, &stop).unwrap().status, 403);
+
+    assert_eq!(open.post("stop", Some(&origin), &stop).unwrap().status, 200);
+
+    assert_eq!(open.recorded("run/stop")[0]["via"], json!("page"));
+    assert_eq!(open.recorded("turn/end")[0]["status"], json!("stopped"));
+    assert_eq!(open.runs.load(Ordering::SeqCst), 0);
+    let outcome = open.harness.take_on(&main).await.unwrap();
+    assert_eq!(outcome.status, Status::Stopped);
+    let nowhere = json!({"session": "nowhere"});
+    assert_eq!(
+        open.post("stop", Some(&origin), &nowhere).unwrap().status,
+        404
+    );
 }
 
 #[tokio::test]
@@ -335,11 +407,11 @@ async fn a_refusal_on_the_page_carries_its_reason_to_the_model() {
     open.harness.run("poke it").await.unwrap();
     let refuse = json!({"session": MAIN, "call": "c1", "allow": false, "reason": " not now "});
     assert_eq!(open.answer(Some(&origin), &refuse).unwrap().status, 200);
-    open.harness.answered(&main).await.unwrap();
+    open.harness.take_on(&main).await.unwrap();
     open.harness.run("poke it again").await.unwrap();
     let silent = json!({"session": MAIN, "call": "c2", "allow": false});
     assert_eq!(open.answer(Some(&origin), &silent).unwrap().status, 200);
-    open.harness.answered(&main).await.unwrap();
+    open.harness.take_on(&main).await.unwrap();
 
     let recorded = open.recorded("gate/answer");
     assert_eq!(recorded[0]["reason"], json!("not now"));
