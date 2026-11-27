@@ -183,11 +183,17 @@ pub fn describe(event: &Event) -> Option<String> {
                 Some(format!("  ✗ {}", short(output, 200)))
             }
         }
-        "gate/decision" if field(&payload, "verdict") == "deny" => Some(format!(
-            "  ✗ denied by {}: {}",
-            field(&payload, "gate"),
-            field(&payload, "reason")
-        )),
+        // A call of the agent's that a gate denied gets a `tool/result` saying so, which is
+        // shown; a plugin's own call and a load get none, so the decision is their line.
+        "gate/decision"
+            if field(&payload, "verdict") == "deny" && field(&payload, "caller") != "agent" =>
+        {
+            Some(format!(
+                "  ✗ denied by {}: {}",
+                field(&payload, "gate"),
+                field(&payload, "reason")
+            ))
+        }
         "capability/denied" => Some(format!(
             "  ! {} was refused `{}` on {}",
             field(&payload, "plugin"),
@@ -680,5 +686,24 @@ mod tests {
         assert_eq!(shown(Source::Agent, "usage", finished), None);
         let allowed = r#"{"verdict":"allow","gate":"approval","reason":""}"#;
         assert_eq!(shown(Source::Host, "gate/decision", allowed), None);
+    }
+
+    #[test]
+    fn a_denial_is_said_once() {
+        // The agent's call: the result that follows says who denied it and why.
+        let agents = r#"{"point":"tool/call","id":"1","tool":"bash","verdict":"deny","gate":"approval","reason":"no shell","caller":"agent"}"#;
+        assert_eq!(shown(Source::Host, "gate/decision", agents), None);
+        let result =
+            r#"{"id":"1","tool":"bash","ok":false,"output":"denied by gate `approval`: no shell"}"#;
+        assert_eq!(
+            shown(Source::Environment, "tool/result", result).as_deref(),
+            Some("  ✗ denied by gate `approval`: no shell")
+        );
+        // A plugin's call has no result on the stream, so the decision is shown.
+        let plugins = r#"{"point":"tool/call","id":"1","tool":"bash","verdict":"deny","gate":"approval","reason":"no shell","caller":"plugin:todo"}"#;
+        assert_eq!(
+            shown(Source::Host, "gate/decision", plugins).as_deref(),
+            Some("  ✗ denied by approval: no shell")
+        );
     }
 }

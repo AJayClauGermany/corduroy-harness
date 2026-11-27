@@ -22,7 +22,7 @@ use std::ops::ControlFlow;
 use std::sync::OnceLock;
 
 use corduroy_guest::host::fs_read;
-use corduroy_guest::{Plugin, PluginInfo, ToolError, ToolSpec, parse};
+use corduroy_guest::{HostError, Plugin, PluginInfo, ToolError, ToolSpec, parse};
 use regex::{Regex, RegexBuilder};
 use serde::Deserialize;
 
@@ -352,19 +352,23 @@ fn grep(input: &Grep) -> Result<String, ToolError> {
         files: 0,
         cut: false,
     };
-    if fs_read::list(root).is_ok() {
-        walk.each(&mut |file| {
+    match fs_read::list(root) {
+        Ok(_) => walk.each(&mut |file| {
             let passed_over = only.as_ref().is_some_and(|only| !only.matches(file))
                 || (root == "." && file == AGENT_FILE);
             if passed_over {
                 return ControlFlow::Continue(());
             }
             search.file(&join(root, file))
-        });
-    } else {
-        // Not a directory: one file, and what is wrong with it is the model's to hear.
-        fs_read::read(root)?;
-        let _stopped = search.file(root);
+        }),
+        // A place the grant does not reach is refused once: asking for it again as a file
+        // would be refused, and recorded, a second time.
+        Err(denied @ HostError::Denied(_)) => return Err(denied.into()),
+        Err(HostError::Failed(_)) => {
+            // Not a directory: one file, and what is wrong with it is the model's to hear.
+            fs_read::read(root)?;
+            let _stopped = search.file(root);
+        }
     }
     if walk.cut && search.stopped.is_none() {
         search.stopped = Some(format!(
