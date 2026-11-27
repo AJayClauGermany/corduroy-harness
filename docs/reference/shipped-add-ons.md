@@ -26,8 +26,43 @@ holds little the harness cuts a result to an eighth of its context, the start of
 a tree and the end of a command's output, and the result says how much is shown
 ([Design](../design.md#keeping-within-what-the-model-holds)). A binary file read with `read`, or printed by a
 command in `bash`, is not returned: the result names its kind and size instead. A `path`
-is relative to the working directory. Config: `kernel`, the kernel `bash` runs in (`shell`).
-Grants: `fs-read`, `fs-write`, `kernel`.
+is relative to the working directory. Config: `kernel`, the kernel `bash` runs in (`shell`);
+`tools`, the ones to offer (all five when absent), which is how one is left to another
+add-on, as `bash` is to [`lean-shell`](#lean-shell). A name in `tools` that is not one of the
+five stops the add-on from starting. Grants: `fs-read`, `fs-write`, `kernel`.
+
+## lean-shell
+
+`bash` in `pi-tools`' place, with each command put through a program that shortens what it
+prints before the model reads it: [`rtk`](https://github.com/rtk-ai/rtk) unless `prefix`
+names another. Off in the default agent; its entry there is commented out.
+
+| Tool | Input | Read-only |
+| --- | --- | --- |
+| `bash` | `command`, `timeout` (seconds): as `pi-tools`' `bash` | |
+
+The tool's name, its input and the form of its result (the end of the output, a line when
+earlier output was dropped, `[exit status N]`, binary output named by kind and size) are the
+same code as `pi-tools`' (`plugins/shell-tool`), so a gate's rule for `bash`, the log and the
+model's own habits hold whichever add-on answers. A tool's name belongs to one add-on: an
+agent with both loads `pi-tools` with `tools = ["read", "write", "edit", "tree"]`, and the
+second to offer `bash` otherwise does not start
+([Replace a shipped tool](../how-to/replace-a-shipped-tool.md)).
+
+By default the model's script is given to `rtk rewrite`, which answers with the script with
+`rtk` put in front of the commands it knows, and the answer is run in the shell itself, so
+`cd` and variables carry over and a script `rewrite` has nothing for runs as written. The
+program is found on the kernel's `PATH`. Where it is not installed the call fails and says
+so, and the command is not run another way. The recipe is for a POSIX shell.
+
+| Config | Default | |
+| --- | --- | --- |
+| `kernel` | `shell` | The kernel commands run in |
+| `prefix` | `rtk` | The program, with any arguments it always takes; its first word is what must be installed |
+| `run` | ask `{prefix} rewrite`, run the answer | How a script is run: a template holding `{prefix}`, `{quoted}` (the script as one shell word) or `{command}` (the script as written). `"{prefix} {command}"` puts the program in front of whatever was written, which suits single commands only |
+| `result_tokens` | `4096` | The most one result takes of the model's context, a quarter of `pi-tools`'; the add-on keeps the last 2000 lines within three bytes a token, and says the same to the harness |
+
+Grants: `kernel`.
 
 ## search
 

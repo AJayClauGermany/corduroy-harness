@@ -141,6 +141,10 @@ name = "providers"
 required-features = ["wasm"]
 
 [[test]]
+name = "replacement"
+required-features = ["wasm"]
+
+[[test]]
 name = "review"
 required-features = ["wasm"]
 

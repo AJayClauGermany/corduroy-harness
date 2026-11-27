@@ -485,8 +485,20 @@ schema before the gates are asked.
 There is one flat set of names. An MCP server's tools are `<server>__<tool>`; an add-on's
 are bare, and the second to register a name is refused.
 
+Replacing a tool by name works, and is tried: `lean-shell` offers `bash` in `pi-tools`'
+place, and one conversation run against each leaves the same trail
+(`tests/replacement.rs`). What it leaned on is not the harness's. `pi-tools` gives the name
+up through a setting of its own (`tools`), so an add-on without such a setting cannot have
+one tool replaced; the two agree on the contract only because they share its code; and the
+loser of a clash does not start at all, its other tools with it, by the order of the agent
+file.
+
 *Direction.* A naming rule before third-party add-ons exist, and a decision on what a clash
-does to the plugin that lost.
+does to the plugin that lost. Decide whether leaving a tool out is each add-on's to offer,
+as now, or something the agent file can say of any add-on (its `tools` grant covers what an
+add-on may call, not what it may offer); whether a replacement says which tool it replaces,
+so that the host can check the schema and the flags agree rather than trust shared code;
+and whether an add-on that lost one name should keep its others.
 
 ### B27. Can code in a kernel call back into the agent?
 

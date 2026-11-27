@@ -708,6 +708,16 @@ fs-read = ["{workspace}", "{workspace}/*"]
 fs-write = { allow = ["{workspace}", "{workspace}/*"], deny = ["{workspace}/.git/*"] }
 kernel = "shell"
 
+# bash from another add-on, in pi-tools' place: each command goes through rtk, which
+# shortens what it prints before the model reads it (it has to be installed; a call says so
+# when it is not). A tool's name belongs to one add-on, so to turn it on, take the # off
+# these lines and add tools = ["read", "write", "edit", "tree"] to pi-tools' config above.
+# [[plugins]]
+# name = "lean-shell"
+# path = "lean_shell.wasm"
+# config = { kernel = "shell" }
+# grants = { kernel = "shell" }
+
 # grep and find: searching the workspace without a command. They only look, so the approval
 # gate below does not ask about them as it does about a grep run in the shell.
 [[plugins]]
