@@ -298,6 +298,10 @@ pub struct PluginEntry {
     /// Each capability it is granted, with its scope.
     #[serde(default)]
     pub grants: BTreeMap<String, Grant>,
+    /// The tools it offers in the place of tools add-ons before it registered, by name.
+    /// Each has to be one that can be taken for the tool it replaces.
+    #[serde(default)]
+    pub replaces: Vec<String>,
     /// Set to `false` to keep the entry without loading the plugin.
     #[serde(default = "yes")]
     pub enabled: bool,
@@ -710,11 +714,13 @@ kernel = "shell"
 
 # bash from another add-on, in pi-tools' place: each command goes through rtk, which
 # shortens what it prints before the model reads it (it has to be installed; a call says so
-# when it is not). A tool's name belongs to one add-on, so to turn it on, take the # off
-# these lines and add tools = ["read", "write", "edit", "tree"] to pi-tools' config above.
+# when it is not). A tool's name belongs to one add-on, and `replaces` says this one takes
+# bash over: it is let to only because its bash takes what pi-tools' takes. To turn it on,
+# take the # off these lines.
 # [[plugins]]
 # name = "lean-shell"
 # path = "lean_shell.wasm"
+# replaces = ["bash"]
 # config = { kernel = "shell" }
 # grants = { kernel = "shell" }
 
@@ -1212,7 +1218,8 @@ fn plugins(
             .load(&component)
             .map_err(|error| failed(&error))?
             .named(entry.name.clone())
-            .config(config.to_string());
+            .config(config.to_string())
+            .replacing(entry.replaces.iter().cloned());
         for (capability, grant) in &entry.grants {
             plugin = plugin.grant(capability.clone(), grant.scope(places));
         }

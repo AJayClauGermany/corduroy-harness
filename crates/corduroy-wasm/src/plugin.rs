@@ -71,6 +71,8 @@ pub struct WasmPlugin {
     requires: Vec<String>,
     grants: Grants,
     config: String,
+    /// The names of the tools it offers in the place of tools already registered.
+    replaces: Vec<String>,
     /// The SHA-256 of the component's bytes, in hex.
     hash: String,
 }
@@ -124,6 +126,7 @@ impl WasmPlugin {
             requires,
             grants: Grants::none(),
             config: "{}".to_owned(),
+            replaces: Vec::new(),
             hash,
         };
         // Built for a later version of this major: it loads only if each function it
@@ -161,6 +164,19 @@ impl WasmPlugin {
     #[must_use]
     pub fn config(mut self, json: impl Into<String>) -> Self {
         self.config = json.into();
+        self
+    }
+
+    /// Offer the tools named in `tools` in the place of the tools already registered under
+    /// those names, where the plugin would otherwise be refused the names as taken.
+    ///
+    /// A tool takes another's place only if it can be taken for it
+    /// ([`Tools::stand_in`](corduroy_core::Registry::stand_in)): the plugin does not start
+    /// if one of them differs from the tool it would replace, if no tool of that name is
+    /// registered, or if the plugin offers no tool of that name.
+    #[must_use]
+    pub fn replacing(mut self, tools: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.replaces = tools.into_iter().map(Into::into).collect();
         self
     }
 
@@ -326,6 +342,7 @@ impl Plugin for WasmPlugin {
             })?;
 
         let tools = ctx.service::<Tools>(TOOLS)?;
+        let mut offered = Vec::new();
         for spec in info.tools {
             let name = spec.name.clone();
             let tool = WasmTool {
@@ -337,7 +354,19 @@ impl Plugin for WasmPlugin {
                     &spec.more,
                 ),
             };
-            tools.register(ctx, name, Arc::new(tool))?;
+            if self.replaces.contains(&name) {
+                offered.push(name);
+                tools.stand_in(ctx, Arc::new(tool))?;
+            } else {
+                tools.register(ctx, name, Arc::new(tool))?;
+            }
+        }
+        if let Some(missing) = self.replaces.iter().find(|name| !offered.contains(name)) {
+            return Err(PluginError::new(format!(
+                "plugin `{}` is to replace the tool `{missing}`, and offers no tool of that \
+                 name",
+                self.name
+            )));
         }
 
         for topics in info.subscriptions {

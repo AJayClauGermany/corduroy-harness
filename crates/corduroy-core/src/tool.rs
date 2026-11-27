@@ -28,12 +28,14 @@
 use alloc::borrow::ToOwned;
 use alloc::string::String;
 use alloc::string::ToString;
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::error::Error;
 use core::fmt;
 
-use crate::registry::Registry;
+use crate::context::Context;
+use crate::registry::{NotReplaced, Registry};
 
 /// Name of the service under which the host provides the [`Tools`] registry.
 pub const TOOLS: &str = "tools";
@@ -403,7 +405,77 @@ where
     }
 }
 
+/// `schema`, a JSON Schema as JSON text, without the spaces and line ends between its
+/// parts, so that two writings of one schema compare equal. What is inside a string is
+/// kept as it is.
+fn packed(schema: &str) -> String {
+    let mut packed = String::with_capacity(schema.len());
+    let (mut quoted, mut escaped) = (false, false);
+    for character in schema.chars() {
+        if quoted {
+            quoted = escaped || character != '"';
+            escaped = !escaped && character == '\\';
+        } else if character.is_ascii_whitespace() {
+            continue;
+        } else {
+            quoted = character == '"';
+        }
+        packed.push(character);
+    }
+    packed
+}
+
+/// How a tool declared as `new` differs from the one declared as `used`, for a caller that
+/// took one for the other: in what it takes, or in whether a call may be made again. `Ok`
+/// if in neither.
+///
+/// What a tool says of itself to the model, whether it only reads, and how much of a
+/// result it keeps are its own, and may differ. So may what it returns, which no tool
+/// declares.
+fn differs(new: &ToolSpec, used: &ToolSpec) -> Result<(), String> {
+    if packed(&new.input_schema) != packed(&used.input_schema) {
+        return Err("its input schema is not the same as that of the tool it replaces".to_owned());
+    }
+    match (new.replay_safe, used.replay_safe) {
+        (true, false) => Err(
+            "it says a call may be made again after a crash (replay-safe), \
+                              and the tool it replaces does not"
+                .to_owned(),
+        ),
+        (false, true) => Err(
+            "the tool it replaces says a call may be made again after a \
+                              crash (replay-safe), and it does not"
+                .to_owned(),
+        ),
+        _ => Ok(()),
+    }
+}
+
 impl Registry<dyn Tool> {
+    /// Put `tool` in the place of the tool registered under its name, on behalf of the
+    /// plugin behind `ctx`: from now on a call of that name is a call of `tool`.
+    ///
+    /// It is done only for a tool that can be taken for the one it replaces: the same
+    /// name, the same input schema (as JSON text, spaces between its parts aside) and the
+    /// same word on whether a call may be made again after a crash. The tool it replaces
+    /// stays registered beneath it, and is called again once the plugin behind `ctx` is
+    /// unloaded.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NotReplaced::Missing`] if no tool of that name is registered, and
+    /// [`NotReplaced::Differs`], saying how, if the two differ.
+    pub fn stand_in(
+        self: &Arc<Self>,
+        ctx: &mut Context<'_>,
+        tool: Arc<dyn Tool>,
+    ) -> Result<(), NotReplaced> {
+        let spec = tool.spec();
+        self.replace(ctx, spec.name.clone(), tool, |used| {
+            differs(&spec, &used.spec())
+        })
+    }
+
     /// The specs of every registered tool, sorted by name.
     #[must_use]
     pub fn specs(&self) -> Vec<ToolSpec> {
@@ -426,8 +498,6 @@ impl Registry<dyn Tool> {
 
 #[cfg(test)]
 mod tests {
-    use alloc::sync::Arc;
-
     use super::*;
 
     fn shout() -> impl Tool {
@@ -549,5 +619,39 @@ mod tests {
         );
         assert_eq!(blocks.call("some").unwrap().to_text(), "some\nmore");
         assert_eq!(output.call("{}").unwrap().content(), []);
+    }
+
+    #[test]
+    fn a_tool_differs_from_another_in_what_it_takes_or_whether_it_is_repeated() {
+        let schema = r#"{"type":"object","properties":{"command":{"type":"string"}}}"#;
+        let used = ToolSpec::new("bash", "Runs a command.", schema);
+        // Its own words for itself, its budget and how its schema is laid out are its own.
+        let spaced =
+            "{ \"type\": \"object\",\n \"properties\": {\"command\": {\"type\": \"string\"}} }";
+        let same = ToolSpec::new("bash", "Runs a command, briefly.", spaced)
+            .read_only(true)
+            .result(100, Keep::Tail);
+        assert_eq!(differs(&same, &used), Ok(()));
+
+        let other = ToolSpec::new("bash", "Runs a command.", r#"{"type":"object"}"#);
+        assert!(differs(&other, &used).unwrap_err().contains("input schema"));
+        // A space inside a string is part of the schema.
+        let renamed = ToolSpec::new("bash", "", schema.replace("command", "com mand"));
+        assert!(differs(&renamed, &used).is_err());
+        let repeated = ToolSpec::new("bash", "", schema).replay_safe(true);
+        assert!(
+            differs(&repeated, &used)
+                .unwrap_err()
+                .contains("replay-safe")
+        );
+        assert!(
+            differs(&used, &repeated)
+                .unwrap_err()
+                .contains("replay-safe")
+        );
+        assert_eq!(
+            packed(r#"{ "a b" : "c \" d" , "e":1 }"#),
+            r#"{"a b":"c \" d","e":1}"#
+        );
     }
 }

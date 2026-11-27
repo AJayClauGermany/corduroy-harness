@@ -105,7 +105,7 @@ pub use model::{
 };
 pub use pattern::Pattern;
 pub use prompt::{PROMPTS, PromptPart, Prompts};
-pub use registry::{Duplicate, Registry};
+pub use registry::{Duplicate, NotReplaced, Registry};
 pub use secret::{SECRETS, Secret, Secrets};
 pub use service::{CallError, SERVICES, Service, Services};
 pub use tool::{

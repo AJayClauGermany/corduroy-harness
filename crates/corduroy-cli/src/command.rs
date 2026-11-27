@@ -638,7 +638,14 @@ fn described(agent: &Agent) -> Vec<String> {
     }
     for spec in harness.tools().specs() {
         let flags = if spec.read_only { " (read-only)" } else { "" };
-        lines.push(format!("tool      {}{flags}", spec.name));
+        // A tool one add-on offers in another's place says so: the name is the same, and
+        // what answers to it is not.
+        let stands_in = if harness.tools().replaced(&spec.name) {
+            " (replaces another add-on's)"
+        } else {
+            ""
+        };
+        lines.push(format!("tool      {}{flags}{stands_in}", spec.name));
     }
     for unstarted in &agent.failed {
         lines.push(format!(

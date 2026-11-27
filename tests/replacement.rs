@@ -1,6 +1,8 @@
 //! One add-on in another's place: `lean-shell` offering `bash` instead of `pi-tools`, through
 //! the loop with a scripted model and a real shell. The same conversation is run against
-//! each, and the model, the gates and the log are shown not to tell them apart.
+//! each, and the model, the gates and the log are shown not to tell them apart. The
+//! replacement is said (`replacing`) and checked: a tool that could not be taken for the
+//! one it replaces is refused, and the name goes back when the replacement is unloaded.
 //! Build the add-ons first with `cargo plugins`. No network or LLM.
 #![cfg(unix)]
 
@@ -10,7 +12,9 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use corduroy_harness::core::{Message, Scope, SessionId};
+use corduroy_harness::core::{
+    FiberId, Message, Scope, SessionId, TOOLS, ToolSpec, Tools, plugin_fn, tool_fn,
+};
 use corduroy_harness::scripted::{ScriptedProvider, call, say};
 use corduroy_harness::wasm::WasmRuntime;
 use corduroy_harness::{Answer, Harness, MAIN, Status};
@@ -23,8 +27,10 @@ use serde_json::{Value, json};
 enum Shell {
     /// `pi-tools`, as shipped.
     Shipped,
-    /// `lean-shell`, with `pi-tools` configured without `bash`.
+    /// `lean-shell`, said to replace `pi-tools`' `bash`.
     Replaced,
+    /// `lean-shell`, with `pi-tools` configured without `bash`: nothing to replace.
+    Left,
     /// Both, neither giving way.
     Both,
 }
@@ -67,6 +73,18 @@ fn agent(
     shell: Shell,
     replies: impl IntoIterator<Item = Message>,
 ) -> Result<Harness, Box<dyn Error>> {
+    Ok(agent_with(place, shell, replies)?.0)
+}
+
+/// A harness, and what `lean-shell` was loaded as in it, if it was.
+type Loaded = (Harness, Option<FiberId>);
+
+/// The same, with what `lean-shell` was loaded as, if it was.
+fn agent_with(
+    place: &Place,
+    shell: Shell,
+    replies: impl IntoIterator<Item = Message>,
+) -> Result<Loaded, Box<dyn Error>> {
     let harness = Harness::new(Arc::new(ScriptedProvider::new(replies)))?;
     let runtime = WasmRuntime::new()?.with_root(&place.work);
     let workspace = Scope::subtree(&place.work.to_string_lossy());
@@ -78,20 +96,44 @@ fn agent(
         .grant("fs-write", workspace)
         .grant("kernel", kernel.clone());
     harness.plugin(match shell {
-        Shell::Shipped | Shell::Both => files,
-        Shell::Replaced => {
+        Shell::Shipped | Shell::Replaced | Shell::Both => files,
+        Shell::Left => {
             files.config(json!({"tools": ["read", "write", "edit", "tree"]}).to_string())
         }
     });
-    if matches!(shell, Shell::Replaced | Shell::Both) {
-        harness.plugin(
-            runtime
-                .load(plugin("lean-shell"))?
-                .grant("kernel", kernel)
-                .config(json!({"prefix": place.program}).to_string()),
-        );
+    if matches!(shell, Shell::Shipped) {
+        return Ok((harness, None));
     }
-    Ok(harness)
+    let lean = runtime
+        .load(plugin("lean-shell"))?
+        .grant("kernel", kernel)
+        .config(json!({"prefix": place.program}).to_string());
+    let lean = harness.plugin(match shell {
+        Shell::Replaced => lean.replacing(["bash"]),
+        _ => lean,
+    });
+    Ok((harness, Some(lean)))
+}
+
+/// `trail` without what an add-on in another's place may say differently: its own words
+/// for the tool, which the request names by hash and counts by size, and how much of a
+/// result it keeps.
+fn alike(trail: &[(String, Value)]) -> Vec<(String, Value)> {
+    let mut trail = trail.to_vec();
+    for (topic, payload) in &mut trail {
+        let Some(fields) = payload.as_object_mut() else {
+            continue;
+        };
+        let own: &[&str] = match topic.as_str() {
+            "model/request" => &["tools_hash", "estimated_tokens"],
+            "tool/result" => &["budget", "cut"],
+            _ => &[],
+        };
+        for field in own {
+            fields.remove(*field);
+        }
+    }
+    trail
 }
 
 /// The events on `topics` so far, each as its topic and payload.
@@ -154,7 +196,7 @@ const SEEN: [&str; 8] = [
 #[tokio::test]
 async fn a_replacement_leaves_the_trail_its_original_would() {
     let mut trails = Vec::new();
-    for shell in [Shell::Shipped, Shell::Replaced] {
+    for shell in [Shell::Shipped, Shell::Replaced, Shell::Left] {
         let place = place("replacement-trail").unwrap();
         let harness = agent(&place, shell, conversation()).unwrap();
 
@@ -174,7 +216,7 @@ async fn a_replacement_leaves_the_trail_its_original_would() {
         // command as the model wrote it.
         let asked = fs::read_to_string(&place.asked).unwrap_or_default();
         match shell {
-            Shell::Replaced => assert_eq!(
+            Shell::Replaced | Shell::Left => assert_eq!(
                 asked,
                 "kept=yes; cd sub\necho \"$kept in $(basename \"$PWD\")\"\n\
                  (echo oops; exit 3)\nprintf '%s\\n' 'a b'\n\
@@ -185,7 +227,7 @@ async fn a_replacement_leaves_the_trail_its_original_would() {
         trails.push(trail(&harness, &SEEN));
     }
 
-    let (shipped, replaced) = (&trails[0], &trails[1]);
+    let (shipped, replaced, left) = (&trails[0], &trails[1], &trails[2]);
     assert_eq!(
         outputs_of(shipped),
         [
@@ -196,9 +238,135 @@ async fn a_replacement_leaves_the_trail_its_original_would() {
             "it's {here}"
         ]
     );
-    // Not one event differs: the same five tools offered, the same calls started, the
-    // same results recorded.
-    assert_eq!(shipped, replaced);
+    // Not one event differs but in what is the add-on's own to say: the same five tools
+    // offered, the same calls started, the same results recorded.
+    assert_eq!(alike(shipped), alike(replaced));
+    // And it is the same whether the name was taken over or left free for it.
+    assert_eq!(replaced, left);
+    // What differs is said in the log: the two were shown as different sets of tools.
+    assert_ne!(shipped[1].1["tools_hash"], replaced[1].1["tools_hash"]);
+}
+
+/// The names of the tools on offer, and which of them stand in for another's.
+fn offered(harness: &Harness) -> Vec<(String, bool)> {
+    harness
+        .tools()
+        .specs()
+        .into_iter()
+        .map(|spec| {
+            let replaced = harness.tools().replaced(&spec.name);
+            (spec.name, replaced)
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_replacement_gives_the_name_back_when_it_is_unloaded() {
+    let place = place("replacement-back").unwrap();
+    let (harness, lean) = agent_with(
+        &place,
+        Shell::Replaced,
+        [
+            call("1", "bash", &json!({"command": "echo one"})),
+            say("done"),
+            call("2", "bash", &json!({"command": "echo two"})),
+            say("done"),
+        ],
+    )
+    .unwrap();
+
+    harness.run("go").await.unwrap();
+    let names = |replaced: bool| {
+        ["bash", "edit", "read", "tree", "write"]
+            .map(|name| (name.to_owned(), replaced && name == "bash"))
+    };
+    assert_eq!(offered(&harness), names(true));
+    assert_eq!(fs::read_to_string(&place.asked).unwrap(), "echo one\n");
+
+    // Without it, `bash` is the one it stood in for, which was there all along.
+    harness.app().dispose(lean.unwrap()).unwrap();
+    assert_eq!(offered(&harness), names(false));
+    harness.run("again").await.unwrap();
+    assert_eq!(fs::read_to_string(&place.asked).unwrap(), "echo one\n");
+    assert_eq!(
+        outputs_of(&trail(&harness, &["tool/result"])),
+        ["one\n", "two\n"]
+    );
+}
+
+/// Each plugin that did not start, with why.
+fn failures(harness: &Harness) -> Vec<(String, String)> {
+    trail(harness, &["plugin/failed"])
+        .into_iter()
+        .map(|(_, failed)| {
+            let text = |key: &str| failed[key].as_str().unwrap_or_default().to_owned();
+            (text("plugin"), text("reason"))
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_tool_that_cannot_be_taken_for_the_one_it_replaces_is_refused() {
+    let place = place("replacement-differs").unwrap();
+    let harness = agent(&place, Shell::Shipped, [say("done")]).unwrap();
+    // One that takes something else, and one that says a call may be made again.
+    let stand_in = |name: &'static str, spec: ToolSpec| {
+        plugin_fn(name, &[TOOLS], move |ctx| {
+            let tools = ctx.service::<Tools>(TOOLS)?;
+            tools.stand_in(ctx, Arc::new(tool_fn(spec.clone(), |_| Ok("mine"))))?;
+            Ok(())
+        })
+    };
+    let used = harness.tools().get("bash").unwrap().spec();
+    let other = ToolSpec::new("bash", "Runs it.", r#"{"type":"object","properties":{}}"#);
+    let repeated = ToolSpec::new("bash", "Runs it.", used.input_schema.clone()).replay_safe(true);
+    let nothing = ToolSpec::new("zsh", "Runs it.", used.input_schema.clone());
+    harness.plugin(stand_in("other-schema", other));
+    harness.plugin(stand_in("other-word", repeated));
+    harness.plugin(stand_in("nothing-there", nothing));
+    // An add-on told to replace a tool it does not offer, and one with nothing to replace.
+    let runtime = WasmRuntime::new().unwrap().with_root(&place.work);
+    let lean = || {
+        runtime
+            .load(plugin("lean-shell"))
+            .unwrap()
+            .grant("kernel", Scope::none().allow("shell"))
+    };
+    harness.plugin(lean().named("no-such-tool").replacing(["bash", "read"]));
+
+    harness.run("go").await.unwrap();
+
+    assert_eq!(
+        failures(&harness),
+        [
+            (
+                "other-schema".to_owned(),
+                "`bash` cannot be replaced by this one: its input schema is not the same as \
+                 that of the tool it replaces"
+                    .to_owned()
+            ),
+            (
+                "other-word".to_owned(),
+                "`bash` cannot be replaced by this one: it says a call may be made again \
+                 after a crash (replay-safe), and the tool it replaces does not"
+                    .to_owned()
+            ),
+            (
+                "nothing-there".to_owned(),
+                "`zsh` is not registered, so it cannot be replaced: what offers it comes first"
+                    .to_owned()
+            ),
+            (
+                "no-such-tool".to_owned(),
+                "plugin `no-such-tool` is to replace the tool `read`, and offers no tool of \
+                 that name"
+                    .to_owned()
+            ),
+        ]
+    );
+    // Nothing was taken over, not even by the add-on whose `bash` would have passed.
+    assert!(offered(&harness).iter().all(|(_, replaced)| !replaced));
+    assert_eq!(harness.tools().get("bash").unwrap().spec(), used);
 }
 
 #[tokio::test]
@@ -261,11 +429,11 @@ async fn a_gate_asks_and_refuses_a_replacement_as_it_would_the_original() {
     }
 
     assert!(trails[0].iter().any(|(topic, _)| topic == "gate/decision"));
-    assert_eq!(trails[0], trails[1]);
+    assert_eq!(alike(&trails[0]), alike(&trails[1]));
 }
 
 #[tokio::test]
-async fn the_second_add_on_to_offer_a_tool_is_refused_whole() {
+async fn the_second_add_on_to_offer_a_tool_without_saying_it_replaces_it_is_refused_whole() {
     let place = place("replacement-both").unwrap();
     let harness = agent(
         &place,
