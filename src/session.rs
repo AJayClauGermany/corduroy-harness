@@ -1198,8 +1198,21 @@ impl Journal {
     ///
     /// Fails if the commit cannot be stored.
     pub fn record(&self, message: &Message) -> Result<EventId> {
+        self.record_from(message, None)
+    }
+
+    /// As [`record`](Self::record), saying which plugin the message was given through, if
+    /// it was not given to the host itself: the event's payload names it under `via`.
+    pub(crate) fn record_from(&self, message: &Message, via: Option<&str>) -> Result<EventId> {
         let mut batch = Batch::default();
         let position = self.draft_message(&mut batch, message);
+        if let (Some(via), Some(draft)) = (via, batch.drafts.get_mut(position)) {
+            let mut payload = encode(message);
+            if let Some(fields) = payload.as_object_mut() {
+                fields.insert("via".to_owned(), json!(via));
+            }
+            *draft = Draft::new(Source::User, MESSAGE).payload(payload.to_string());
+        }
         let ids = self.commit(batch)?;
         ids.get(position)
             .copied()
@@ -1532,10 +1545,11 @@ impl Journal {
     }
 
     /// Record that a person asked the run to stop.
-    pub(crate) fn stop_asked(&self) -> Result<()> {
+    pub(crate) fn stop_asked(&self, via: Option<&str>) -> Result<()> {
+        let payload = via.map_or_else(|| json!({}), |via| json!({"via": via}));
         let draft = Draft::new(Source::User, STOP)
             .session(self.id.clone())
-            .payload("{}");
+            .payload(payload.to_string());
         self.events.emit(draft)?;
         Ok(())
     }

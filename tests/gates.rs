@@ -215,7 +215,7 @@ async fn an_answer_recorded_from_outside_is_taken_on_by_the_host() {
     let typed = harness.answer(&main, "c1", Answer::Allow).await;
     assert!(matches!(typed, Err(HarnessError::NotAsked { .. })));
 
-    let outcome = harness.answered(&main).await.unwrap();
+    let outcome = harness.take_on(&main).await.unwrap();
 
     assert_eq!(
         outcome.status,
@@ -228,7 +228,7 @@ async fn an_answer_recorded_from_outside_is_taken_on_by_the_host() {
     assert_eq!(payloads(&harness, "run/restart"), Vec::<Value>::new());
     // Taking on a run that has ended runs nothing more.
     let asked = payloads(&harness, "model/request").len();
-    let ended = harness.answered(&main).await.unwrap();
+    let ended = harness.take_on(&main).await.unwrap();
     assert_eq!(ended.status, outcome.status);
     assert_eq!(payloads(&harness, "model/request").len(), asked);
 }
@@ -247,7 +247,7 @@ async fn a_run_is_not_taken_on_while_another_of_its_questions_waits() {
     outside
         .answer("page", &main, "c2", &Answer::Deny("not that one".into()))
         .unwrap();
-    let waiting = harness.answered(&main).await.unwrap();
+    let waiting = harness.take_on(&main).await.unwrap();
 
     let Status::Waiting { asks, .. } = &waiting.status else {
         panic!("expected to wait, got {:?}", waiting.status);
@@ -259,6 +259,86 @@ async fn a_run_is_not_taken_on_while_another_of_its_questions_waits() {
     let outcome = harness.answer(&main, "c1", Answer::Allow).await.unwrap();
     assert!(matches!(outcome.status, Status::Finished { .. }));
     assert_eq!(runs.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_message_said_from_outside_begins_a_run_the_host_takes_on() {
+    let runs = Arc::new(AtomicUsize::new(0));
+    let replies = [say("hello"), call("c1", "poke", &json!({})), say("poked")];
+    let harness = harness(EventStream::new(), replies, &runs).unwrap();
+    let main = SessionId::new(MAIN);
+    let outside = harness.app().service::<Outside>(OUTSIDE).unwrap();
+
+    // A host that runs one prompt and leaves would record it and run it never.
+    let unheard = outside.say("page", &main, "say hello").unwrap_err();
+    assert!(unheard.to_string().contains("nobody is here"), "{unheard}");
+    harness.takes_messages(true);
+    assert!(outside.say("page", &main, "  ").is_err());
+    assert!(
+        outside
+            .say("page", &SessionId::new("nowhere"), "hi")
+            .is_err()
+    );
+    assert_eq!(payloads(&harness, "message"), Vec::<Value>::new());
+
+    outside.say("page", &main, "say hello").unwrap();
+
+    // Recorded as the person's, with what it came through, and nothing asked of the model.
+    let said = &payloads(&harness, "message")[0];
+    assert_eq!(
+        (&said["role"], &said["via"]),
+        (&json!("user"), &json!("page"))
+    );
+    assert_eq!(payloads(&harness, "model/request"), Vec::<Value>::new());
+    // A run is under way from that moment: a second message has to wait for its end.
+    let busy = outside.say("page", &main, "and again");
+    assert!(matches!(busy, Err(HarnessError::Unfinished(_))), "{busy:?}");
+
+    let outcome = harness.take_on(&main).await.unwrap();
+
+    assert_eq!(
+        outcome.status,
+        Status::Finished {
+            answer: "hello".into()
+        }
+    );
+    assert_eq!(payloads(&harness, "run/restart"), Vec::<Value>::new());
+    // While a question waits, the session takes no message either.
+    outside.say("page", &main, "poke it").unwrap();
+    harness.take_on(&main).await.unwrap();
+    let waiting = outside.say("page", &main, "hurry");
+    assert!(
+        matches!(waiting, Err(HarnessError::Waiting(_))),
+        "{waiting:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_stop_asked_from_outside_ends_a_run_that_waits() {
+    let runs = Arc::new(AtomicUsize::new(0));
+    let replies = [call("c1", "poke", &json!({})), say("after the stop")];
+    let harness = harness(EventStream::new(), replies, &runs).unwrap();
+    let main = SessionId::new(MAIN);
+    let outside = harness.app().service::<Outside>(OUTSIDE).unwrap();
+    assert!(!outside.stop("page", &main).unwrap());
+    harness.run("poke it").await.unwrap();
+
+    assert!(outside.stop("page", &main).unwrap());
+
+    // Ended as stopped, by the record alone: the call never ran, and nothing waits.
+    assert_eq!(payloads(&harness, "run/stop")[0]["via"], json!("page"));
+    assert_eq!(
+        payloads(&harness, "turn/end")[0]["status"],
+        json!("stopped")
+    );
+    assert_eq!(runs.load(Ordering::SeqCst), 0);
+    assert_eq!(outside.asks(), []);
+    let outcome = harness.take_on(&main).await.unwrap();
+    assert_eq!(outcome.status, Status::Stopped);
+    assert!(!outside.stop("page", &main).unwrap());
+    // The session takes a new prompt.
+    let next = harness.run("and now?").await.unwrap();
+    assert!(matches!(next.status, Status::Finished { .. }));
 }
 
 #[test]

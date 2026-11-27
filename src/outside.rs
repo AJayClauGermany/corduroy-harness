@@ -4,7 +4,7 @@
 //! A run is driven by the host that holds the [`Harness`](crate::Harness). An extension
 //! that stands between a person and the runs (a page in a browser, say) holds no harness
 //! and runs no loop. It *records*, through [`Outside`], and returns; the host's driver then
-//! takes the run on ([`Harness::answered`](crate::Harness::answered)). So there is one
+//! takes the run on ([`Harness::take_on`](crate::Harness::take_on)). So there is one
 //! driver however many such extensions there are, and nothing is lost if the process ends
 //! between the two: what was recorded is in the log.
 //!
@@ -18,16 +18,84 @@
 //! could answer one would hold more than it was granted.
 //!
 //! Of what the design gives something outside a run to do, this is the part a front end
-//! needs first: reading the questions that wait, and answering one.
+//! needs first: reading the questions that wait, answering one, saying something to a
+//! session that is doing nothing, and stopping a run.
 
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 
-use corduroy_core::{Registry, SessionId};
+use corduroy_core::sync::Lock;
+use corduroy_core::{Message, Registry, SessionId};
 
-use crate::harness::HarnessError;
-use crate::session::{Answer, Ask, Sessions};
+use crate::harness::{HarnessError, settled};
+use crate::session::{Answer, Ask, End, Journal, Sessions, ended};
+use crate::stop::Stop;
+use crate::tools::NOT_RUN;
+
+/// The runs under way, and how one is stopped: shared by the harness, which runs them, and
+/// by [`Outside`], through which an extension asks for a stop.
+pub(crate) struct Runs {
+    sessions: Arc<Sessions>,
+    /// The sessions being run now, each with what stops it.
+    pub(crate) running: Lock<BTreeMap<SessionId, Stop>>,
+}
+
+impl Runs {
+    const fn new(sessions: Arc<Sessions>) -> Self {
+        Self {
+            sessions,
+            running: Lock::new(BTreeMap::new()),
+        }
+    }
+
+    /// Ask the run of `session` to stop, as [`Harness::stop`](crate::Harness::stop) says,
+    /// recording which plugin the stop was given through, if it was not the host itself.
+    pub(crate) fn stop(
+        &self,
+        session: &SessionId,
+        via: Option<&str>,
+    ) -> Result<bool, HarnessError> {
+        let journal = self.sessions.journal(session)?;
+        let running = self.running.with(|running| running.get(session).cloned());
+        if let Some(stop) = running {
+            journal.stop_asked(via)?;
+            stop.ask();
+            return Ok(true);
+        }
+        let open =
+            journal.unfinished() || !journal.waiting().is_empty() || !journal.awaiting().is_empty();
+        if !open {
+            return Ok(false);
+        }
+        journal.stop_asked(via)?;
+        self.end_stopped(&journal)?;
+        Ok(true)
+    }
+
+    /// End the run of `journal`'s session, and those of the children it waits for, as
+    /// stopped.
+    fn end_stopped(&self, journal: &Journal) -> Result<(), HarnessError> {
+        for wait in journal.awaiting() {
+            if let Some(child) = ended(&wait.signal)
+                && let Ok(child) = self.sessions.journal(&child)
+                && (child.unfinished() || !child.awaiting().is_empty())
+            {
+                self.end_stopped(&child)?;
+            }
+            let reason = "stopped: the run was stopped before this call finished";
+            journal.signal(&wait.signal, reason)?;
+        }
+        // Nothing is run again here, so whether a tool could be is not asked.
+        if let Some(results) = settled(journal, NOT_RUN, &|_| false) {
+            journal.record(&results)?;
+        }
+        journal.end_turn(&End::Stopped)?;
+        Ok(())
+    }
+}
 
 /// Name under which the harness provides [`Outside`] to native plugins.
 pub const OUTSIDE: &str = "outside";
@@ -38,6 +106,10 @@ pub const FRONTS: &str = "fronts";
 /// What an extension may do to runs from outside them. See the [module](self).
 pub struct Outside {
     sessions: Arc<Sessions>,
+    /// The runs under way, which the harness that made this notes here.
+    pub(crate) runs: Runs,
+    /// Whether the host takes on a message recorded here.
+    heard: AtomicBool,
 }
 
 impl core::fmt::Debug for Outside {
@@ -47,8 +119,24 @@ impl core::fmt::Debug for Outside {
 }
 
 impl Outside {
-    pub(crate) const fn new(sessions: Arc<Sessions>) -> Self {
-        Self { sessions }
+    pub(crate) fn new(sessions: Arc<Sessions>) -> Self {
+        Self {
+            runs: Runs::new(Arc::clone(&sessions)),
+            sessions,
+            heard: AtomicBool::new(false),
+        }
+    }
+
+    /// Note whether the host takes on a message recorded through [`say`](Self::say).
+    pub(crate) fn hears(&self, takes: bool) {
+        self.heard.store(takes, Ordering::SeqCst);
+    }
+
+    /// Whether a message said to a session now would be run: whether the host said it takes
+    /// such messages on ([`Harness::takes_messages`](crate::Harness::takes_messages)).
+    #[must_use]
+    pub fn is_heard(&self) -> bool {
+        self.heard.load(Ordering::SeqCst)
     }
 
     /// The tool calls a gate asked about that nobody has answered yet, in every session.
@@ -66,7 +154,7 @@ impl Outside {
     /// through the plugin `via` (the answer's event names it).
     ///
     /// The answer is recorded and nothing more: the run goes on when the host's driver takes
-    /// it on ([`Harness::answered`](crate::Harness::answered)), in this process or a later
+    /// it on ([`Harness::take_on`](crate::Harness::take_on)), in this process or a later
     /// one.
     ///
     /// # Errors
@@ -91,6 +179,59 @@ impl Outside {
                 call: call.into(),
             })
         }
+    }
+}
+
+impl Outside {
+    /// Record `text` as what the person says to `session`, given through the plugin `via`
+    /// (the message's event names it), which begins a run of it.
+    ///
+    /// The message is recorded and nothing more: the host's driver takes the run on
+    /// ([`Harness::take_on`](crate::Harness::take_on)). So it is taken only from a host that
+    /// said it does that, and only for a session that is doing nothing: what the design
+    /// calls the queue, a message kept for a session that is working, is not built.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HarnessError::Run`] if the host takes no messages from outside or `text`
+    /// is empty, [`HarnessError::UnknownSession`] if there is no such session,
+    /// [`HarnessError::Waiting`] or [`HarnessError::Unfinished`] if a run of it is under
+    /// way, or [`HarnessError::Log`] if the message could not be recorded.
+    pub fn say(&self, via: &str, session: &SessionId, text: &str) -> Result<(), HarnessError> {
+        if !self.is_heard() {
+            return Err(HarnessError::Run(
+                "nobody is here to run it: the host runs one prompt and leaves".into(),
+            ));
+        }
+        if text.trim().is_empty() {
+            return Err(HarnessError::Run("there is nothing to say".into()));
+        }
+        let journal = self.sessions.journal(session)?;
+        if !journal.waiting().is_empty() || !journal.awaiting().is_empty() {
+            return Err(HarnessError::Waiting(session.clone()));
+        }
+        let running = self
+            .runs
+            .running
+            .with(|running| running.contains_key(session));
+        if running || journal.unfinished() {
+            return Err(HarnessError::Unfinished(session.clone()));
+        }
+        journal.record_from(&Message::user().text(text), Some(via))?;
+        Ok(())
+    }
+
+    /// Ask the run of `session` to stop, through the plugin `via` (the stop's event names
+    /// it), and return whether there was one to stop. As
+    /// [`Harness::stop`](crate::Harness::stop): a run that is going stops at its next step,
+    /// and one that waits is ended here, which is recording and no more.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HarnessError::UnknownSession`] if there is no such session, or
+    /// [`HarnessError::Log`] if the stop could not be recorded.
+    pub fn stop(&self, via: &str, session: &SessionId) -> Result<bool, HarnessError> {
+        self.runs.stop(session, Some(via))
     }
 }
 

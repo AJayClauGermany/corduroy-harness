@@ -248,8 +248,9 @@ pub struct Harness {
     contributed: Arc<Operations>,
     /// What a person reaches the agent through besides the host, by plugin.
     fronts: Arc<Fronts>,
-    /// The sessions being run now, each with what stops it.
-    running: Lock<BTreeMap<SessionId, Stop>>,
+    /// What an extension is handed to act on runs from outside them. It holds the sessions
+    /// being run now, each with what stops it, so that a stop can be asked for from there.
+    outside: Arc<Outside>,
 }
 
 impl fmt::Debug for Harness {
@@ -267,6 +268,38 @@ impl fmt::Debug for Harness {
 struct Running<'harness> {
     running: &'harness Lock<BTreeMap<SessionId, Stop>>,
     session: SessionId,
+}
+
+/// Results for the unanswered tool calls of `journal`'s session that must not simply be
+/// run: those the log already has a result for, and those that were started and are not
+/// safe to make again, as `replay_safe` says of a tool by name. A call that never started
+/// is left for the tools step to run, unless `not_run` says what to answer it with instead.
+pub(crate) fn settled(
+    journal: &Journal,
+    not_run: &str,
+    replay_safe: &dyn Fn(&str) -> bool,
+) -> Option<Message> {
+    let mut results = Message::user();
+    for call in journal.session().pending_calls() {
+        let result = match journal.progress(&call.id) {
+            Progress::NotStarted if not_run.is_empty() => continue,
+            Progress::NotStarted => ToolResult::failed(call.id, not_run),
+            Progress::Started if not_run.is_empty() && replay_safe(&call.name) => {
+                continue;
+            }
+            Progress::Started => ToolResult::failed(
+                call.id,
+                format!(
+                    "interrupted: the harness stopped while `{}` was running, and it is \
+                     not safe to run twice. Check what it did before calling it again.",
+                    call.name
+                ),
+            ),
+            Progress::Finished { ok, output } => ToolResult::new(call.id, ok, output),
+        };
+        results = results.result(result);
+    }
+    (!results.is_empty()).then_some(results)
 }
 
 impl Drop for Running<'_> {
@@ -349,7 +382,8 @@ impl Harness {
         app.provide(LOOPS, Arc::clone(&loops))?;
         let fronts = Arc::new(Fronts::new());
         app.provide(FRONTS, Arc::clone(&fronts))?;
-        app.provide(OUTSIDE, Arc::new(Outside::new(Arc::clone(&sessions))))?;
+        let outside = Arc::new(Outside::new(Arc::clone(&sessions)));
+        app.provide(OUTSIDE, Arc::clone(&outside))?;
         Ok(Self {
             #[cfg(feature = "std")]
             app: Arc::new(Mutex::new(app)),
@@ -377,7 +411,7 @@ impl Harness {
             operations: Vec::new(),
             contributed,
             fronts,
-            running: Lock::new(BTreeMap::new()),
+            outside,
         })
     }
 
@@ -542,6 +576,15 @@ impl Harness {
         &self.http
     }
 
+    /// Say whether this host takes on messages recorded from outside a run
+    /// ([`Outside::say`]): whether it will call [`take_on`](Self::take_on) for the session
+    /// when one is. A host that talks with a person does; one that runs a single prompt and
+    /// leaves does not. Until a host says so, such a message is refused, since it would be
+    /// recorded and run by nobody.
+    pub fn takes_messages(&self, takes: bool) {
+        self.outside.hears(takes);
+    }
+
     /// What a person reaches the agent through besides the host: the front ends plugins
     /// registered, by plugin. A host opens each when it is about to drive runs.
     #[must_use]
@@ -652,41 +695,7 @@ impl Harness {
     /// Returns [`HarnessError::UnknownSession`] if there is no such session, or
     /// [`HarnessError::Log`] if the stop could not be recorded.
     pub fn stop(&self, session: &SessionId) -> Result<bool, HarnessError> {
-        let journal = self.journal(session)?;
-        let running = self.running.with(|running| running.get(session).cloned());
-        if let Some(stop) = running {
-            journal.stop_asked()?;
-            stop.ask();
-            return Ok(true);
-        }
-        let open =
-            journal.unfinished() || !journal.waiting().is_empty() || !journal.awaiting().is_empty();
-        if !open {
-            return Ok(false);
-        }
-        journal.stop_asked()?;
-        self.end_stopped(&journal)?;
-        Ok(true)
-    }
-
-    /// End the run of `journal`'s session, and those of the children it waits for, as
-    /// stopped.
-    fn end_stopped(&self, journal: &Journal) -> Result<(), HarnessError> {
-        for wait in journal.awaiting() {
-            if let Some(child) = ended(&wait.signal)
-                && let Ok(child) = self.journal(&child)
-                && (child.unfinished() || !child.awaiting().is_empty())
-            {
-                self.end_stopped(&child)?;
-            }
-            let reason = "stopped: the run was stopped before this call finished";
-            journal.signal(&wait.signal, reason)?;
-        }
-        if let Some(results) = self.settled(journal, NOT_RUN) {
-            journal.record(&results)?;
-        }
-        journal.end_turn(&End::Stopped)?;
-        Ok(())
+        self.outside.runs.stop(session, None)
     }
 
     /// Run one step of the loop for `session`: the step that applies first does its work,
@@ -703,6 +712,8 @@ impl Harness {
     pub async fn step(&self, session: &SessionId) -> Result<Stepped, HarnessError> {
         let journal = self.journal(session)?;
         let stop = self
+            .outside
+            .runs
             .running
             .with(|running| running.get(session).cloned())
             .unwrap_or_default();
@@ -778,32 +789,9 @@ impl Harness {
         self.drive(&journal, stop).await
     }
 
-    /// Results for the unanswered tool calls of `journal`'s session that must not simply be
-    /// run: those the log already has a result for, and those that were started and are
-    /// not safe to make again. A call that never started is left for the tools step to
-    /// run, unless `not_run` says what to answer it with instead.
+    /// As [`settled`], with what this harness's tools say of themselves.
     fn settled(&self, journal: &Journal, not_run: &str) -> Option<Message> {
-        let mut results = Message::user();
-        for call in journal.session().pending_calls() {
-            let result = match journal.progress(&call.id) {
-                Progress::NotStarted if not_run.is_empty() => continue,
-                Progress::NotStarted => ToolResult::failed(call.id, not_run),
-                Progress::Started if not_run.is_empty() && self.replay_safe(&call.name) => {
-                    continue;
-                }
-                Progress::Started => ToolResult::failed(
-                    call.id,
-                    format!(
-                        "interrupted: the harness stopped while `{}` was running, and it is \
-                         not safe to run twice. Check what it did before calling it again.",
-                        call.name
-                    ),
-                ),
-                Progress::Finished { ok, output } => ToolResult::new(call.id, ok, output),
-            };
-            results = results.result(result);
-        }
-        (!results.is_empty()).then_some(results)
+        settled(journal, not_run, &|tool| self.replay_safe(tool))
     }
 
     /// Answer the gate that asked about the tool call `call` in `session`. Once every call
@@ -832,21 +820,22 @@ impl Harness {
                 call: call.to_owned(),
             });
         }
-        self.answered(session).await
+        self.take_on(session).await
     }
 
-    /// Take on the run of `session` after an answer to one of its questions was recorded
-    /// from outside it ([`Outside::answer`]): a front end records, and the host that drives
-    /// calls this.
+    /// Take on the run of `session` after something was recorded for it from outside
+    /// ([`Outside`]): an answer to one of its questions, a message that began a run, a
+    /// stop. A front end records, and the host that drives calls this.
     ///
-    /// If other questions of the run still wait, or the session has no run to take on, the
-    /// outcome says how it stands and nothing is run. Otherwise the loop goes on as after
-    /// [`answer`](Self::answer), and with it each session up the chain that waited.
+    /// If questions of the run still wait, or the session has no run to take on (it ended,
+    /// perhaps stopped), the outcome says how it stands and nothing is run. Otherwise the
+    /// loop goes on as after [`answer`](Self::answer), and with it each session up the
+    /// chain that waited. Nothing is counted as a restart.
     ///
     /// # Errors
     ///
     /// As [`run_in`](Self::run_in).
-    pub async fn answered(&self, session: &SessionId) -> Result<Outcome, HarnessError> {
+    pub async fn take_on(&self, session: &SessionId) -> Result<Outcome, HarnessError> {
         let journal = self.journal(session)?;
         if !journal.waiting().is_empty() || !journal.unfinished() {
             return Ok(self.outcome_of(&journal));
@@ -919,11 +908,13 @@ impl Harness {
     /// Note that `session` is being run, stopped by `stop`, until the guard is dropped.
     fn running_as(&self, session: &SessionId, stop: &Stop) -> Running<'_> {
         let earlier = self
+            .outside
+            .runs
             .running
             .with(|running| running.insert(session.clone(), stop.clone()));
         drop(earlier);
         Running {
-            running: &self.running,
+            running: &self.outside.runs.running,
             session: session.clone(),
         }
     }
