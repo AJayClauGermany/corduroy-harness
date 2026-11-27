@@ -1,8 +1,10 @@
 //! oi-kit's providers as the harness's: converting messages, tools and usage at the
 //! boundary, so that nothing past it depends on oi-kit's shapes.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::Engine as _;
@@ -11,7 +13,8 @@ use corduroy_harness::core::{
     AUDIO, Content, IMAGE, Message, PDF, Part, Role, TEXT, ToolCall, ToolSpec, VIDEO,
 };
 use corduroy_harness::{
-    ModelInfo, ModelReply, ModelRequest, Provider, ProviderError, StopReason, Usage,
+    ModelInfo, ModelReply, ModelRequest, Provider, ProviderError, ProviderErrorKind, StopReason,
+    Usage,
 };
 use oi_kit_provider_types::base::Provider as OiKitProvider;
 use oi_kit_provider_types::canonical::Modality;
@@ -19,6 +22,7 @@ use oi_kit_provider_types::canonical::maybe_get_canonical_model;
 use oi_kit_provider_types::conversation::message::{
     Message as OiKitMessage, MessageContent, ToolRequest,
 };
+use oi_kit_provider_types::errors::ProviderError as OiKitError;
 use oi_kit_provider_types::formats::openai::is_openai_responses_model;
 use oi_kit_provider_types::model::ModelConfig;
 use oi_kit_provider_types::retry::retry_operation;
@@ -42,9 +46,38 @@ pub(crate) struct Settings {
     pub(crate) max_tokens: Option<u32>,
     pub(crate) temperature: Option<f32>,
     pub(crate) thinking: Option<Thinking>,
+    /// How long one attempt at a request may take in all, streamed or not.
+    pub(crate) timeout: Duration,
+    /// What the host states about models of this provider, by the provider's name for each.
+    pub(crate) stated: BTreeMap<String, ModelInfo>,
 }
 
+/// The most an answer may take from a model nobody has described.
+const UNKNOWN_MAX_TOKENS: u64 = 4096;
+
+/// The least a default taken from a model's stated context allows an answer.
+const LEAST_MAX_TOKENS: u64 = 1024;
+
 impl Settings {
+    /// The most `model` may write in one answer where the provider's entry sets no
+    /// `max_tokens`: what the host states it may write, else what oi-kit's catalog says,
+    /// else a quarter of the context the host states (and at least
+    /// [`LEAST_MAX_TOKENS`]), else [`UNKNOWN_MAX_TOKENS`]. There is always one, so a model
+    /// served on this machine is not left to write until its context is full.
+    fn default_max_tokens(&self, model: &str) -> i32 {
+        let stated = self.stated.get(model);
+        let tokens = |tokens: u64| i32::try_from(tokens).unwrap_or(i32::MAX);
+        stated
+            .and_then(|stated| stated.output_tokens)
+            .map(tokens)
+            .or_else(|| catalog_max_tokens(&self.provider, model))
+            .or_else(|| {
+                let context = stated.and_then(|stated| stated.context_tokens)?;
+                Some(tokens((context / 4).max(LEAST_MAX_TOKENS)))
+            })
+            .unwrap_or_else(|| tokens(UNKNOWN_MAX_TOKENS))
+    }
+
     /// The configuration oi-kit is asked to answer `model` with.
     fn model_config(&self, model: &str) -> ModelConfig {
         let mut config = ModelConfig::new(model)
@@ -52,7 +85,7 @@ impl Settings {
                 self.max_tokens
                     .and_then(|tokens| i32::try_from(tokens).ok()),
             )
-            .with_default_max_tokens(catalog_max_tokens(&self.provider, model))
+            .with_default_max_tokens(Some(self.default_max_tokens(model)))
             .with_temperature(self.temperature);
         if let Some(thinking) = self.thinking {
             let effort = match thinking {
@@ -153,13 +186,36 @@ impl Provider for Adapted {
             .map(tool_of)
             .collect::<Result<Vec<Tool>, ProviderError>>()?;
         let provider = &self.provider;
+        let bound = self.settings.timeout;
+        let timed_out = AtomicBool::new(false);
         // Rate limits, server errors and dropped connections are tried again, as the
-        // provider's own policy says.
-        let (message, usage) = retry_operation(&provider.retry_config(), || {
-            provider.complete(&config, system, &messages, &tools)
+        // provider's own policy says. Each attempt has the whole of the bound, whether its
+        // answer is streamed or not: oi-kit bounds only the gap between two pieces of a
+        // stream, which a model that never stops writing never exceeds. An attempt that
+        // runs out is dropped, which closes its connection, and is not tried again.
+        let (message, usage) = retry_operation(&provider.retry_config(), || async {
+            let attempt = provider.complete(&config, system, &messages, &tools);
+            match tokio::time::timeout(bound, attempt).await {
+                Ok(answer) => answer,
+                Err(_elapsed) => {
+                    timed_out.store(true, Ordering::Relaxed);
+                    Err(OiKitError::ExecutionError("timed out".to_owned()))
+                }
+            }
         })
         .await
-        .map_err(|error| ProviderError::new(error.to_string()))?;
+        .map_err(|error| {
+            if timed_out.load(Ordering::Relaxed) {
+                ProviderError::new(format!(
+                    "the model had not finished answering after {} seconds (the provider's \
+                     timeout_seconds)",
+                    bound.as_secs()
+                ))
+                .of(ProviderErrorKind::Timeout)
+            } else {
+                ProviderError::new(error.to_string()).of(kind_of_error(&error))
+            }
+        })?;
         if let Some(error) = message.error() {
             return Err(ProviderError::new(error.message.clone()));
         }
@@ -172,6 +228,17 @@ impl Provider for Adapted {
 
     fn describe(&self, model: &str) -> ModelInfo {
         describe(&self.settings.provider, model)
+    }
+}
+
+/// Which sort of failure oi-kit says `error` was.
+const fn kind_of_error(error: &OiKitError) -> ProviderErrorKind {
+    match error {
+        OiKitError::ContextLengthExceeded(_) => ProviderErrorKind::ContextOverflow,
+        OiKitError::RateLimitExceeded { .. } => ProviderErrorKind::RateLimit,
+        OiKitError::Authentication(_) | OiKitError::NotConfigured => ProviderErrorKind::Auth,
+        OiKitError::NetworkError(_) => ProviderErrorKind::Unreachable,
+        _ => ProviderErrorKind::Other,
     }
 }
 
@@ -404,6 +471,8 @@ mod tests {
             max_tokens: None,
             temperature: None,
             thinking: None,
+            timeout: Duration::from_secs(600),
+            stated: BTreeMap::new(),
         }
     }
 
@@ -412,10 +481,62 @@ mod tests {
         let known = settings("anthropic").model_config("claude-sonnet-4-5");
         let limit = catalog_max_tokens("anthropic", "claude-sonnet-4-5").unwrap();
         assert!(limit > 4096, "{limit}");
-        assert_eq!(known.max_output_tokens(), limit);
+        assert_eq!(known.max_tokens, Some(limit));
+    }
 
-        let unknown = settings("openai_compatible").model_config("local");
-        assert_eq!(unknown.max_output_tokens(), 4096);
+    #[test]
+    fn an_unknown_model_is_given_a_limit_all_the_same() {
+        let stating = |info: ModelInfo| Settings {
+            stated: BTreeMap::from([("local".to_owned(), info)]),
+            ..settings("openai_compatible")
+        };
+        let limit = |settings: &Settings, model: &str| settings.model_config(model).max_tokens;
+        assert_eq!(limit(&settings("openai_compatible"), "local"), Some(4096));
+
+        // A quarter of the context the agent file states, and never a sliver.
+        let mut info = ModelInfo::unknown();
+        info.context_tokens = Some(32_768);
+        assert_eq!(limit(&stating(info.clone()), "local"), Some(8192));
+        assert_eq!(limit(&stating(info.clone()), "another"), Some(4096));
+        info.context_tokens = Some(2048);
+        assert_eq!(limit(&stating(info.clone()), "local"), Some(1024));
+
+        // What the file says the model may write is the limit, the catalog's or not.
+        info.output_tokens = Some(3000);
+        assert_eq!(limit(&stating(info.clone()), "local"), Some(3000));
+        let known = Settings {
+            stated: BTreeMap::from([("claude-sonnet-4-5".to_owned(), info)]),
+            ..settings("anthropic")
+        };
+        assert_eq!(limit(&known, "claude-sonnet-4-5"), Some(3000));
+    }
+
+    #[test]
+    fn oi_kit_s_errors_are_told_apart() {
+        let kind = |error: OiKitError| kind_of_error(&error);
+        assert_eq!(
+            kind(OiKitError::ContextLengthExceeded(String::new())),
+            ProviderErrorKind::ContextOverflow
+        );
+        assert_eq!(
+            kind(OiKitError::RateLimitExceeded {
+                details: String::new(),
+                retry_delay: None
+            }),
+            ProviderErrorKind::RateLimit
+        );
+        assert_eq!(
+            kind(OiKitError::Authentication(String::new())),
+            ProviderErrorKind::Auth
+        );
+        assert_eq!(
+            kind(OiKitError::NetworkError(String::new())),
+            ProviderErrorKind::Unreachable
+        );
+        assert_eq!(
+            kind(OiKitError::ServerError(String::new())),
+            ProviderErrorKind::Other
+        );
     }
 
     fn openai(path: &str) -> Settings {

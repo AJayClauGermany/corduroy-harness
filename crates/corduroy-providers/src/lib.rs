@@ -14,8 +14,10 @@
 //! never part of the spec, the agent file or the event log.
 //!
 //! Each request asks for at most the spec's `max_tokens`, by default the most the model may
-//! write as oi-kit's model catalog has it (4096 for a model it does not know), and thinks
-//! only as hard as the spec's `thinking` says. A request to `OpenAI`'s Responses API is the
+//! write as the spec's `models` or oi-kit's model catalog have it (for a model neither
+//! describes, a quarter of the context `models` states, or 4096), and thinks only as hard
+//! as the spec's `thinking` says. One attempt at a request has `timeout_seconds` in all,
+//! streamed or not, and one that runs out ends the request as a timeout. A request to `OpenAI`'s Responses API is the
 //! exception: it carries a limit only when the spec states one, and the system prompt as
 //! `instructions`, which is the shape an account paying through a `ChatGPT` plan is held to.
 //!
@@ -42,9 +44,10 @@ pub mod auth;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
-use corduroy_harness::Provider;
 use corduroy_harness::core::Secrets;
+use corduroy_harness::{ModelInfo, Provider};
 use oi_kit_provider_types::base::Provider as OiKitProvider;
 use oi_kit_providers::declarative::{
     EnvKeyResolver, deserialize_provider_config, fixed_provider_config_entries, from_json,
@@ -75,14 +78,18 @@ pub struct ProviderSpec {
     /// Extra headers sent with every request.
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
-    /// Seconds a request may take in all.
+    /// Seconds one attempt at a request may take in all, from sending it to the end of its
+    /// answer, streamed or not: 600 by default. An attempt that runs out is not tried
+    /// again; one retried for another reason (a rate limit, a dropped connection) starts
+    /// the count afresh.
     #[serde(default)]
     pub timeout_seconds: Option<u64>,
     /// Whether to stream responses. Each engine has a default.
     #[serde(default)]
     pub streaming: Option<bool>,
     /// The most tokens one answer may take. By default, the most the model may write as
-    /// oi-kit's model catalog has it, or 4096 for a model it does not know.
+    /// [`models`](Self::models) states it, or as oi-kit's model catalog has it; for a model
+    /// neither describes, a quarter of the context `models` states (at least 1024), or 4096.
     #[serde(default)]
     pub max_tokens: Option<u32>,
     /// Sampling temperature. By default, the model's own.
@@ -92,7 +99,15 @@ pub struct ProviderSpec {
     /// not, unless the model always does.
     #[serde(default)]
     pub thinking: Option<Thinking>,
+    /// What the host states about models of this provider, by the provider's name for
+    /// each: the default for `max_tokens` is taken from it. Not a key of the entry this is
+    /// read from; whoever reads the entry fills it in.
+    #[serde(skip)]
+    pub models: BTreeMap<String, ModelInfo>,
 }
+
+/// Seconds one attempt at a request may take where the spec does not say.
+const DEFAULT_TIMEOUT_SECONDS: u64 = 600;
 
 /// How hard a model thinks before it answers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -125,6 +140,7 @@ impl ProviderSpec {
             max_tokens: None,
             temperature: None,
             thinking: None,
+            models: BTreeMap::new(),
         }
     }
 
@@ -386,6 +402,8 @@ fn assemble(
         max_tokens: spec.max_tokens,
         temperature: spec.temperature,
         thinking: spec.thinking,
+        timeout: Duration::from_secs(spec.timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECONDS)),
+        stated: spec.models.clone(),
     };
     Ok(Arc::new(adapter::Adapted::new(provider, settings)))
 }

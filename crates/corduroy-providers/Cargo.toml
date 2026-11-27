@@ -22,8 +22,9 @@ oi-kit-provider-types = { workspace = true }
 rmcp = { workspace = true }
 async-trait = { workspace = true }
 anyhow = { workspace = true }
-# A secret is revealed on the blocking pool of the runtime oi-kit's client already needs.
-tokio = { workspace = true }
+# A secret is revealed on the blocking pool of the runtime oi-kit's client already needs,
+# and a request is bounded by its clock.
+tokio = { workspace = true, features = ["time"] }
 base64 = { workspace = true, features = ["std"] }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["std"] }

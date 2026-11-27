@@ -1070,7 +1070,15 @@ fn providers(harness: &Harness, file: &AgentFile) -> Result<Vec<Unstarted>, Agen
                  [secrets.{secret}]"
             )));
         }
-        match corduroy_providers::build_with(name, &entry.spec, harness.secrets()) {
+        // What the file states about a model is the provider's to know as well: an answer's
+        // default limit comes from it.
+        let mut spec = entry.spec.clone();
+        spec.models = entry
+            .models
+            .iter()
+            .map(|(model, stated)| (model.clone(), stated.info()))
+            .collect();
+        match corduroy_providers::build_with(name, &spec, harness.secrets()) {
             Ok(built) => {
                 let described = entry
                     .models

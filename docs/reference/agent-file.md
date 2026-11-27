@@ -44,9 +44,9 @@ is what `provider` refers to.
 | `api_key_env` | string | The environment variable holding the key, read once when the agent starts. Defaults: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`; Ollama needs none. |
 | `secret` | string | The name of a [`[secrets.<name>]`](#secretsname) entry holding the key, in place of `api_key_env`. It is read for every request, so a value that changes while the agent runs is the one sent, and nothing is read from the environment unless that entry says so. For `anthropic`, `openai` and their `-compatible` kinds. |
 | `headers` | table | Extra headers sent with every request. |
-| `timeout_seconds` | integer | How long one request may take in all. |
+| `timeout_seconds` | integer | How long one attempt at a request may take in all, from sending it to the end of its answer, whether the answer is streamed or not. Default: 600. An attempt that runs out ends the request, and the run, as failed with the kind `timeout`; it is not tried again. A request tried again for another reason (a rate limit, a dropped connection) has the whole time for each attempt. |
 | `streaming` | boolean | Whether to stream responses. Each kind has a default. |
-| `max_tokens` | integer | The most one answer may take. Default: the model's own limit from oi-kit's catalogue, or 4096 for a model it does not know. A request to OpenAI's Responses API (the `openai` kinds asked for an o-series, GPT-5 or GPT-6 model, or given a `base_url` ending in `responses`) carries a limit only when this is set. |
+| `max_tokens` | integer | The most one answer may take. Default: what the model may write, as [`output_tokens`](#providersnamemodelsmodel) states it or as oi-kit's catalogue has it; for a model neither describes, a quarter of its stated `context_tokens` (at least 1024), or 4096. So a request always carries a limit, and a model served on this machine is not left to write until its context is full. A request to OpenAI's Responses API (the `openai` kinds asked for an o-series, GPT-5 or GPT-6 model, or given a `base_url` ending in `responses`) carries a limit only when this is set. |
 | `temperature` | float | Sampling temperature. Default: the model's own. |
 | `thinking` | string | `off`, `low`, `medium`, `high` or `max`, for a model that can think before it answers. |
 
@@ -63,8 +63,8 @@ it holds. Every key is optional, and what is left out stays as the provider repo
 
 | Key | Type | Meaning |
 | --- | --- | --- |
-| `context_tokens` | integer | How many tokens the model holds at once. [`compact`](shipped-add-ons.md#compact) starts from three quarters of it. |
-| `output_tokens` | integer | The most it may write in one answer. |
+| `context_tokens` | integer | How many tokens the model holds at once. [`compact`](shipped-add-ons.md#compact) starts from three quarters of it, and an answer may take a quarter of it where nothing else says how much the model may write (see `max_tokens`). |
+| `output_tokens` | integer | The most it may write in one answer: the default for the provider's `max_tokens`. |
 | `takes` | list of strings | The kinds of content it takes: `text`, `image`, `audio`, `video`, `pdf`, or another kind by name. A list given here replaces the provider's whole. |
 | `returns` | list of strings | The kinds of content it returns, named the same way. |
 | `tools` | boolean | Whether it can be offered tools. |
