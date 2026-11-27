@@ -36,7 +36,9 @@ use std::sync::mpsc;
 use std::thread;
 
 use async_trait::async_trait;
-use corduroy_core::{Context, ModelInfo, ModelReply, ModelRequest, Plugin, PluginError, Registry};
+use corduroy_core::{
+    Context, ModelInfo, ModelReply, ModelRequest, Part, Plugin, PluginError, Registry, Usage,
+};
 #[cfg(feature = "tokio")]
 use corduroy_core::{MODELS, Model, ModelError, Models};
 
@@ -188,14 +190,73 @@ impl Retry {
     }
 }
 
+/// A piece of an answer, told while the model is still writing it.
+///
+/// Pieces are a preview of the reply, in the order they were written: put together they
+/// say what the reply will, and the reply itself still comes whole from
+/// [`Provider::complete_reporting`]. A provider tells them at whatever grain its API gives:
+/// a word, a line, or the whole of a part at once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Piece {
+    /// More of the answer's text.
+    Text(String),
+    /// More of what the model thinks before it answers.
+    Thinking(String),
+    /// More of a tool call the model is writing.
+    Call(CallPiece),
+    /// What the request has cost so far, where the provider says before the end.
+    Usage(Usage),
+}
+
+/// More of a tool call being written: see [`Piece::Call`].
+///
+/// Pieces with the same `id` are of one call. The first names the tool; each adds to the
+/// text of its input. A provider that only learns of a call once it is whole tells it as
+/// one piece.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CallPiece {
+    /// The call's id, as the reply will have it.
+    pub id: String,
+    /// The tool's name. Empty in a piece that only adds to the input.
+    pub name: String,
+    /// More of the input's JSON text.
+    pub arguments: String,
+}
+
+impl CallPiece {
+    /// More of the call `id` of the tool `name`: `arguments` is added to its input.
+    #[must_use]
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            arguments: arguments.into(),
+        }
+    }
+}
+
 /// What a provider tells whoever asked while it answers a request. The harness records what
 /// it hears; a provider never writes to the event stream itself.
 ///
 /// Every method has a default that does nothing, so one more thing to tell is an addition.
+/// A method is called from inside the provider's own work and must not wait.
 pub trait Reports: Send + Sync {
-    /// An attempt failed and the request is about to be made again.
+    /// An attempt failed and the request is about to be made again. Whatever
+    /// [pieces](Self::piece) the failed attempt told are void: the next attempt writes its
+    /// answer from the start.
     fn retry(&self, retry: &Retry) {
         let _: &Retry = retry;
+    }
+
+    /// The model wrote `piece` of its answer.
+    fn piece(&self, piece: &Piece) {
+        let _: &Piece = piece;
     }
 }
 
@@ -217,10 +278,15 @@ pub trait Provider: Send + Sync {
     /// Returns a [`ProviderError`] if the model could not be reached or did not answer.
     async fn complete(&self, request: &ModelRequest) -> Result<ModelReply, ProviderError>;
 
-    /// Answer `request`, telling `reports` what happens on the way: each attempt that is
-    /// made again. This is what the loop calls. By default nothing is told and the answer
-    /// is [`complete`](Self::complete)'s; a provider that retries implements this and has
-    /// `complete` call it with `&()`.
+    /// Answer `request`, telling `reports` what happens on the way: each [`Piece`] of the
+    /// answer as the model writes it, and each attempt that is made again. This is what
+    /// the loop calls, and it is how a provider streams: the pieces are a preview for
+    /// whoever watches, and the reply returned is the whole.
+    ///
+    /// By default the answer is [`complete`](Self::complete)'s, told as one piece for each
+    /// of its parts once it is there, so whoever watches is told the same things by a
+    /// provider that streams and by one that does not. A provider that streams or retries
+    /// implements this and has `complete` call it with `&()`.
     ///
     /// # Errors
     ///
@@ -230,8 +296,11 @@ pub trait Provider: Send + Sync {
         request: &ModelRequest,
         reports: &dyn Reports,
     ) -> Result<ModelReply, ProviderError> {
-        let _: &dyn Reports = reports;
-        self.complete(request).await
+        let reply = self.complete(request).await?;
+        for piece in pieces_of(&reply) {
+            reports.piece(&piece);
+        }
+        Ok(reply)
     }
 
     /// What is known about `model`, by the provider's own name for it: what it takes and how
@@ -240,6 +309,27 @@ pub trait Provider: Send + Sync {
         let _: &str = model;
         ModelInfo::unknown()
     }
+}
+
+/// A whole `reply` as the pieces a provider that streamed it would have told: one for each
+/// part that is text, thinking or a tool call.
+#[must_use]
+pub fn pieces_of(reply: &ModelReply) -> Vec<Piece> {
+    reply
+        .message
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            Part::Text(text) => Some(Piece::Text(text.clone())),
+            Part::Thinking { text, .. } => Some(Piece::Thinking(text.clone())),
+            Part::ToolCall(call) => Some(Piece::Call(CallPiece::new(
+                call.id.clone(),
+                call.name.clone(),
+                call.input.clone(),
+            ))),
+            _ => None,
+        })
+        .collect()
 }
 
 /// A plugin that registers a model provider under a name, and offers its models to plugins.

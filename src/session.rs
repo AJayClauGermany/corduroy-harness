@@ -19,6 +19,8 @@
 //! | `tool/result` | `environment` | `{"id", "tool", "ok", "output"}`, and `"content"` when the result is not one block of text, caused by its `tool/call`; with `"signal"` where the call waited and this is what the signal of that name brought |
 //! | `model/request` | `host` | `{"provider", "model", "messages", "tools"}`: the model is about to be asked, with that many messages and tools; what follows it in the session (the model's `message`, or a `turn/end`) says when the answer came |
 //! | `model/retry` | `host` | `{"provider", "model", "attempt", "kind", "reason", "delay_ms", "by"}`: an attempt at the request failed for `reason` (of `kind`, as a failed `turn/end` names them) and it is made again after `delay_ms`; `attempt` counts the retries from 1, and `by` says who retries (`provider`) |
+//! | `model/progress` | `host` | `{"provider", "model", "tokens", "elapsed_ms"}` with `"text"`, `"thinking"` and `"calls"` (each `{"id", "tool", "input"}`) where there is some: a checkpoint of an answer the model is still writing, holding what it wrote since the checkpoint before; `tokens` is what the attempt has written so far, with `"estimated": true` where that is reckoned from the length of the text; not part of the conversation |
+//! | `model/partial` | `host` | the same fields, holding the whole of what the model had written when its request ended without an answer, and `"why"`: `stopped`, `time-limit` or `failed` (with the `"kind"` a failed `turn/end` names); not part of the conversation, and nothing in it is run |
 //! | `usage` | `agent` | `{"model", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens", "stop"}`, each count only if the provider gave it; the cache counts are part of `input_tokens` and the reasoning count of `output_tokens`; `stop` is why the model stopped (`finished`, `limit`, `tool_calls` or `refused`), if the provider said |
 //! | `turn/end` | `host` | `{"status"}`: `finished`, `cut-off` (the answer stopped at the most the model may write), `turn-limit`, `time-limit`, `output-limit`, `failed` (with `"reason"`, and `"kind"` where the model gave no answer: `context-overflow`, `rate-limit`, `auth`, `timeout`, `unreachable` or `other`), `stopped` or `yielded` |
 //! | `run/restart` | `host` | `{"attempt"}`: an unfinished run was picked up again |
@@ -114,6 +116,13 @@ pub const MODEL_REQUEST: &str = "model/request";
 
 /// Topic of the event that records a model request being made again after a failed attempt.
 pub const MODEL_RETRY: &str = "model/retry";
+
+/// Topic of the event that checkpoints what a model has written while it is still writing.
+pub const MODEL_PROGRESS: &str = "model/progress";
+
+/// Topic of the event that keeps what a model had written when its request ended without
+/// an answer.
+pub const MODEL_PARTIAL: &str = "model/partial";
 
 /// Topic of the event that records an unfinished run being picked up again.
 const RESTART: &str = "run/restart";
@@ -1723,6 +1732,17 @@ impl Journal {
             "by": retry.by,
         });
         let draft = Draft::new(Source::Host, MODEL_RETRY)
+            .session(self.id.clone())
+            .payload(payload.to_string());
+        self.events.emit(draft)?;
+        Ok(())
+    }
+
+    /// Record `payload` under `topic` as something the host notes about a request to the
+    /// model: a checkpoint of what it is writing, or what it had written when it ended
+    /// without an answer. Neither is part of the conversation.
+    pub(crate) fn noted(&self, topic: &str, payload: &Value) -> Result<()> {
+        let draft = Draft::new(Source::Host, topic)
             .session(self.id.clone())
             .payload(payload.to_string());
         self.events.emit(draft)?;

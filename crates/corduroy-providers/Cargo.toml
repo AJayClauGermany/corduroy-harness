@@ -21,6 +21,8 @@ oi-kit-provider-types = { workspace = true }
 # The tool and result types oi-kit's providers take, at the version oi-kit uses.
 rmcp = { workspace = true }
 async-trait = { workspace = true }
+# An answer is read from oi-kit as a stream, a piece at a time.
+futures-core = { workspace = true }
 anyhow = { workspace = true }
 # A secret is revealed on the blocking pool of the runtime oi-kit's client already needs,
 # and a request is bounded by its clock.

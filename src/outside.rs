@@ -37,6 +37,7 @@ use corduroy_core::sync::Lock;
 use corduroy_core::{Message, Registry, SessionId};
 
 use crate::harness::{HarnessError, settled};
+use crate::live::{Live, Watch};
 use crate::session::{Answer, Ask, End, Journal, Sessions, ended};
 use crate::stop::Stop;
 use crate::tools::NOT_RUN;
@@ -114,6 +115,8 @@ pub struct Outside {
     sessions: Arc<Sessions>,
     /// The runs under way, which the harness that made this notes here.
     pub(crate) runs: Runs,
+    /// What each session's model is writing, for whoever watches.
+    pub(crate) live: Live,
     /// Whether the host takes on a message recorded here.
     heard: AtomicBool,
     /// Held while something is being recorded here. An event is stored, and heard by
@@ -132,6 +135,7 @@ impl Outside {
     pub(crate) fn new(sessions: Arc<Sessions>) -> Self {
         Self {
             runs: Runs::new(Arc::clone(&sessions)),
+            live: Live::default(),
             sessions,
             heard: AtomicBool::new(false),
             recording: Lock::new(()),
@@ -154,6 +158,15 @@ impl Outside {
     #[must_use]
     pub fn is_heard(&self) -> bool {
         self.heard.load(Ordering::SeqCst)
+    }
+
+    /// Watch what the model of `session` writes while it writes it, or of every session
+    /// where none is named: the [live channel](crate::live). What is shown is a preview for
+    /// a person to read, never recorded and never to be acted on; the whole answer is the
+    /// `message` event that follows.
+    #[must_use]
+    pub fn watch(&self, session: Option<&SessionId>) -> Watch {
+        self.live.watch(session)
     }
 
     /// The tool calls a gate asked about that nobody has answered yet, in every session.

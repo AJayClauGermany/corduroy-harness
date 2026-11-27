@@ -29,10 +29,12 @@ use crate::bound::Bounds;
 use crate::children::{SESSIONS, SessionsService};
 use crate::compact::CompactOperation;
 use crate::gates::GateOperation;
+use crate::hearing::{Checkpoints, Heard, Unanswered};
+use crate::live::Watch;
 use crate::loops::{DEFAULT_LOOP, LOOPS, Loops, Run, StandardLoop, Step};
 use crate::operation::{Next, Operation};
 use crate::outside::{FRONTS, Fronts, OUTSIDE, Outside};
-use crate::provider::{DEFAULT_PROVIDER, PROVIDERS, Provider, Providers, Reports, Retry};
+use crate::provider::{DEFAULT_PROVIDER, PROVIDERS, Provider, Providers};
 use crate::session::{
     Answer, Ask, Effect, End, Journal, MAIN, Progress, Session, SessionInfo, Sessions, Wait, ended,
 };
@@ -255,6 +257,8 @@ pub struct Harness {
     system: String,
     /// What a run is held to.
     budget: Budget,
+    /// How often what the model is writing is checkpointed in the log.
+    checkpoints: Checkpoints,
     restart_limit: u32,
     /// The name of the loop that takes each step, looked up in `loops` on every step.
     looping: String,
@@ -283,25 +287,6 @@ impl fmt::Debug for Harness {
 }
 
 /// While alive, the session it names is being run, and [`Harness::stop`] reaches it.
-/// Records what a provider reports while it answers one request of a session.
-struct Heard<'run> {
-    journal: &'run Journal,
-    provider: &'run str,
-    model: &'run str,
-    /// The first report that could not be recorded.
-    failed: Lock<Option<anyhow::Error>>,
-}
-
-impl Reports for Heard<'_> {
-    fn retry(&self, retry: &Retry) {
-        if let Err(error) = self.journal.retried(self.provider, self.model, retry) {
-            self.failed.with(|failed| {
-                failed.get_or_insert(error);
-            });
-        }
-    }
-}
-
 struct Running<'harness> {
     running: &'harness Lock<BTreeMap<SessionId, Stop>>,
     session: SessionId,
@@ -423,8 +408,7 @@ impl Harness {
         let models = Arc::new(Models::new());
         let secrets = Arc::new(Secrets::new());
         let http = Arc::new(HttpClients::new());
-        let contributed = Arc::new(Operations::new());
-        let loops = Arc::new(Loops::new());
+        let (contributed, loops) = (Arc::new(Operations::new()), Arc::new(Loops::new()));
         Self::register_own(&loops, &services, &sessions)?;
         let mut app = App::with_events(Arc::clone(&events));
         app.provide(TOOLS, Arc::clone(&tools))?;
@@ -464,6 +448,7 @@ impl Harness {
             model: "default".to_owned(),
             system: String::new(),
             budget: Budget::new(),
+            checkpoints: Checkpoints::default(),
             looping: DEFAULT_LOOP.to_owned(),
             loops,
             restart_limit: 5,
@@ -548,6 +533,23 @@ impl Harness {
     pub const fn with_time_limit(mut self, limit: Duration) -> Self {
         self.budget.time = Some(limit);
         self
+    }
+
+    /// Say how often what the model is writing is checkpointed in the log while it writes
+    /// (`model/progress`): every five seconds unless said otherwise. What a request that
+    /// never answered had written is kept whatever this says (`model/partial`).
+    #[must_use]
+    pub const fn with_checkpoints(mut self, checkpoints: Checkpoints) -> Self {
+        self.checkpoints = checkpoints;
+        self
+    }
+
+    /// Watch what the model of `session` writes while it writes it, or of every session
+    /// where none is named: the [live channel](crate::live). A preview only; the whole
+    /// answer is the `message` event that follows.
+    #[must_use]
+    pub fn watch(&self, session: Option<&SessionId>) -> Watch {
+        self.outside.live.watch(session)
     }
 
     /// End a run once the model has written this many tokens in it without an answer,
@@ -1186,23 +1188,34 @@ impl Harness {
             return Ok(Step::End(end));
         }
         journal.ask_started(&self.provider, request)?;
-        let heard = Heard {
+        let heard = Heard::new(
             journal,
-            provider: &self.provider,
-            model: &request.model,
-            failed: Lock::new(None),
-        };
+            &self.outside.live,
+            &self.provider,
+            &request.model,
+            self.checkpoints,
+        );
         let answering = stop.unless_asked(provider.complete_reporting(request, &heard));
         let reply = stop.within(self.budget.time, answering).await;
-        // A retry that could not be recorded closed the stream: that reaches the caller.
-        if let Some(error) = heard.failed.with(Option::take) {
+        // A report that could not be recorded closed the stream: that reaches the caller.
+        if let Some(error) = heard.failed() {
             return Err(error.into());
         }
+        // A request that ends without an answer leaves what it had written.
         let reply = match reply {
             Some(Some(reply)) => reply,
-            Some(None) => return self.stopped(journal),
-            None => return Ok(Step::End(End::TimeLimit)),
+            Some(None) => {
+                heard.unanswered(Unanswered::Stopped)?;
+                return self.stopped(journal);
+            }
+            None => {
+                heard.unanswered(Unanswered::TimeLimit)?;
+                return Ok(Step::End(End::TimeLimit));
+            }
         };
+        if let Err(error) = &reply {
+            heard.unanswered(Unanswered::Failed(error.kind()))?;
+        }
         match reply {
             Ok(reply) => {
                 let mut message = reply.message;

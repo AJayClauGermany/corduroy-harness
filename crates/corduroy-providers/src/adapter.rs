@@ -1,8 +1,11 @@
 //! oi-kit's providers as the harness's: converting messages, tools and usage at the
 //! boundary, so that nothing past it depends on oi-kit's shapes.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::future::poll_fn;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -12,15 +15,17 @@ use corduroy_harness::core::{
     AUDIO, Content, IMAGE, Message, PDF, Part, Role, TEXT, ToolCall, ToolSpec, VIDEO,
 };
 use corduroy_harness::{
-    ModelInfo, ModelReply, ModelRequest, Provider, ProviderError, ProviderErrorKind, Reports,
-    Retry, StopReason, Usage,
+    CallPiece, ModelInfo, ModelReply, ModelRequest, Piece, Provider, ProviderError,
+    ProviderErrorKind, Reports, Retry, StopReason, Usage,
 };
-use oi_kit_provider_types::base::Provider as OiKitProvider;
+use futures_core::Stream;
+use oi_kit_provider_types::base::{MessageStream, Provider as OiKitProvider, collect_stream};
 use oi_kit_provider_types::canonical::Modality;
 use oi_kit_provider_types::canonical::maybe_get_canonical_model;
 use oi_kit_provider_types::conversation::message::{
     Message as OiKitMessage, MessageContent, ToolRequest,
 };
+use oi_kit_provider_types::conversation::token_usage::ProviderUsage;
 use oi_kit_provider_types::errors::ProviderError as OiKitError;
 use oi_kit_provider_types::formats::openai::is_openai_responses_model;
 use oi_kit_provider_types::model::ModelConfig;
@@ -203,16 +208,23 @@ impl Provider for Adapted {
             .collect::<Result<Vec<Tool>, ProviderError>>()?;
         let provider = &self.provider;
         let bound = self.settings.timeout;
+        // The answer is read as oi-kit's stream of it, each piece told as it comes, whether
+        // or not the provider's API streams: one that does not gives the whole as one piece.
         // Rate limits, server errors and dropped connections are tried again, as the
         // provider's own policy says (oi-kit's `should_retry` and its delays), each retry
         // told to whoever asked. Each attempt has the whole of the bound, whether its
         // answer is streamed or not: oi-kit bounds only the gap between two pieces of a
         // stream, which a model that never stops writing never exceeds. An attempt that
-        // runs out is dropped, which closes its connection, and is not tried again.
+        // runs out is dropped, which closes its connection, and is not tried again. A retry
+        // is told before the next attempt writes anything, so whoever heard pieces of the
+        // failed one knows they are void.
         let policy = provider.retry_config();
         let mut retries: usize = 0;
         let (message, usage) = loop {
-            let attempt = provider.complete(&config, system, &messages, &tools);
+            let attempt = async {
+                let stream = provider.stream(&config, system, &messages, &tools).await?;
+                read(stream, reports).await
+            };
             let missed = match tokio::time::timeout(bound, attempt).await {
                 Ok(Ok(answer)) => break answer,
                 Ok(Err(error)) => Missed::Failed(error),
@@ -259,6 +271,63 @@ impl Provider for Adapted {
     fn describe(&self, model: &str) -> ModelInfo {
         describe(&self.settings.provider, model)
     }
+}
+
+/// One piece of an answer as oi-kit streams it: more of the message, what it has cost so
+/// far, or both.
+type Chunk = Result<(Option<OiKitMessage>, Option<ProviderUsage>), OiKitError>;
+
+/// Pieces of an answer already read, handed to oi-kit again to be put together as it
+/// puts any stream together.
+struct Replay(VecDeque<Chunk>);
+
+impl Stream for Replay {
+    type Item = Chunk;
+
+    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Chunk>> {
+        Poll::Ready(self.0.pop_front())
+    }
+}
+
+/// The answer oi-kit streams, each piece told to `reports` as it comes, and the whole put
+/// together by oi-kit's own rule.
+async fn read(
+    mut stream: MessageStream,
+    reports: &dyn Reports,
+) -> Result<(OiKitMessage, ProviderUsage), OiKitError> {
+    let mut read = VecDeque::new();
+    while let Some(chunk) = poll_fn(|cx| stream.as_mut().poll_next(cx)).await {
+        let (message, usage) = chunk?;
+        for piece in message.iter().flat_map(pieces_in) {
+            reports.piece(&piece);
+        }
+        if let Some(usage) = &usage {
+            reports.piece(&Piece::Usage(usage_of(&usage.usage)));
+        }
+        read.push_back(Ok((message, usage)));
+    }
+    collect_stream(Box::pin(Replay(read))).await
+}
+
+/// What a piece of oi-kit's stream says the model wrote: text and thinking as they come,
+/// and a tool call once oi-kit has the whole of it.
+fn pieces_in(message: &OiKitMessage) -> Vec<Piece> {
+    message
+        .content
+        .iter()
+        .filter_map(|content| match content {
+            MessageContent::Text(text) => Some(Piece::Text(text.text.clone())),
+            MessageContent::Thinking(thinking) => Some(Piece::Thinking(thinking.thinking.clone())),
+            MessageContent::ToolRequest(request) => {
+                let call = call_of(request);
+                Some(Piece::Call(CallPiece::new(call.id, call.name, call.input)))
+            }
+            _ => None,
+        })
+        .filter(
+            |piece| !matches!(piece, Piece::Text(text) | Piece::Thinking(text) if text.is_empty()),
+        )
+        .collect()
 }
 
 /// Which sort of failure oi-kit says `error` was.

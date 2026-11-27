@@ -9,8 +9,10 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use corduroy_harness::core::{EventStream, Message, ModelInfo, ModelRequest, Pattern};
-use corduroy_harness::{Harness, ProviderErrorKind, Status, provider};
+use corduroy_harness::core::{EventStream, Message, ModelInfo, ModelRequest, Pattern, SessionId};
+use corduroy_harness::{
+    Checkpoints, Harness, MAIN, Piece, ProviderErrorKind, Seen, Status, provider,
+};
 use corduroy_providers::{ProviderSpec, build};
 use serde_json::{Value, json};
 
@@ -229,6 +231,105 @@ async fn an_answer_that_never_ends_is_ended_at_the_timeout() {
     let end: Value = serde_json::from_str(&ends.last().unwrap().payload).unwrap();
     assert_eq!(end["status"], "failed");
     assert_eq!(end["kind"], "timeout");
+    // What the model had written by then is kept, once, and is no part of the conversation.
+    let partials = events.matching(&Pattern::new("model/partial"));
+    assert_eq!(partials.len(), 1);
+    let partial: Value = serde_json::from_str(&partials[0].payload).unwrap();
+    assert_eq!(partial["why"], "failed");
+    assert_eq!(partial["kind"], "timeout");
+    assert!(
+        partial["text"].as_str().unwrap().starts_with("la la "),
+        "{partial}"
+    );
+    assert_eq!(partial["estimated"], true);
+    let session = harness.journal(&SessionId::new(MAIN)).unwrap().session();
+    let said = session.conversation();
+    assert!(
+        said.iter()
+            .all(|message| !message.text_content().contains("la ")),
+        "{said:?}"
+    );
+}
+
+/// An endpoint that answers each request as a stream of `words`, one piece each, then the
+/// usage and the end. Its port.
+fn streaming(words: &'static [&'static str]) -> io::Result<u16> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let port = listener.local_addr()?.port();
+    thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            if body_of(&stream).is_err() {
+                continue;
+            }
+            let mut pieces: Vec<String> = words
+                .iter()
+                .map(|word| {
+                    json!({
+                        "id": "1", "object": "chat.completion.chunk", "created": 0,
+                        "model": "local",
+                        "choices": [{
+                            "index": 0, "delta": {"role": "assistant", "content": word},
+                        }],
+                    })
+                    .to_string()
+                })
+                .collect();
+            let last = json!({
+                "id": "1", "object": "chat.completion.chunk", "created": 0, "model": "local",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7},
+            });
+            pieces.extend([last.to_string(), "[DONE]".to_owned()]);
+            let head =
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n";
+            let _sent = stream.write_all(head.as_bytes()).and_then(|()| {
+                pieces
+                    .iter()
+                    .try_for_each(|piece| write!(stream, "data: {piece}\n\n"))
+            });
+        }
+    });
+    Ok(port)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_streamed_answer_is_told_piece_by_piece_and_returned_whole() {
+    let port = streaming(&["one ", "two ", "three"]).unwrap();
+    let built = build("local", &spec(port, true)).unwrap();
+    let events = Arc::new(EventStream::new());
+    let harness = Harness::open(Arc::clone(&events))
+        .unwrap()
+        .with_model("local")
+        .with_checkpoints(Checkpoints::Every(Duration::ZERO));
+    harness.plugin(provider("default", built));
+    let watch = harness.watch(None);
+
+    let outcome = harness.run("count").await.unwrap();
+
+    assert!(
+        matches!(&outcome.status, Status::Finished { answer } if answer == "one two three"),
+        "{:?}",
+        outcome.status
+    );
+    // Whoever watched was shown the text in order: joined on the way, so all of it.
+    let shown: String = watch
+        .take()
+        .into_iter()
+        .filter_map(|shown| match shown.seen {
+            Seen::Piece(Piece::Text(text)) => Some(text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(shown, "one two three");
+    // With a checkpoint for every piece, the checkpoints hold the answer between them.
+    let checkpoints = events.matching(&Pattern::new("model/progress"));
+    let kept: String = checkpoints
+        .iter()
+        .map(|event| serde_json::from_str::<Value>(&event.payload).unwrap())
+        .filter_map(|payload| payload["text"].as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(kept, "one two three");
+    assert_eq!(events.matching(&Pattern::new("model/partial")), []);
 }
 
 #[tokio::test(flavor = "multi_thread")]
