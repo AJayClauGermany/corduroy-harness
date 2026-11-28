@@ -617,9 +617,11 @@ impl service::Host for HostState {
         payload: String,
     ) -> Result<String, CallError> {
         let name = service;
-        self.check("service", &name).map_err(|_| {
-            CallError::Denied(format!("capability `service` does not cover `{name}`"))
-        })?;
+        // The grant names `service:method`, and a bare service name every method.
+        if let Err(denied) = self.grants.check_part("service", &name, &method) {
+            self.refused("service", &denied.resource);
+            return Err(CallError::Denied(denied.to_string()));
+        }
         let services = self
             .lent
             .services

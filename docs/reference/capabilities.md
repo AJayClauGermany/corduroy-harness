@@ -34,7 +34,7 @@ through. See [Grants](agent-file.md#grants) for how to write one in the agent fi
 | `random` | bytes from the host's secure generator (64 KiB per call) | `secure` | `"secure"` |
 | `tools` | list and call other plugins' tools, through the gates | tool name | `["read", "tree"]` |
 | `state` | a durable key-value store of its own (`get`, `set`, `remove`, `keys`), kept on the log | key | `"*"` |
-| `service` | call a service another plugin provides | service name | `"sessions"` |
+| `service` | call a service another plugin provides | `<service>:<method>`; a service's name alone is every method of it | `"sessions"`, `"sessions:start"` |
 | `plugins` | load and unload add-ons as its children, granting no more than it holds | the loaded plugin's name | `"*"` |
 | `llm` | one completion from a model of a [provider](agent-file.md#providersname), recorded as `llm/request` and `llm/response` with what it cost | model, as `<provider>/<model>` | `"main/claude-haiku-5-5"`, `"main/*"` |
 | `secret` | an opaque handle to a named credential, never its value | secret name | `"github"` |

@@ -93,6 +93,24 @@ impl Scope {
             && !self.deny.iter().any(|pattern| pattern.matches(resource))
             && self.within.iter().all(|outer| outer.permits(resource))
     }
+
+    /// Whether `part` of `whole` is inside this scope, for a resource written
+    /// `whole:part`, as a method of a service is.
+    ///
+    /// A pattern that matches `whole` alone speaks for every part of it: allowing
+    /// `sessions` reaches `sessions:start`, and denying `sessions` denies each of its
+    /// methods. A pattern that matches `whole:part` reaches, or denies, that part only.
+    #[must_use]
+    pub fn permits_part(&self, whole: &str, part: &str) -> bool {
+        let resource = format!("{whole}:{part}");
+        let covers = |pattern: &Pattern| pattern.matches(whole) || pattern.matches(&resource);
+        self.allow.iter().any(covers)
+            && !self.deny.iter().any(covers)
+            && self
+                .within
+                .iter()
+                .all(|outer| outer.permits_part(whole, part))
+    }
 }
 
 /// The capabilities one plugin has been given.
@@ -148,6 +166,29 @@ impl Grants {
             Err(Denied {
                 capability: capability.to_owned(),
                 resource: resource.to_owned(),
+            })
+        }
+    }
+}
+
+impl Grants {
+    /// Check that `capability` was granted and that its scope reaches `part` of `whole`,
+    /// as [`Scope::permits_part`] reads it: a grant of `whole` reaches every part.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Denied`] naming the capability and `whole:part` if either check fails.
+    pub fn check_part(&self, capability: &str, whole: &str, part: &str) -> Result<(), Denied> {
+        let permitted = self
+            .scopes
+            .get(capability)
+            .is_some_and(|scope| scope.permits_part(whole, part));
+        if permitted {
+            Ok(())
+        } else {
+            Err(Denied {
+                capability: capability.to_owned(),
+                resource: format!("{whole}:{part}"),
             })
         }
     }
@@ -213,6 +254,56 @@ mod tests {
         assert_eq!(
             Scope::subtree("/w").allowed().collect::<Vec<_>>(),
             ["/w", "/w/*"]
+        );
+    }
+
+    #[test]
+    fn a_grant_of_the_whole_reaches_every_part_and_one_of_a_part_only_that() {
+        let whole = Scope::none().allow("sessions");
+        let one = Scope::none().allow("sessions:start");
+        let but_one = Scope::none().allow("sessions").deny("sessions:signal");
+
+        assert!(whole.permits_part("sessions", "start"));
+        assert!(whole.permits_part("sessions", "signal"));
+        assert!(!whole.permits_part("compaction", "due"));
+        assert!(one.permits_part("sessions", "start"));
+        assert!(!one.permits_part("sessions", "signal"));
+        assert!(but_one.permits_part("sessions", "start"));
+        assert!(!but_one.permits_part("sessions", "signal"));
+        // Denying the whole denies each part, whatever is allowed.
+        assert!(
+            !Scope::any()
+                .deny("sessions")
+                .permits_part("sessions", "start")
+        );
+        // The same grant, written three ways.
+        for pattern in ["sessions", "sessions:*", "*"] {
+            assert!(
+                Scope::none()
+                    .allow(pattern)
+                    .permits_part("sessions", "start")
+            );
+        }
+    }
+
+    #[test]
+    fn a_part_passed_on_is_within_what_its_loader_holds() {
+        let loader = Scope::none().allow("sessions:start");
+        let child = Scope::none().allow("sessions").within(&loader);
+        let grants = Grants::none().grant("service", child);
+
+        assert!(grants.check_part("service", "sessions", "start").is_ok());
+        assert_eq!(
+            grants
+                .check_part("service", "sessions", "signal")
+                .unwrap_err()
+                .to_string(),
+            "capability `service` does not cover `sessions:signal`"
+        );
+        assert!(
+            Grants::none()
+                .check_part("service", "sessions", "start")
+                .is_err()
         );
     }
 

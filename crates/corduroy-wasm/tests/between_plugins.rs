@@ -425,13 +425,69 @@ fn services_cross_between_plugins_with_the_callers_name() {
     assert_eq!(unknown["error"], r#"CallError::Unknown("method `dance`")"#);
     assert_eq!(
         outside["error"],
-        r#"CallError::Denied("capability `service` does not cover `gamma`")"#
+        r#"CallError::Denied("capability `service` does not cover `gamma:echo`")"#
     );
     // A native caller reaches a WebAssembly service the same way.
     assert_eq!(
         host.services.call("host", "alpha", "echo", "x").unwrap(),
         r#"{"caller":"host","payload":"x","service":"alpha"}"#
     );
+}
+
+#[test]
+fn a_service_grant_can_name_one_method() {
+    let dir = scratch("service-methods");
+    let mut host = host(EventStream::new()).unwrap();
+    let native: Arc<dyn Service> = Arc::new(|_: &str, method: &str, _: &str| Ok(method.to_owned()));
+    host.services.insert("native", native).unwrap();
+    // Beta may call one method of `native`, and every method of `alpha` but one.
+    host.app.plugin(
+        testbed(
+            &dir,
+            "alpha",
+            &json!({"provides": ["alpha"], "prefix": "a."}),
+            [Scope::none(), Scope::none(), Scope::none()],
+        )
+        .unwrap(),
+    );
+    host.app.plugin(
+        testbed(
+            &dir,
+            "beta",
+            &json!({"prefix": "b."}),
+            [
+                Scope::none(),
+                Scope::none(),
+                Scope::none()
+                    .allow("native:start")
+                    .allow("alpha")
+                    .deny("alpha:relay"),
+            ],
+        )
+        .unwrap(),
+    );
+
+    let start = via(&host, "native", "start", &json!(null));
+    let signal = via(&host, "native", "signal", &json!(null));
+    let echo = via(&host, "alpha", "echo", &json!("x"));
+    let relay = via(&host, "alpha", "relay", &json!(null));
+
+    assert_eq!(start, json!({"ok": "start"}));
+    assert_eq!(
+        signal["error"],
+        r#"CallError::Denied("capability `service` does not cover `native:signal`")"#
+    );
+    assert!(echo["ok"].is_string(), "{echo}");
+    assert_eq!(
+        relay["error"],
+        r#"CallError::Denied("capability `service` does not cover `alpha:relay`")"#
+    );
+    // The refusal is recorded with the method it was for.
+    let refused: Vec<Value> = payloads(&host.app, "capability/denied")
+        .into_iter()
+        .map(|payload| payload["resource"].clone())
+        .collect();
+    assert_eq!(refused, [json!("native:signal"), json!("alpha:relay")]);
 }
 
 #[test]
