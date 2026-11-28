@@ -15,7 +15,7 @@
 //! corduroy init [vendor] [--secrets keychain|env]
 //!                                    write the default agent file to edit
 //! corduroy [options] secrets         list the agent's secrets and how each stands
-//! corduroy [options] secrets set [name]
+//! corduroy [options] secrets set [name] [--hosts a,b]
 //!                                    put a secret's value in the keychain, typed without showing
 //! corduroy [options] secrets remove [name]
 //!                                    take it out again
@@ -65,7 +65,7 @@ const USAGE: &str = "usage: corduroy [--agent FILE] [--workspace DIR] [--session
                      [--model NAME] [--provider NAME] [--progress stdout|stderr] [--version] [run PROMPT | continue | stop | check | sessions | \
                      sessions remove NAME | log | report [N] | doctor | \
                      init [anthropic|openai|chatgpt|ollama] [--secrets keychain|env] | \
-                     secrets | secrets set [SECRET] | secrets remove [SECRET] | \
+                     secrets | secrets set [SECRET] [--hosts HOSTS] | secrets remove [SECRET] | \
                      login [SECRET] | logout [SECRET] | codes [CODE]]";
 
 /// `corduroy` and its version, with the commit it was built from when the build said
@@ -334,10 +334,10 @@ fn between_runs(
         ["secrets"] => {
             Some(described().and_then(|described| secrets::list(&described, standard, &out)))
         }
-        ["secrets", action @ ("set" | "remove"), named @ ..] if named.len() <= 1 => {
+        ["secrets", action @ ("set" | "remove"), words @ ..] => {
+            let said = secrets::words(words)?;
             Some(described().and_then(|described| {
-                let named = named.first().copied();
-                secrets::change(*action == "set", named, &described, standard, console)
+                secrets::change(*action == "set", said, &described, standard, console)
             }))
         }
         [action @ ("login" | "logout"), named @ ..] if named.len() <= 1 => {

@@ -414,13 +414,20 @@ fn oi_kit(
 ) -> Result<Arc<dyn OiKitProvider>, Refused> {
     let refused = |error: anyhow::Error| refusal(name, &error);
     let protocol = engine(kind).map(|engine| engine.protocol);
+    // Where the requests go, for a secret that names the hosts it may be sent to.
+    let host = config
+        .get("base_url")
+        .and_then(Value::as_str)
+        .and_then(corduroy_harness::core::secret::host_of);
     Ok(match protocol {
         Some("openai") => {
             let parsed = deserialize_provider_config(&config.to_string()).map_err(refused)?;
             let builder = openai::from_declarative_config(parsed, None, EnvKeyResolver::new())
                 .map_err(refused)?
                 .map_api_client(|client| match secret {
-                    Some((secrets, secret)) => client.with_auth(auth::bearer(secrets, secret)),
+                    Some((secrets, secret)) => {
+                        client.with_auth(auth::bearer(secrets, secret, host))
+                    }
                     None => client,
                 });
             Arc::new(builder.build())
@@ -430,7 +437,9 @@ fn oi_kit(
             let builder = anthropic::from_declarative_config(parsed, None, EnvKeyResolver::new())
                 .map_err(refused)?
                 .map_api_client(|client| match secret {
-                    Some((secrets, secret)) => client.with_auth(auth::api_key(secrets, secret)),
+                    Some((secrets, secret)) => {
+                        client.with_auth(auth::api_key(secrets, secret, host))
+                    }
                     None => client,
                 });
             Arc::new(builder.build())

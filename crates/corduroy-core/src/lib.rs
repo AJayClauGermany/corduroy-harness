@@ -94,7 +94,9 @@ pub use context::{
 pub use event::{
     Draft, Event, EventId, EventStream, ListenerId, Log, LogError, Query, SessionId, Source,
 };
-pub use gate::{Decision, GATES, Gate, Gates, PLUGIN_LOAD, POINTS, TOOL_CALL, UNDECLARED, Verdict};
+pub use gate::{
+    Asked, Asks, Decision, GATES, Gate, Gates, PLUGIN_LOAD, POINTS, TOOL_CALL, UNDECLARED, Verdict,
+};
 pub use http::{HTTP, HttpClient, HttpClients, HttpRequest, HttpResponse};
 #[cfg(feature = "std")]
 pub use kernel::{Cell, KERNELS, Kernel, KernelError, Kernels, MAX_OUTPUT, Process, Spawn};

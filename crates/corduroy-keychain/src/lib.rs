@@ -31,7 +31,7 @@ mod os;
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use corduroy_core::{Context, FnPlugin, PluginError, SECRETS, Secret, Secrets, plugin_fn};
+use corduroy_core::{Context, FnPlugin, PluginError, SECRETS, Scope, Secret, Secrets, plugin_fn};
 
 pub use memory::{Memory, Missing};
 pub use os::Os;
@@ -128,6 +128,33 @@ struct Kept {
     item: String,
     secret: String,
     read: Mutex<Option<String>>,
+    /// The hosts kept beside the value, once the keychain has been asked for them.
+    hosts: Mutex<Option<Said>>,
+}
+
+/// What a keychain holds of the hosts a value may be sent to.
+#[derive(Clone)]
+enum Said {
+    /// Nothing: the value was put in without any.
+    Nothing,
+    /// These.
+    Hosts(Scope),
+}
+
+/// The name of the item that holds the hosts the value kept as `item` may be sent to: one
+/// to a line, as an `http` grant writes them. A prototype (B9 in `docs/open-questions.md`).
+#[must_use]
+pub fn hosts_item(item: &str) -> String {
+    format!("{item}.hosts")
+}
+
+/// The scope the lines of a hosts item say.
+fn hosts_said(lines: &str) -> Scope {
+    lines
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .fold(Scope::none(), Scope::allow)
 }
 
 impl Secret for Kept {
@@ -148,6 +175,30 @@ impl Secret for Kept {
         drop(read);
         Ok(value)
     }
+
+    /// The hosts kept beside the value, said by the person who put it in. An item put in
+    /// with none says nothing. A keychain that cannot be read names none: the value could
+    /// not be had either.
+    fn hosts(&self) -> Option<Scope> {
+        let mut hosts = self.hosts.lock().unwrap_or_else(PoisonError::into_inner);
+        let said = if let Some(said) = hosts.as_ref() {
+            said.clone()
+        } else {
+            let Ok(lines) = self.keychain.get(&hosts_item(&self.item)) else {
+                return Some(Scope::none());
+            };
+            let said = lines
+                .as_deref()
+                .map_or(Said::Nothing, |lines| Said::Hosts(hosts_said(lines)));
+            *hosts = Some(said.clone());
+            said
+        };
+        drop(hosts);
+        match said {
+            Said::Nothing => None,
+            Said::Hosts(scope) => Some(scope),
+        }
+    }
 }
 
 /// The plugin that registers what `keychain` keeps as `item` as the secret `name`.
@@ -166,6 +217,7 @@ pub fn keychain_secret(
             item: item.clone(),
             secret: name.clone(),
             read: Mutex::new(None),
+            hosts: Mutex::new(None),
         });
         ctx.service::<Secrets>(SECRETS)?
             .register(ctx, name.clone(), secret)?;

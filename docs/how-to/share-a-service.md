@@ -52,6 +52,18 @@ The caller needs the `service` capability, scoped by service name:
 grants = { service = "greetings" }
 ```
 
+A grant can name one method of a service, as `<service>:<method>`; the service's name alone
+is every method, so the line above reads as it always did. An add-on that should say hello
+and nothing else is granted `service = "greetings:hello"`, and one that may do everything
+but one thing is granted the service with that method denied:
+
+```toml
+grants = { service = { allow = ["greetings"], deny = ["greetings:forget"] } }
+```
+
+A call the grant does not cover is refused with `denied`, and recorded as
+`capability/denied` with `greetings:forget` as what was asked for.
+
 A call to a service nobody provides fails with `unknown`. A plugin cannot call itself, or
 a plugin further up its own call chain; such a call is refused rather than deadlocking.
 
@@ -59,7 +71,8 @@ a plugin further up its own call chain; such a call is refused rather than deadl
 
 The harness provides `sessions`, which starts a child session for a task and makes the
 calling tool wait, in the log, for its answer. The `subagents` add-on's `delegate` is built
-on it, with nothing but `service = "sessions"` granted.
+on it, with nothing but `service = "sessions"` granted (`"sessions:start"` grants the one
+method `delegate` uses, and stays that when the service gains others).
 
 ## From an extension
 

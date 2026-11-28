@@ -87,7 +87,7 @@ What other harnesses call hooks are two different things here:
 
 - **An event** is fire-and-forget. Whoever emits it gets nothing back. Reacting (counting,
   logging, nudging the prompt) is subscribing.
-- **A gate** is asked at a declared **decision point** (`tool/call`, `plugin/load`, or one an
+- **A gate** is asked at a declared **decision point** (`tool/call`, `plugin/load`, `session/start`, or one an
   extension declares) before something happens, and answers allow, ask or deny. The
   strictest answer of all gates wins, so the outcome does not depend on load order, and the
   decision is logged before the thing happens. A gate that cannot answer denies.

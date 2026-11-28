@@ -36,6 +36,9 @@ pub struct Limits {
     pub cascade: usize,
     /// How long `llm` and `http` wait for an answer before the call fails.
     pub outbound_wait: Duration,
+    /// How many events are kept for a plugin while it is in a call, to be handed over when
+    /// the call returns. One more and the oldest goes; `plugin/missed` records which.
+    pub missed_events: usize,
 }
 
 impl Default for Limits {
@@ -47,6 +50,7 @@ impl Default for Limits {
             nested_wait: Duration::from_secs(30),
             cascade: 16,
             outbound_wait: Duration::from_secs(120),
+            missed_events: 1024,
         }
     }
 }

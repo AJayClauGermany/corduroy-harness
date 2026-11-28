@@ -34,7 +34,7 @@ through. See [Grants](agent-file.md#grants) for how to write one in the agent fi
 | `random` | bytes from the host's secure generator (64 KiB per call) | `secure` | `"secure"` |
 | `tools` | list and call other plugins' tools, through the gates | tool name | `["read", "tree"]` |
 | `state` | a durable key-value store of its own (`get`, `set`, `remove`, `keys`), kept on the log | key | `"*"` |
-| `service` | call a service another plugin provides | service name | `"sessions"` |
+| `service` | call a service another plugin provides | `<service>:<method>`; a service's name alone is every method of it | `"sessions"`, `"sessions:start"` |
 | `plugins` | load and unload add-ons as its children, granting no more than it holds | the loaded plugin's name | `"*"` |
 | `llm` | one completion from a model of a [provider](agent-file.md#providersname), recorded as `llm/request` and `llm/response` with what it cost | model, as `<provider>/<model>` | `"main/claude-haiku-5-5"`, `"main/*"` |
 | `secret` | an opaque handle to a named credential, never its value | secret name | `"github"` |
@@ -80,16 +80,19 @@ Each tool an add-on lists in `plugin-info` has:
 
 ## Decision points
 
-A gate is asked only at a declared point. The core declares two; an extension may declare
-more (`corduroy check` lists them under `points`).
+A gate is asked only at a declared point. The core declares two, the loop one, and an
+extension may declare more (`corduroy check` lists them under `points`).
 
 | Point | Asked | Request |
 | --- | --- | --- |
 | `tool/call` | before each tool call, the model's or a plugin's | `{"session", "id", "tool", "input", "read-only", "caller"}`; `caller` is `agent` or `plugin:<name>` |
 | `plugin/load` | before an add-on loads another | the loader, the child's name, the SHA-256 of its component, the capabilities it imports and the grants requested |
+| `session/start` | before the `sessions` service starts a child session | `{"session", "parent", "starter", "task"}`: the id the session would have, the session whose tool call starts it, who asks (`plugin:<name>`) and what it is for. A [prototype](../prototypes.md#x5-the-decision-point-before-a-session-starts): the request gains what a session is started with as that is built |
 
-An ask from a plugin's own tool call, or at `plugin/load`, is a denial: nobody is there to
-answer it.
+An ask from a plugin's own tool call, at `plugin/load` or at `session/start` is a denial:
+nobody is there to answer it. A host that embeds the harness can take a person's answers
+at the last two ([a prototype](../prototypes.md#x9-an-ask-that-reaches-a-person-anywhere));
+the `corduroy` command does not yet.
 
 ## Versioning
 

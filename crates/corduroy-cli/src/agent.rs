@@ -1635,7 +1635,8 @@ mod tests {
         keychain.set("token", "t0ken").unwrap();
         let standard = Standard::new().with_keychain(Arc::<Memory>::clone(&keychain));
         let agent = assemble_from(&AgentFile::parse(&kept).unwrap(), &places, &standard).unwrap();
-        assert_eq!(keychain.reads(), 1);
+        // Read twice: the value, and then the hosts it may go to, kept beside it.
+        assert_eq!(keychain.reads(), 2);
         let [unstarted] = agent.failed.as_slice() else {
             panic!(
                 "only the server should not have started: {:?}",
@@ -1645,6 +1646,26 @@ mod tests {
         assert_eq!(unstarted.plugin, "mcp remote");
         assert!(!unstarted.reason.contains("secret"), "{}", unstarted.reason);
         assert!(!unstarted.reason.contains("t0ken"), "{}", unstarted.reason);
+
+        // Put in for another host, the token is not sent to this one, and that is why the
+        // server does not start.
+        // The log has one writer at a time.
+        drop(agent);
+        keychain.set("token.hosts", "mcp.example.org").unwrap();
+        let agent = assemble_from(&AgentFile::parse(&kept).unwrap(), &places, &standard).unwrap();
+        let [refused] = agent.failed.as_slice() else {
+            panic!(
+                "only the server should not have started: {:?}",
+                agent.failed
+            );
+        };
+        assert!(
+            refused.reason.contains(
+                "secret `token` does not name `127.0.0.1` among the hosts it may be sent to"
+            ),
+            "{}",
+            refused.reason
+        );
     }
 
     #[test]

@@ -103,6 +103,7 @@ use crate::bound::text_bytes;
 use crate::harness::HarnessError;
 use crate::message::{decode, decode_content, encode, encode_content};
 use crate::provider::{Asking, ProviderError, ProviderErrorKind, Retry};
+use crate::shape::Shaped;
 
 /// Topic of the events that make up the conversation.
 pub const MESSAGE: &str = "message";
@@ -193,6 +194,50 @@ fn read_all(
 
 /// Topic of the event that stands a summary in for the messages before a point.
 pub const COMPACTION: &str = "compaction";
+
+/// How many sessions a branch may lead back through: a branch of a branch, and so on.
+const MAX_BRANCHES: usize = 16;
+
+/// Where the session whose events are `own` branched from another, if it did: the session
+/// and the event of it that the branch begins after, as its `session/start` says (`parent`
+/// and `from`).
+///
+/// A prototype (C14 in `docs/open-questions.md`; see `docs/prototypes.md`).
+fn branch_of(own: &[Event]) -> Option<(SessionId, EventId)> {
+    let start = own
+        .iter()
+        .find(|event| event.topic == SESSION_START && event.source == Source::Host)?;
+    let payload: Value = serde_json::from_str(&start.payload).ok()?;
+    let parent = payload.get("parent")?.as_str()?;
+    let from = payload.get("from")?.as_u64()?;
+    Some((SessionId::new(parent), EventId::new(from)))
+}
+
+/// Bring `state` to what `session` holds in `events`, up to and including the event `upto`
+/// if one is given. A session that branched from another begins as that one stood at the
+/// event it branched after, with nothing under way.
+fn project_session(
+    events: &EventStream,
+    session: &SessionId,
+    upto: Option<EventId>,
+    state: &mut State,
+    depth: usize,
+) -> Result<()> {
+    let within = |event: &Event| upto.is_none_or(|upto| event.id <= upto);
+    let own = read_all(events, Query::first(PAGE).session(session.clone()), within)?;
+    if let Some((from, at)) = branch_of(&own) {
+        anyhow::ensure!(
+            depth < MAX_BRANCHES,
+            "session `{session}` is a branch more than {MAX_BRANCHES} sessions deep"
+        );
+        project_session(events, &from, Some(at), state, depth.saturating_add(1))?;
+        state.begin_branch();
+    }
+    for event in &own {
+        state.project(event)?;
+    }
+    Ok(())
+}
 
 /// What the model is told about a summary that replaced the start of the conversation.
 const SUMMARY_INTRO: &str = "The start of this conversation was condensed to save space. This \
@@ -595,6 +640,74 @@ impl Sessions {
         })
     }
 
+    /// Start a session called `id` as a branch of `from`: it begins with the conversation
+    /// `from` held once its event `at` was stored, and goes its own way from there. `from`
+    /// is recorded as its parent, and is not changed.
+    ///
+    /// A prototype (C14 in `docs/open-questions.md`; see `docs/prototypes.md`). A branch
+    /// begins only where the conversation is whole: after the model's answer, with no tool
+    /// call unanswered, or before anything was said.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HarnessError::DuplicateSession`] if `id` is taken,
+    /// [`HarnessError::UnknownSession`] if `from` does not exist, [`HarnessError::Run`] if
+    /// `at` is no event of `from` or the conversation is not whole there, or
+    /// [`HarnessError::Log`] if the start could not be stored.
+    pub fn branch(
+        &self,
+        id: SessionId,
+        from: &SessionId,
+        at: EventId,
+    ) -> Result<SessionId, HarnessError> {
+        let of_session = self
+            .events
+            .get(at)
+            .is_some_and(|event| event.session.as_ref() == Some(from));
+        if !of_session && self.known.with(|known| known.contains_key(from)) {
+            return Err(HarnessError::Run(format!(
+                "event {at} is not an event of session `{from}`"
+            )));
+        }
+        let mut state = State::new();
+        if of_session {
+            project_session(&self.events, from, Some(at), &mut state, 0)
+                .map_err(|error| HarnessError::Run(error.to_string()))?;
+        }
+        if let Some(open) = state.open_at_a_branch() {
+            return Err(HarnessError::Run(format!(
+                "session `{from}` cannot be branched after event {at}: {open}"
+            )));
+        }
+        let info = SessionInfo {
+            id,
+            parent: Some(from.clone()),
+            task: None,
+        };
+        self.known.with(|known| {
+            if known.contains_key(&info.id) {
+                return Err(HarnessError::DuplicateSession(info.id));
+            }
+            if !known.contains_key(from) {
+                return Err(HarnessError::UnknownSession(from.clone()));
+            }
+            let payload = json!({"parent": from.as_str(), "from": at.get()});
+            let start = Draft::new(Source::Host, SESSION_START)
+                .session(info.id.clone())
+                .payload(payload.to_string());
+            self.events.emit(start)?;
+            let id = info.id.clone();
+            known.insert(
+                id.clone(),
+                Known {
+                    info,
+                    journal: None,
+                },
+            );
+            Ok(id)
+        })
+    }
+
     /// Every session, in order of id.
     #[must_use]
     pub fn list(&self) -> Vec<SessionInfo> {
@@ -739,6 +852,65 @@ impl Session {
         let last = self.messages.last()?;
         (last.role == Role::Assistant && last.tool_calls().next().is_none())
             .then(|| last.text_content())
+    }
+}
+
+/// The counts a `usage` event may give.
+const COUNTS: [&str; 5] = [
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "reasoning_tokens",
+];
+
+/// What the model requests of a run used in all: how many answered, and each count added up
+/// over the requests whose provider gave it.
+///
+/// A prototype of a total the harness keeps (G17 in `docs/open-questions.md`; see
+/// `docs/prototypes.md`). It counts the session's own requests: not those of a session it
+/// started, and not a model a plugin asked.
+#[derive(Debug, Clone, Copy)]
+struct Used {
+    requests: u64,
+    counts: [Option<u64>; 5],
+}
+
+impl Used {
+    /// Nothing used: no request has answered.
+    const NONE: Self = Self {
+        requests: 0,
+        counts: [None; 5],
+    };
+
+    /// Add what the `usage` event with this payload says one request used.
+    fn add(&mut self, usage: &Value) {
+        self.requests = self.requests.saturating_add(1);
+        for (sum, name) in self.counts.iter_mut().zip(COUNTS) {
+            let given = usage
+                .get(name)
+                .or_else(|| usage.pointer(&format!("/usage/{name}")))
+                .and_then(Value::as_u64);
+            if let Some(given) = given {
+                *sum = Some(sum.unwrap_or(0).saturating_add(given));
+            }
+        }
+    }
+
+    /// The total as `turn/end` records it under `used`: `{"requests"}` and each count that
+    /// some request gave. `None` if no request answered.
+    fn total(&self) -> Option<Value> {
+        if self.requests == 0 {
+            return None;
+        }
+        let mut total = serde_json::Map::new();
+        total.insert("requests".to_owned(), json!(self.requests));
+        for (sum, name) in self.counts.iter().zip(COUNTS) {
+            if let Some(sum) = sum {
+                total.insert(name.to_owned(), json!(sum));
+            }
+        }
+        Some(Value::Object(total))
     }
 }
 
@@ -989,6 +1161,8 @@ struct State {
     stopped: Option<StopReason>,
     /// The output tokens of the model requests since a person last wrote.
     written: u64,
+    /// What the model requests since a person last wrote used in all.
+    used: Used,
     /// Tool calls that waited for a signal, by tool-call id, with the payload once it came.
     waits: BTreeMap<String, Waited>,
     /// The tool calls waiting for a response, by tool-call id.
@@ -1053,6 +1227,8 @@ struct Asked {
     output: u64,
     /// Why the model stopped, if its provider said.
     stopped: Option<StopReason>,
+    /// What the `usage` event says of it, for the run's total.
+    usage: Value,
 }
 
 impl Batch {
@@ -1101,6 +1277,7 @@ impl State {
             overflowed: false,
             stopped: None,
             written: 0,
+            used: Used::NONE,
             waits: BTreeMap::new(),
             calls: BTreeMap::new(),
             unfinished: false,
@@ -1171,6 +1348,7 @@ impl State {
         // A person's message begins a turn, and what the model writes is counted from there.
         if message.role == Role::User && !message.is_tool_results() {
             self.written = 0;
+            self.used = Used::NONE;
         }
         let message = self.resolved(message);
         self.added = self.added.saturating_add(size(&message));
@@ -1204,6 +1382,7 @@ impl State {
             .and_then(Value::as_u64)
             .unwrap_or(0);
         self.written = self.written.saturating_add(written);
+        self.used.add(&usage);
         (self.replied, self.added, self.overflowed) = (written, 0, false);
         self.stopped = usage
             .get("stop")
@@ -1425,9 +1604,7 @@ impl Journal {
     /// Fails if a `message` or tool-call event of the session cannot be decoded.
     pub fn new(id: SessionId, events: Arc<EventStream>) -> Result<Self> {
         let mut state = State::new();
-        for event in read_all(&events, Query::first(PAGE).session(id.clone()), |_| true)? {
-            state.project(&event)?;
-        }
+        project_session(&events, &id, None, &mut state, 0)?;
         Ok(Self {
             id,
             events,
@@ -1496,6 +1673,7 @@ impl Journal {
                         input: usage.input_tokens.unwrap_or(0),
                         output: usage.output_tokens.unwrap_or(0),
                         stopped: stop,
+                        usage: payload,
                     });
                 }
                 Effect::Compacted {
@@ -1852,10 +2030,11 @@ impl Journal {
     pub(crate) fn ask_started(
         &self,
         provider: &str,
-        request: &ModelRequest,
+        shaped: &Shaped,
         asking: &Asking,
         shown: &Shown,
     ) -> Result<()> {
+        let request = &shaped.request;
         let mut payload = json!({
             "provider": provider,
             "model": request.model,
@@ -1889,6 +2068,17 @@ impl Journal {
                 shown.name(&self.events, "tools", &declared, json!({"tools": tools}));
             drafts.extend(draft);
             said.insert("tools_hash".to_owned(), json!(hashed));
+        }
+        // A request something shaped is not the session's projection: it says what changed
+        // it, and what the messages it carried came to, so a review does not take the
+        // projection for what the model was shown.
+        if !shaped.by.is_empty() {
+            let messages: Vec<Value> = request.messages.iter().map(encode).collect();
+            said.insert("shaped".to_owned(), json!(shaped.by));
+            said.insert(
+                "messages_hash".to_owned(),
+                json!(hash(&Value::Array(messages).to_string())),
+            );
         }
         if let Some(fields) = payload.as_object_mut() {
             fields.extend(said);
@@ -1944,9 +2134,15 @@ impl Journal {
 
     /// Record that the run is over, and how it ended.
     pub(crate) fn end_turn(&self, end: &End) -> Result<()> {
+        let mut payload = end.payload();
+        // A prototype (G17): what the run's own model requests used, added up here.
+        let used = self.state(|state| state.used.total());
+        if let (Some(used), Some(fields)) = (used, payload.as_object_mut()) {
+            fields.insert("used".to_owned(), used);
+        }
         let draft = Draft::new(Source::Host, TURN_END)
             .session(self.id.clone())
-            .payload(end.payload().to_string());
+            .payload(payload.to_string());
         self.events.emit(draft)?;
         self.state(|state| {
             (state.unfinished, state.restarts) = (false, 0);
@@ -1985,6 +2181,27 @@ impl Journal {
 }
 
 impl State {
+    /// Begin a branch from the session projected so far: its conversation is kept, and
+    /// nothing of a run of it is under way or counted.
+    fn begin_branch(&mut self) {
+        (self.unfinished, self.restarts, self.ended) = (false, 0, None);
+        (self.written, self.used, self.overflowed) = (0, Used::NONE, false);
+    }
+
+    /// Why a branch cannot begin from the session as it stands, if it cannot: a call is
+    /// unanswered or waits, or the conversation ends with something the model has not
+    /// answered.
+    fn open_at_a_branch(&self) -> Option<&'static str> {
+        if !self.calls.is_empty() {
+            return Some("a tool call has no result there yet");
+        }
+        let answered = self
+            .messages
+            .last()
+            .is_none_or(|last| last.role == Role::Assistant);
+        (!answered).then_some("the model has not answered what was said there yet")
+    }
+
     /// Bring the projection up to date with a batch committed as `ids`.
     fn catch_up(&mut self, ids: &[EventId], batch: Batch) {
         for (position, message) in batch.messages {
@@ -2023,6 +2240,7 @@ impl State {
         if let Some(asked) = batch.asked {
             (self.input_tokens, self.stopped) = (asked.input, asked.stopped);
             self.written = self.written.saturating_add(asked.output);
+            self.used.add(&asked.usage);
             (self.replied, self.added, self.overflowed) = (asked.output, 0, false);
         }
     }

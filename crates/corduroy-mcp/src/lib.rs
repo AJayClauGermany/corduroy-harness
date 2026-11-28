@@ -131,6 +131,28 @@ impl McpPlugin {
     }
 }
 
+impl McpPlugin {
+    /// The value of `secret`, to send as the bearer token of the server at `url`. A secret
+    /// that names the hosts it may go to is sent to no other; the value is had first, so
+    /// that a secret that cannot be read says why itself.
+    fn token(&self, ctx: &Context<'_>, secret: &str, url: &str) -> Result<String, PluginError> {
+        let secrets = ctx.service::<Secrets>(SECRETS)?;
+        let value =
+            secrets
+                .reveal(secret)
+                .and_then(|value| match corduroy_core::secret::host_of(url) {
+                    Some(host) => secrets.may_go(secret, &host).map(|()| value),
+                    None => Ok(value),
+                });
+        value.map_err(|why| {
+            PluginError::new(format!(
+                "MCP server `{}`: secret `{secret}`: {why}",
+                self.server
+            ))
+        })
+    }
+}
+
 impl Plugin for McpPlugin {
     fn name(&self) -> &str {
         &self.name
@@ -157,14 +179,7 @@ impl Plugin for McpPlugin {
             }
             Transport::Http { url, bearer_token } => {
                 let bearer_token = match &self.secret {
-                    Some(secret) => Some(ctx.service::<Secrets>(SECRETS)?.reveal(secret).map_err(
-                        |why| {
-                            let server = &self.server;
-                            PluginError::new(format!(
-                                "MCP server `{server}`: secret `{secret}`: {why}"
-                            ))
-                        },
-                    )?),
+                    Some(secret) => Some(self.token(ctx, secret, url)?),
                     None => bearer_token.clone(),
                 };
                 Connection::Http {

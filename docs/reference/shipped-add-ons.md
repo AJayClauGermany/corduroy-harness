@@ -15,8 +15,8 @@ from Goose.
 | Tool | Input | Read-only |
 | --- | --- | --- |
 | `read` | `path`, `offset` (first line, from 1), `limit` | yes |
-| `write` | `path`, `content`: create or replace a file | |
-| `edit` | `path`, `edits`: a list of `oldText`/`newText` pairs, each unique in the file, all matched against the original | |
+| `write` | `path`, `content`: create or replace a file; refused if the file changed since these tools last read or wrote it | |
+| `edit` | `path`, `edits`: a list of `oldText`/`newText` pairs, each unique in the file, all matched against the original; refused if the file changed since these tools last read or wrote it | |
 | `bash` | `command`, `timeout` (seconds): run in the kernel, whose working directory and variables persist | |
 | `tree` | `path` (`.`), `depth`: a directory's layout through `fs-read` alone; skips `.git`, `node_modules`, `target`, `.corduroy`, `.venv` | yes |
 

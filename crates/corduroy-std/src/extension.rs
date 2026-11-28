@@ -29,7 +29,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use corduroy_chatgpt::{ChatGpt, Store, Vault, chatgpt_secret};
-use corduroy_harness::core::{Plugin, SECRETS, Secret, Secrets, Spawn, plugin_fn};
+use corduroy_harness::core::{Plugin, SECRETS, Scope, Secret, Secrets, Spawn, plugin_fn};
 use corduroy_keychain::{Keychain, Os, keychain_secret};
 use corduroy_mcp::{Transport, mcp_server};
 use corduroy_shell::{ShellKernel, shell_kernel_of};
@@ -247,6 +247,7 @@ fn mcp_server_in(asked: &Asked<'_>) -> Built {
 /// time a plugin's request needs it.
 fn env_secret_in(asked: &Asked<'_>) -> Built {
     let variable = env_variable(asked)?.to_owned();
+    let hosts = hosts_said(asked)?;
     let name = asked.name.to_owned();
     Ok(Box::new(plugin_fn(
         format!("secret-{name}"),
@@ -256,6 +257,10 @@ fn env_secret_in(asked: &Asked<'_>) -> Built {
             let secret: Arc<dyn Secret> = Arc::new(move || {
                 std::env::var(&variable).map_err(|_| format!("${variable} is not set"))
             });
+            let secret = match hosts.clone() {
+                Some(hosts) => corduroy_harness::core::secret::to_hosts(secret, hosts),
+                None => secret,
+            };
             ctx.service::<Secrets>(SECRETS)?
                 .register(ctx, name.clone(), secret)?;
             Ok(())
@@ -269,10 +274,47 @@ fn env_secret_in(asked: &Asked<'_>) -> Built {
 ///
 /// If the entry has another setting, or no `env`.
 pub fn env_variable<'a>(asked: &'a Asked<'_>) -> Result<&'a str, String> {
-    asked.only(&["env"])?;
+    asked.only(&["env", HOSTS])?;
     asked
         .text("env")
         .ok_or_else(|| "`env` is required".to_owned())
+}
+
+/// The key by which a `[secrets.<name>]` entry names the hosts its value may be sent to.
+///
+/// A prototype, for a secret read from the environment: the meaning is decided and the
+/// form is not (B9 in `docs/open-questions.md`; see `docs/prototypes.md`).
+pub const HOSTS: &str = "hosts";
+
+/// The hosts a `[secrets.<name>]` entry names under [`HOSTS`], if it has the key: a list of
+/// host names, each a pattern as an `http` grant's are. An empty list names none, and the
+/// secret then goes nowhere.
+///
+/// # Errors
+///
+/// If the key holds something other than a list of host names.
+pub fn hosts_said(asked: &Asked<'_>) -> Result<Option<Scope>, String> {
+    if asked.config.get(HOSTS).is_none() {
+        return Ok(None);
+    }
+    let hosts = asked.texts(HOSTS)?;
+    if let Some(bad) = hosts.iter().find(|host| !host_pattern(host)) {
+        return Err(format!(
+            "`{HOSTS}` names `{bad}`, which is no host: a host is a name such as \
+             api.example.com, without a scheme, a port or a path"
+        ));
+    }
+    Ok(Some(hosts.into_iter().fold(Scope::none(), Scope::allow)))
+}
+
+/// Whether `host` can name a host, or a pattern over hosts: lowercase letters, digits, `.`,
+/// `-`, `:` (in an IPv6 address) and `*`.
+#[must_use]
+pub fn host_pattern(host: &str) -> bool {
+    let plain = |character: char| {
+        character.is_ascii_lowercase() || character.is_ascii_digit() || ".-:*".contains(character)
+    };
+    !host.is_empty() && host.chars().all(plain)
 }
 
 /// The entry's name, if it can name what a person keeps: a sign-in's file, an item of a
@@ -385,7 +427,7 @@ impl Extensions {
     /// | `http-client` | none | the client the `http` capability sends through, for `http` and `https` |
     /// | `page` | `port` (any free one by default) | the agent's page in a browser, served on `127.0.0.1` at an address the command says when it is about to run the agent: the record as it grows, a gate's question answered there, a prompt typed and a run stopped |
     /// | `mcp` | `command` (with `args`, `env` and `kernel`, `shell` by default) or `url` (with `secret` or `bearer_token_env`), and `timeout_seconds` | the tools of one MCP server, as `<name>__<tool>`; what `[mcp.<name>]` builds |
-    /// | `env-secret` | `env` | the secret named like the entry, read from that environment variable when it is used; what `[secrets.<name>]` builds |
+    /// | `env-secret` | `env`, and `hosts` (a prototype: the hosts the value may be sent to) | the secret named like the entry, read from that environment variable when it is used; what `[secrets.<name>]` builds |
     /// | `keychain-secret` | none | the secret named like the entry, read from the system's keychain (the macOS Keychain, the Windows Credential Manager, the Secret Service) when it is first used; what `[secrets.<name>]` with `kind = "keychain"` builds |
     /// | `chatgpt-secret` | `keep` (`keychain`, the default, or `file`) | the secret named like the entry: the access token of a `ChatGPT` sign-in (`corduroy login`), renewed as it runs out; what `[secrets.<name>]` with `kind = "chatgpt"` builds |
     #[must_use]

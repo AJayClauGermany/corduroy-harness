@@ -8,9 +8,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use corduroy_core::{
-    App, CallError, Content, EventStream, FiberState, GATES, Gate, Gates, HTTP, HttpClients,
+    App, CallError, Content, Draft, EventStream, FiberState, GATES, Gate, Gates, HTTP, HttpClients,
     KERNELS, Kernels, MODELS, Models, PROMPTS, Pattern, Prompts, SECRETS, SERVICES, Scope, Secrets,
-    Service, Services, TOOLS, Tool, ToolSpec, Tools, Verdict, tool_fn,
+    Service, Services, Source, TOOLS, Tool, ToolSpec, Tools, Verdict, tool_fn,
 };
 use corduroy_test_support::{plugin, scratch};
 use corduroy_wasm::{Limits, WasmPlugin, WasmRuntime};
@@ -425,13 +425,152 @@ fn services_cross_between_plugins_with_the_callers_name() {
     assert_eq!(unknown["error"], r#"CallError::Unknown("method `dance`")"#);
     assert_eq!(
         outside["error"],
-        r#"CallError::Denied("capability `service` does not cover `gamma`")"#
+        r#"CallError::Denied("capability `service` does not cover `gamma:echo`")"#
     );
     // A native caller reaches a WebAssembly service the same way.
     assert_eq!(
         host.services.call("host", "alpha", "echo", "x").unwrap(),
         r#"{"caller":"host","payload":"x","service":"alpha"}"#
     );
+}
+
+/// A host with the service `native`, which raises two `ping` events while it is called
+/// (its payload with `1` and with `2` after it), and the testbed as `beta`, which may call
+/// it, listens to `ping` and answers each with a `pong` of the same payload. `beta` is kept
+/// at most `kept` events while it is in a call.
+fn pinged(dir: &Path, kept: usize) -> Result<Host, Box<dyn Error>> {
+    let mut host = host(EventStream::new())?;
+    let events = Arc::clone(host.app.events());
+    let native: Arc<dyn Service> = Arc::new(move |_: &str, _: &str, payload: &str| {
+        for nth in 1..=2 {
+            let ping = Draft::new(Source::Environment, "ping").payload(format!("{payload}{nth}"));
+            events
+                .emit(ping)
+                .map_err(|error| CallError::Failed(error.to_string()))?;
+        }
+        Ok("pinged".to_owned())
+    });
+    host.services.insert("native", native)?;
+    let limits = Limits {
+        missed_events: kept,
+        ..Limits::default()
+    };
+    let beta = WasmRuntime::new()?
+        .with_limits(limits)
+        .with_root(dir)
+        .load(plugin("testbed"))?
+        .named("beta")
+        .config(json!({"prefix": "b.", "echo": {"on": "ping", "emit": "pong"}}).to_string())
+        .grant("service", Scope::none().allow("native"))
+        .grant("events", Scope::none().allow("pong"));
+    let beta = [
+        "log", "clock", "random", "tools", "state", "plugins", "llm", "secret", "http", "log-read",
+        "session",
+    ]
+    .into_iter()
+    .fold(beta, |beta, capability| {
+        beta.grant(capability, Scope::none())
+    });
+    host.app.plugin(beta);
+    Ok(host)
+}
+
+#[test]
+fn an_event_that_arrives_while_a_plugin_is_in_a_call_is_heard_when_the_call_returns() {
+    let dir = scratch("missed-events");
+    let host = pinged(&dir, 16).unwrap();
+
+    // Beta calls `native`, which raises `ping` twice while beta is still in its call.
+    let called = via(&host, "native", "poke", &json!(7));
+
+    assert_eq!(called, json!({"ok": "pinged"}));
+    // Beta heard both once its call had returned, in the order they were raised.
+    assert_eq!(payloads(&host.app, "pong"), [json!(71), json!(72)]);
+    let stream = host.app.events();
+    let raised: Vec<_> = stream.matching(&Pattern::new("ping"));
+    let answers: Vec<_> = stream.matching(&Pattern::new("pong"));
+    assert_eq!(
+        answers.iter().map(|pong| pong.cause).collect::<Vec<_>>(),
+        raised.iter().map(|ping| Some(ping.id)).collect::<Vec<_>>()
+    );
+    assert_eq!(payloads(&host.app, "plugin/missed"), Vec::<Value>::new());
+    // An event that arrives while beta is free is heard at once, as before.
+    stream
+        .emit(Draft::new(Source::Environment, "ping").payload("3"))
+        .unwrap();
+    assert_eq!(payloads(&host.app, "pong").last(), Some(&json!(3)));
+}
+
+#[test]
+fn a_plugin_kept_more_events_than_the_limit_misses_the_oldest_and_the_log_says_so() {
+    let dir = scratch("missed-events-full");
+    let host = pinged(&dir, 1).unwrap();
+
+    via(&host, "native", "poke", &json!(7));
+
+    assert_eq!(payloads(&host.app, "pong"), [json!(72)]);
+    let stream = host.app.events();
+    let first = stream.matching(&Pattern::new("ping"))[0].id;
+    assert_eq!(
+        payloads(&host.app, "plugin/missed"),
+        [json!({"plugin": "beta", "event": first.get()})]
+    );
+}
+
+#[test]
+fn a_service_grant_can_name_one_method() {
+    let dir = scratch("service-methods");
+    let mut host = host(EventStream::new()).unwrap();
+    let native: Arc<dyn Service> = Arc::new(|_: &str, method: &str, _: &str| Ok(method.to_owned()));
+    host.services.insert("native", native).unwrap();
+    // Beta may call one method of `native`, and every method of `alpha` but one.
+    host.app.plugin(
+        testbed(
+            &dir,
+            "alpha",
+            &json!({"provides": ["alpha"], "prefix": "a."}),
+            [Scope::none(), Scope::none(), Scope::none()],
+        )
+        .unwrap(),
+    );
+    host.app.plugin(
+        testbed(
+            &dir,
+            "beta",
+            &json!({"prefix": "b."}),
+            [
+                Scope::none(),
+                Scope::none(),
+                Scope::none()
+                    .allow("native:start")
+                    .allow("alpha")
+                    .deny("alpha:relay"),
+            ],
+        )
+        .unwrap(),
+    );
+
+    let start = via(&host, "native", "start", &json!(null));
+    let signal = via(&host, "native", "signal", &json!(null));
+    let echo = via(&host, "alpha", "echo", &json!("x"));
+    let relay = via(&host, "alpha", "relay", &json!(null));
+
+    assert_eq!(start, json!({"ok": "start"}));
+    assert_eq!(
+        signal["error"],
+        r#"CallError::Denied("capability `service` does not cover `native:signal`")"#
+    );
+    assert!(echo["ok"].is_string(), "{echo}");
+    assert_eq!(
+        relay["error"],
+        r#"CallError::Denied("capability `service` does not cover `alpha:relay`")"#
+    );
+    // The refusal is recorded with the method it was for.
+    let refused: Vec<Value> = payloads(&host.app, "capability/denied")
+        .into_iter()
+        .map(|payload| payload["resource"].clone())
+        .collect();
+    assert_eq!(refused, [json!("native:signal"), json!("alpha:relay")]);
 }
 
 #[test]

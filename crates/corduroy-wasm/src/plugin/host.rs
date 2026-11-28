@@ -15,7 +15,7 @@ use std::time::{Duration, Instant, SystemTime};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use corduroy_core::{
-    CallError as CoreCallError, Content, Draft, Event, EventId, EventStream, FiberId, Gates,
+    Asked, CallError as CoreCallError, Content, Draft, Event, EventId, EventStream, FiberId, Gates,
     Grants, HttpClients, HttpRequest, Kernels, Message, ModelError, ModelRequest, Models,
     PLUGIN_LOAD, Query, Requests, Scope, Secrets, Services, SessionId, Source, TOOL_CALL,
     ToolError as CoreToolError, ToolOutput, Tools, Verdict, json,
@@ -56,6 +56,10 @@ const MAX_BODY: usize = 8 << 20;
 
 /// Most credentials one instance may hold open at once.
 const MAX_CREDENTIALS: usize = 256;
+
+/// The event recording that a secret was not written into a request, because it names the
+/// hosts it may go to and the request's was not one.
+const SECRET_REFUSED: &str = "secret/refused";
 
 /// Most events one `log-read` call returns.
 const MAX_EVENTS: u32 = 1000;
@@ -617,9 +621,11 @@ impl service::Host for HostState {
         payload: String,
     ) -> Result<String, CallError> {
         let name = service;
-        self.check("service", &name).map_err(|_| {
-            CallError::Denied(format!("capability `service` does not cover `{name}`"))
-        })?;
+        // The grant names `service:method`, and a bare service name every method.
+        if let Err(denied) = self.grants.check_part("service", &name, &method) {
+            self.refused("service", &denied.resource);
+            return Err(CallError::Denied(denied.to_string()));
+        }
         let services = self
             .lent
             .services
@@ -653,11 +659,30 @@ impl HostState {
     /// Ask the gates whether `request` may be loaded, recording their decision. Returns why
     /// not, if not.
     fn gate_load(&mut self, request: &Value) -> Option<String> {
-        let decision = self
-            .lent
-            .gates
-            .as_ref()?
-            .decide(PLUGIN_LOAD, &request.to_string())?;
+        let gates = self.lent.gates.clone()?;
+        let asking = request.to_string();
+        let decision = gates.decide(PLUGIN_LOAD, &asking)?;
+        // An ask is put to a person where the host takes their answers: it is recorded
+        // there, and found answered when the same load is asked for again.
+        let asked = matches!(decision.verdict, Verdict::Ask(_))
+            .then(|| gates.settle(PLUGIN_LOAD, &asking, &decision))
+            .flatten();
+        match asked {
+            Some(Asked::Allowed) => return None,
+            Some(Asked::Refused(reason)) => {
+                return Some(format!("a person declined this: {reason}"));
+            }
+            Some(Asked::Waiting(id)) => {
+                return Some(format!(
+                    "gate `{}` asked a person whether this may be loaded (ask {id}): {}. It \
+                     has not been answered, so nothing was loaded. Go on with something \
+                     else, and ask for it again once a person has answered",
+                    decision.gate,
+                    decision.verdict.reason()
+                ));
+            }
+            Some(_) | None => {}
+        }
         let mut recorded = request.clone();
         if let Some(fields) = recorded.as_object_mut() {
             fields.insert("point".to_owned(), json!(PLUGIN_LOAD));
@@ -920,9 +945,38 @@ impl HostState {
         Ok((name.to_owned(), value))
     }
 
-    /// `headers` with each credential's value written in, and how to record them: by name,
-    /// and for a credential the secret's name, never its value.
-    fn headers(&self, headers: Vec<http::Header>) -> Result<(Headers, Vec<Value>), HostError> {
+    /// Refuse `credential` for a request to `host`, if its secret names the hosts it may
+    /// go to and `host` is not one. The refusal is recorded, with the tool call it was for.
+    fn bound_for(
+        &mut self,
+        credential: &Resource<Credential>,
+        host: &str,
+    ) -> Result<(), HostError> {
+        let Some(name) = self.credential(credential).map(str::to_owned) else {
+            return Ok(());
+        };
+        let Some(secrets) = self.lent.secrets.as_ref() else {
+            return Ok(());
+        };
+        secrets.may_go(&name, host).map_err(|why| {
+            let mut refused = json!({"plugin": self.plugin, "secret": name, "host": host});
+            let call = corduroy_core::call::current().and_then(|serving| serving.call);
+            if let (Some(call), Some(fields)) = (call, refused.as_object_mut()) {
+                fields.insert("call".to_owned(), json!(call));
+            }
+            self.outbox
+                .push(Draft::new(Source::Host, SECRET_REFUSED).payload(refused.to_string()));
+            HostError::Denied(why)
+        })
+    }
+
+    /// `headers` of a request to `host` with each credential's value written in, and how
+    /// to record them: by name, and for a credential the secret's name, never its value.
+    fn headers(
+        &mut self,
+        headers: Vec<http::Header>,
+        host: &str,
+    ) -> Result<(Headers, Vec<Value>), HostError> {
         let mut written = Vec::new();
         let mut recorded = Vec::new();
         for header in headers {
@@ -932,7 +986,10 @@ impl HostState {
                     text
                 }
                 http::HeaderValue::Secret(credential) => {
+                    // The value is had first, so that a secret that cannot be read says
+                    // why itself.
                     let (name, value) = self.reveal(&credential)?;
+                    self.bound_for(&credential, host)?;
                     recorded.push(json!({"name": header.name, "secret": name}));
                     value
                 }
@@ -955,7 +1012,7 @@ impl http::Host for HostState {
         let client = clients.get(&scheme).ok_or_else(|| {
             HostError::Failed(format!("the host has no HTTP client for `{scheme}`"))
         })?;
-        let (headers, recorded) = self.headers(request.headers)?;
+        let (headers, recorded) = self.headers(request.headers, &host)?;
         let body_bytes = request.body.as_ref().map_or(0, Vec::len);
         let asked = json!({
             "method": request.method, "url": request.url, "headers": recorded,

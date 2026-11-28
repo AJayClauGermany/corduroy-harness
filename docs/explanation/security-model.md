@@ -83,8 +83,11 @@ gate asking you first. If you switch `approval` to `auto`, `bash` is unconfined.
 - **A secret goes wherever the agent file sends it.** The keychain, like a sign-in, is yours
   and shared by every agent file that names a secret alike. A file someone else wrote can
   name your `anthropic` secret and a provider whose `base_url` is theirs, and the key is sent
-  there. A secret does not yet say which hosts it may go to (decided, not built), so this is
-  one more reason to read such a file first.
+  there, unless you said where the key may go when you put it in
+  (`corduroy secrets set anthropic --hosts api.anthropic.com`): the key is then refused to
+  any other host. That is a [prototype](../prototypes.md#x1-a-secret-names-the-hosts-it-may-go-to)
+  of a decision whose form is still open, and a key put in without `--hosts` goes wherever
+  the file sends it, so this is one more reason to read such a file first.
 - **Extensions are not checked.** An extension kind you compile in can do anything.
 - **The model's own message is logged before any gate sees it.** If the model writes a
   secret into a tool call, a denial does not keep it out of the log.

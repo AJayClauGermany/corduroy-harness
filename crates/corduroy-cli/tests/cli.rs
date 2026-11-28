@@ -1034,8 +1034,12 @@ fn ends(workspace: &Path) -> Vec<String> {
         .filter_map(|line| serde_json::from_str::<Vec<Value>>(line).ok())
         .flatten()
         .filter(|event| event.get("topic").and_then(Value::as_str) == Some("turn/end"))
-        // The payload is the JSON itself in the file, read in one go.
-        .filter_map(|event| event.get("payload").map(Value::to_string))
+        // The payload is the JSON itself in the file, read in one go. How the run ended
+        // is its `status`; what it used beside it differs with each run.
+        .filter_map(|event| {
+            let status = event.get("payload")?.get("status")?;
+            Some(serde_json::json!({ "status": status }).to_string())
+        })
         .collect()
 }
 

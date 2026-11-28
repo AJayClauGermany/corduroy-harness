@@ -332,7 +332,7 @@ own beyond what these give it.
 | `random` | bytes from the host's secure generator (64 KiB per call) | source: `secure` |
 | `tools` | list and call tools other plugins registered, through the gates | tool name |
 | `state` | a durable key-value store of the plugin's own | key |
-| `service` | call a service another plugin provides | service name |
+| `service` | call a service another plugin provides | `<service>:<method>`; a service's name alone is every method |
 | `plugins` | load and unload WebAssembly plugins as its children, granting no more than it holds | the loaded plugin's name |
 | `llm` | one completion from a model a provider serves, recorded as `llm/request` and `llm/response` with what it cost | model, as `<provider>/<model>` |
 | `secret` | an opaque handle to a named credential, never its value | secret name |
@@ -857,7 +857,9 @@ is a part of the loop and not a ninth kind of thing a plugin contributes. `Stand
 runs them, and a loop an extension wrote may; the session in the log is the same whether
 any ran. What is recorded of a shaped request, so that a review can still say what the
 model was shown, is open with the rest of its form (G19 in
-[Open questions](open-questions.md)).
+[Open questions](open-questions.md)). One form is built to be tried, as a
+[prototype](prototypes.md#x2-shaping-a-request) (`src/shape.rs`): it is promised to nobody,
+and nothing shipped uses it.
 
 ## What an extension can reach
 
@@ -914,7 +916,8 @@ which files, which hosts, which models, which tools. It is the
   serves. It is to say what that session is granted as well, so the WebAssembly host and a
   kernel read the grants where they already read the session. That is in the core, and is
   marked before the freeze. Work handed to another thread has to take the scope with it, or
-  it is done under no session's limits at all (B17 in [Open questions](open-questions.md)).
+  it is done under no session's limits at all (B17 in [Open questions](open-questions.md);
+  one form of the handle is a [prototype](prototypes.md#x6-a-calls-scope-carried-to-another-thread)).
 - *It is the fourth guarantee, one step further.* The
   [six](#what-is-safe-by-default) gain no seventh: the fourth is read as covering a session
   started as well as an add-on loaded, and its test covers both.
@@ -996,7 +999,9 @@ what an agent may do. A gate is told the session, and may treat sessions differe
   plugin), its parent, and what it would be started with. That a reviewer does not run on
   its starter's model, or that an orchestrator does not start orchestrators, is then a
   gate's to say. A session a gate asked about is recorded and waits, in the log, for the
-  person's answer.
+  person's answer. The point is declared and asked before a child is started, with a
+  request that is a [prototype](prototypes.md#x5-the-decision-point-before-a-session-starts)
+  and holds only what a child is started with today; an ask there is still a denial.
 - *What a grant of `sessions` means.* An add-on granted the `sessions` service can start an
   agent as capable as the session it serves, whatever the add-on's own grants are. That is
   accepted, and stated: it is what `delegate` is for. The gate and the limit on depth are
@@ -1112,6 +1117,9 @@ together.
   and `edit` refuse a file that changed since the session last read it, with an error that
   says so. That catches another session, a command and the person's own editor alike,
   without knowing which it was; where a tool made the earlier write, the log shows it.
+  Built for what one instance of `pi-tools` has seen, kept in its memory: a command and
+  the person's editor are caught today, and another session is once an add-on has an
+  instance for each session, since one instance serves them all until then.
 - *Listeners hear one session's commits in order, and nothing is promised between two
   sessions'* ([Events, gates and hooks](#events-gates-and-hooks)).
 
@@ -1155,13 +1163,16 @@ and it is to be the other way round.
 - *Steering a run under way,* named agents in an agent file, a scheduler, and a protocol
   for front ends.
 
-**A grant can name one method of a service (decided, not built).** The `service`
+**A grant can name one method of a service (built).** The `service`
 capability's resource is `service:method`. A bare service name means every method, as it
 does today, so agent files already written read as before. `sessions` is why: starting a
 child, starting a session from outside, raising a signal and sending a session a message
 are four things to allow, and an add-on that delegates is granted the first and no other.
 The grant is about what the add-on that calls may ask for, and says nothing of the
-sessions it starts, whose own grants are what they are started with.
+sessions it starts, whose own grants are what they are started with. A pattern that
+matches the service's name speaks for each of its methods, when it denies as when it allows
+(`Scope::permits_part` in the core), and a refusal is recorded with the method asked for.
+What `:` means inside a service's or a method's own name is still open (B12).
 
 ## What is stable
 
@@ -1456,7 +1467,9 @@ call waits for a person, and the answer is yes or no, once.
   start are asked about in one way and answered in one way: the ask is recorded and waits
   in the log, and one `gate/answer` names whichever it was. An ask at `plugin/load` is
   then no longer a denial, which the fourth [guarantee](#what-is-safe-by-default) waits
-  on.
+  on. What the call that led to an ask does meanwhile is open: it waits, or it fails and
+  is made again. The second is built to be tried, for a host that takes answers
+  ([Prototypes](prototypes.md#x9-an-ask-that-reaches-a-person-anywhere)).
 - *An answer says how far it reaches.* Allow or deny, for this once or from now on, and
   from now on either for exactly what was asked or within a pattern the person names. So
   an answer may be wider than its question (asked about one host, the person allows any)
@@ -1482,9 +1495,12 @@ first.
   its place. Built for a run's own commits, since a session does one thing at a time; not
   yet for a commit from outside the run (an answer, a message, a stop recorded at a front
   end) that lands beside one of the run's.
-- *An add-on does not miss an event because it was busy.* Not built: an event that
+- *An add-on does not miss an event because it was busy.* Built: an event that
   arrives while the add-on is in a call is kept in a queue of the add-on's own and
-  delivered when the call returns, as the events it raises itself already are.
+  delivered when the call returns, as the events it raises itself already are. The queue
+  is bounded, and a `plugin/missed` event says which event a full one let go; how many it
+  holds and what becomes of it after a trap are the code's choices for now (F6 in
+  [Open questions](open-questions.md)).
 - *A plugin hears from when it subscribes.* What was committed before is not played to it
   again: it is in the log, which a plugin loaded late reads. Replaying to a late listener
   could be added and is not planned.
@@ -1809,7 +1825,7 @@ Typed values cannot cross the WebAssembly boundary, so for WebAssembly plugins (
   provide and call them.
 - `plugin-info.provides` lists the services a WebAssembly plugin answers, through the
   `handle-call` export (which receives a `service-call` record: caller, service, method,
-  payload). A `service` capability, scoped by service name, lets a plugin call them.
+  payload). A `service` capability, scoped by service and method, lets a plugin call them.
 - *Changed from the plan:* `plugin-info` was also to gain `inject`, so the plugin tree would
   order WebAssembly plugins by the services they use. A plugin's info is only known once it
   has been activated, which is after the tree has decided whether to activate it, so a call
@@ -2077,7 +2093,9 @@ credential is then in one of three states as far as a shell is concerned:
   value. `git push` works, and printing the variable shows the placeholder.
 - *A secret says which hosts it may go to.* `Secret` is the core's, so this is in the core
   before the freeze (B9). It also keeps a provider's key from following a `base_url` that
-  an agent file pointed somewhere else.
+  an agent file pointed somewhere else. The form is open, and one is built to be tried, as
+  a [prototype](prototypes.md#x1-a-secret-names-the-hosts-it-may-go-to): it holds a secret
+  that names its hosts to them, and does not yet stop one that says nothing.
 - *A secret that names no host goes nowhere.* The safe reading is the one that needs
   nothing written: a value is written into a request only to a host its secret names, for
   an add-on, a shell and a provider alike.
@@ -2183,7 +2201,8 @@ is supported are still open (A11).
 small, fixed and still enforcing the same rules whatever the plugins become is the offer,
 so its size is kept to a budget and not left to chance: lines, dependencies, and the
 WebAssembly engine counted with them. The figures, and the check that holds them, are set
-with the rest of what enforces the freeze (A4). The six guarantees are tested by us. A
+with the rest of what enforces the freeze (A4); a script measures them meanwhile
+([Prototypes](prototypes.md#x4-the-trusted-base-measured)). The six guarantees are tested by us. A
 review of them by someone else is wanted and is not a condition of 1.0: it is taken up
 afterwards, once it is clear what such a review should cover and who would make it.
 
@@ -2618,7 +2637,9 @@ the step it waits on is done.
     calling and waiting is enough.
 14. What is [safe by default](#what-is-safe-by-default). *Done:* every kernel starting from
     an empty environment. *Decided, not built:* a secret that names the hosts it may go to,
-    in the core before the freeze; every credential through `Secrets`; the
+    in the core before the freeze (one form of it is a
+    [prototype](prototypes.md#x1-a-secret-names-the-hosts-it-may-go-to)); every credential
+    through `Secrets`; the
     confined kernel for Linux and macOS, given its files, hosts and variables as an add-on
     is granted them, with its filter for hosts and masked credentials in the shell; the
     default agent on that kernel, and a shell that cannot be confined not starting; the
@@ -2640,8 +2661,10 @@ the step it waits on is done.
     To check on the way: that an add-on importing no capability still says which world it
     was built for, in each guest language, and that the three toolchains accept a WIT in
     which a function says which version it arrived in.
-16. What [an extension can reach](#what-an-extension-can-reach). *Decided, none of it
-    built:* in the core before the freeze, the call scope carrying a session's grants, a
+16. What [an extension can reach](#what-an-extension-can-reach). *Built:* a `service`
+    grant naming one method; `write` and `edit` refusing a file that changed since they
+    last saw it, for what one instance has seen. *Decided, not built:* in the core before
+    the freeze, the call scope carrying a session's grants, a
     kernel saying whether it can hold a session to them, and a `Kernels` registry that does
     not lock a whole kernel; `session/start` carrying a model, a loop, instructions, grants
     and limits, with `session/start` declared as a decision point and a session keeping
@@ -2652,8 +2675,8 @@ the step it waits on is done.
     the command's three ways of running it; an instance of an add-on for each session;
     children of one message run together; the session's snapshot readable, a single tool
     call with its trail on `Run`, a context for `Operation::run`, and `Run` no longer
-    handing out the harness; `write` and `edit` refusing a file that changed since it was
-    read.
+    handing out the harness; `write` and `edit` telling one session's reading from
+    another's, which waits on the instance for each session.
 17. How [people meet it](#how-people-meet-it). *Built:* `secret` on a provider entry, its
     value taken from `Secrets` for every request (beside `api_key_env`, which has not gone
     yet), and on an MCP entry, as its bearer token (beside `bearer_token_env`); a
@@ -2710,7 +2733,8 @@ settled by 1.0 is there as well, and one that can wait is only here.
   of entries, so one session can branch from any earlier point, which gives rewinding and a
   common starting point for several attempts. Because every event names its session and a
   session names its parent, branching can be added as "a new session whose parent is event N
-  of another" without changing the log.
+  of another" without changing the log. A [spike](prototypes.md#x8-a-session-that-branches-from-another)
+  bears that out, and found where a branch can and cannot begin.
 - **Operations from plugins.** Loop steps are native `Operation`s, which extensions
   register in `Operations`. A WebAssembly plugin will not get an export for one: the
   exports are closed at six ([How the plugin world grows](#how-the-plugin-world-grows)). It
@@ -2733,14 +2757,15 @@ settled by 1.0 is there as well, and one that can wait is only here.
   that matter, or with another crate) touches nothing else. 1.0 may ship on it, once nothing
   of it shows in the agent file ([How people meet it](#how-people-meet-it)); when to replace
   it can wait.
-- **Scopes below a service.** The `service` capability is scoped by service name, so a
-  grant gives all of a service's methods. Decided, not built: the resource is
+- **Scopes below a service.** The `service` capability was scoped by service name, so a
+  grant gave all of a service's methods. Decided and built: the resource is
   `service:method`, and a bare service name still means every method
   ([What an extension can reach](#what-an-extension-can-reach)).
 - **Listeners and re-entry.** An event a native tool emits while a WebAssembly plugin's
-  call is in progress is delivered at once, and a listener in that same plugin is refused
-  (it is running), so it misses the event. Events plugins raise themselves are queued and
-  unaffected. Decided, not built: a per-plugin queue of undelivered events closes the gap
+  call is in progress is delivered at once, and a listener in that same plugin cannot be
+  called (it is running), so it used to miss the event. Events plugins raise themselves
+  are queued and were unaffected. Decided and built: a per-plugin queue of undelivered
+  events closes the gap
   ([Events, gates and hooks](#events-gates-and-hooks)).
 - **Exports every guest must write.** Each export of the world is mandatory: the
   JavaScript and Python toolchains refuse to build a plugin without `gate`, and Rust's

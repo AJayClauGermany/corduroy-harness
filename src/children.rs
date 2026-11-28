@@ -15,6 +15,13 @@
 //!
 //! A WebAssembly plugin reaches it through the `service` capability scoped to `sessions`;
 //! the `subagents` plugin offers it to the model as `delegate`.
+//!
+//! **Starting a session is a decision point** ([`SESSION_START`]), which the harness
+//! declares and asks the gates at before a child is started. That it is one is decided;
+//! the request it sends is not (D3 and D2 in `docs/open-questions.md`), and the one here
+//! is a prototype: `docs/prototypes.md` says what it is for and what it found. A start a
+//! gate denies fails the call with the gate's reason, and no session is started. One a
+//! gate asks about is refused too, since nothing can wait for a person's answer there yet.
 
 use alloc::borrow::ToOwned;
 use alloc::format;
@@ -23,10 +30,20 @@ use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use corduroy_core::{CallError, Service, SessionId};
+use corduroy_core::call::Serve;
+use corduroy_core::{Asked, CallError, Decision, Gates, Service, SessionId, Verdict};
 use serde_json::{Value, json};
 
 use crate::session::{Sessions, end_of};
+
+/// The decision point asked before a session is started.
+///
+/// A prototype of its request, which is JSON text: `{"session", "parent", "starter",
+/// "task"}`, where `session` is the id the new session would have, `parent` the session
+/// whose tool call starts it, and `starter` who asks, as an event's source is written
+/// (`plugin:subagents`). It gains what a session is started with (a model, a loop,
+/// instructions, grants, limits) as each is built.
+pub const SESSION_START: &str = "session/start";
 
 /// Name of the service through which plugins start child sessions.
 pub const SESSIONS: &str = "sessions";
@@ -34,10 +51,22 @@ pub const SESSIONS: &str = "sessions";
 /// How deep child sessions may nest below the session a person started.
 pub const MAX_DEPTH: usize = 3;
 
+/// What the model is told of something a person has been asked about and has not answered.
+fn waiting(decision: &Decision, ask: &str) -> String {
+    format!(
+        "gate `{}` asked a person whether this may be done (ask {ask}): {}. It has not been \
+         answered, so nothing was done. Go on with something else, and ask for it again once \
+         a person has answered",
+        decision.gate,
+        decision.verdict.reason()
+    )
+}
+
 /// The [`SESSIONS`] service.
 #[derive(Debug)]
 pub(crate) struct SessionsService {
     pub(crate) sessions: Arc<Sessions>,
+    pub(crate) gates: Arc<Gates>,
 }
 
 impl Service for SessionsService {
@@ -82,6 +111,7 @@ impl Service for SessionsService {
             .map(|n| SessionId::new(format!("{parent}/{n}")))
             .find(|id| !taken.contains(id))
             .ok_or_else(|| CallError::Failed("no session name is free".to_owned()))?;
+        self.gate(caller, &parent, &child, &task)?;
         let child = self
             .sessions
             .start_with(child, Some(&parent), Some(task))
@@ -94,6 +124,79 @@ impl Service for SessionsService {
 }
 
 impl SessionsService {
+    /// Ask the gates whether `caller` may start `child` under `parent` for `task`, and
+    /// record what they said in the parent's session. Nothing is recorded if no gate has an
+    /// opinion.
+    fn gate(
+        &self,
+        caller: &str,
+        parent: &SessionId,
+        child: &SessionId,
+        task: &str,
+    ) -> Result<(), CallError> {
+        let request = json!({
+            "session": child.as_str(),
+            "parent": parent.as_str(),
+            "starter": format!("plugin:{caller}"),
+            "task": task,
+        });
+        let asking = request.to_string();
+        // The gates are asked for the session that starts the other, without its tool
+        // call: a gate that waited there would hold the call it is asked about. An ask is
+        // put to a person where the host takes their answers: it is recorded there, and
+        // found answered when the same session is asked for again.
+        let (settled, _) = Serve::session(parent.clone()).run(|| {
+            let decision = self.gates.decide(SESSION_START, &asking)?;
+            let asked = matches!(decision.verdict, Verdict::Ask(_))
+                .then(|| self.gates.settle(SESSION_START, &asking, &decision))
+                .flatten();
+            Some((decision, asked))
+        });
+        let Some((decision, asked)) = settled else {
+            return Ok(());
+        };
+        let denied = |why: String| Err(CallError::Denied(why));
+        match asked {
+            Some(Asked::Allowed) => return Ok(()),
+            Some(Asked::Refused(reason)) => {
+                return denied(format!("a person declined this: {reason}"));
+            }
+            Some(Asked::Waiting(id)) => return denied(waiting(&decision, &id)),
+            Some(_) | None => {}
+        }
+        self.record(parent, request, &decision)?;
+        match decision.verdict {
+            Verdict::Allow => Ok(()),
+            Verdict::Deny(reason) => {
+                denied(format!("denied by gate `{}`: {reason}", decision.gate))
+            }
+            Verdict::Ask(reason) => denied(format!(
+                "gate `{}` asked for a person's approval, which starting a session cannot \
+                 wait for yet: {reason}",
+                decision.gate
+            )),
+        }
+    }
+
+    /// Record what the gates decided about `request` in the session `parent`.
+    fn record(
+        &self,
+        parent: &SessionId,
+        mut request: Value,
+        decision: &Decision,
+    ) -> Result<(), CallError> {
+        if let Some(fields) = request.as_object_mut() {
+            fields.insert("point".to_owned(), json!(SESSION_START));
+            fields.insert("verdict".to_owned(), json!(decision.verdict.kind()));
+            fields.insert("reason".to_owned(), json!(decision.verdict.reason()));
+            fields.insert("gate".to_owned(), json!(decision.gate));
+        }
+        self.sessions
+            .journal(parent)
+            .and_then(|journal| Ok(journal.noted("gate/decision", &request)?))
+            .map_err(|error| CallError::Failed(error.to_string()))
+    }
+
     /// How many parents `session` has.
     fn depth(&self, session: &SessionId) -> usize {
         let all = self.sessions.list();

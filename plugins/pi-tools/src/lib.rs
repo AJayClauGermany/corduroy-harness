@@ -11,15 +11,21 @@
 //! and variables carry over from one call to the next. `tree` shows a directory's layout
 //! through `fs-read` alone, so an agent without a shell can still find its way.
 //!
+//! `write` and `edit` refuse a file that changed since these tools last read or wrote it:
+//! the model is working from what the file held then, and would write over whatever a
+//! command, another add-on or the person's editor put there since. Reading it again is what
+//! lifts the refusal. What was seen is kept in the instance's memory (`seen`).
+//!
 //! `tools` in the configuration lists the ones to offer, all five when it is absent. It is
 //! how a tool is left to another add-on: a name belongs to one plugin, so `bash` from
 //! `lean-shell`, say, means this one is configured without it. `bash`'s contract (its input,
 //! its result, the call into the kernel) is the `shell-tool` crate's, which both build on.
 
+mod seen;
 mod text;
 
 use std::fmt::Write as _;
-use std::sync::OnceLock;
+use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
 use corduroy_guest::host::{fs_read, fs_write};
 use corduroy_guest::{Keep, Plugin, PluginInfo, ToolError, ToolSpec, parse};
@@ -70,6 +76,22 @@ impl Default for Config {
 }
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
+
+/// What each file held when `read`, `write` or `edit` last saw it.
+static SEEN: Mutex<seen::Seen> = Mutex::new(seen::Seen::new());
+
+fn seen() -> MutexGuard<'static, seen::Seen> {
+    SEEN.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The refusal of a write to `path`, which holds something else than when it was last
+/// read here.
+fn stale(path: &str) -> ToolError {
+    ToolError::Failed(format!(
+        "{path} has changed since it was last read: something else wrote to it. Read it \
+         again, then make the change against what it holds now."
+    ))
+}
 
 #[derive(Deserialize)]
 struct Read {
@@ -144,6 +166,7 @@ corduroy_guest::export!(PiTools);
 
 fn read(args: &Read) -> Result<String, ToolError> {
     let contents = fs_read::read(&args.path)?;
+    seen().note(&args.path, &contents);
     if let Some(binary) = shell_tool::binary(&contents) {
         return Ok(format!(
             "[{}: {binary}, not text, so it is not shown.]",
@@ -174,7 +197,15 @@ fn read(args: &Read) -> Result<String, ToolError> {
 }
 
 fn write(args: &Write) -> Result<String, ToolError> {
+    // Only a file seen before is read first: one that cannot be read now (it is gone, or
+    // out of the grant's reach) is written as it would have been.
+    if seen().knows(&args.path)
+        && fs_read::read(&args.path).is_ok_and(|now| seen().changed(&args.path, &now))
+    {
+        return Err(stale(&args.path));
+    }
     fs_write::write(&args.path, &args.content)?;
+    seen().note(&args.path, &args.content);
     Ok(format!(
         "Wrote {} bytes to {}",
         args.content.len(),
@@ -184,8 +215,12 @@ fn write(args: &Write) -> Result<String, ToolError> {
 
 fn edit(args: &Edit) -> Result<String, ToolError> {
     let original = fs_read::read(&args.path)?;
+    if seen().changed(&args.path, &original) {
+        return Err(stale(&args.path));
+    }
     let edited = text::replace(&original, &args.edits).map_err(ToolError::InvalidInput)?;
     fs_write::write(&args.path, &edited)?;
+    seen().note(&args.path, &edited);
     Ok(format!(
         "Applied {} edit(s) to {}",
         args.edits.len(),

@@ -120,6 +120,7 @@ add-on may use through the `secret` capability without ever seeing its value.
 | --- | --- | --- |
 | `kind` | string | Where the value comes from: `keychain`, `env` or `chatgpt`, unless the command brings other kinds. Left out, it is `keychain`, unless the entry has an `env` key: then it is `env`. The entry's other keys are that kind's. |
 | `env` | string | For `env`: the environment variable holding the value, read when a request needs it. |
+| `hosts` | list of strings | For `env`, and a [prototype](../prototypes.md#x1-a-secret-names-the-hosts-it-may-go-to): the hosts the value may be sent to, each a host name or a pattern over them as an [`http` grant's](capabilities.md) are (`["api.github.com"]`, `["*.example.org"]`). A provider or an MCP server that names the secret, or an add-on's request that carries it, is refused it for any other host. An empty list names none, and the secret goes nowhere. Left out, the secret is sent as before, wherever what uses it sends it. |
 | `keep` | string | For `chatgpt`: where the sign-in is kept, `keychain` (the default) or `file`. |
 
 The keychain is where a secret is kept unless the entry says otherwise, so the safer source
@@ -138,6 +139,12 @@ at most once. The keychain is yours and not the workspace's: every agent of your
 a secret alike reads the same item. There is no fallback: on a machine without a keychain
 (a server nobody is logged in to, a container) revealing it fails and says so, and the
 entry has to name another source. [`corduroy secrets`](cli.md) says how each secret stands.
+
+The hosts a `keychain` secret may be sent to are not said in the agent file but beside the
+value, by whoever puts it in (`corduroy secrets set <name> --hosts api.anthropic.com`), so
+that an agent file somebody else wrote cannot name your key and send it elsewhere. This is
+a [prototype](../prototypes.md#x1-a-secret-names-the-hosts-it-may-go-to): the hosts are
+kept as a second item, `<name>.hosts`, and a value put in without any is sent as before.
 
 ```toml
 [providers.main]

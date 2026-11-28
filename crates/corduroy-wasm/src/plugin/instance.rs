@@ -2,18 +2,20 @@
 //! entering it twice.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::mem;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use corduroy_core::{Draft, EventId, EventStream, Grants, Source, json};
+use corduroy_core::call::Serve;
+use corduroy_core::{Draft, EventId, EventStream, Grants, SessionId, Source, json};
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Engine, Store, StoreLimitsBuilder};
 
 use super::bindings;
+use super::bindings::corduroy::plugin::types;
 use super::host::{HostState, Lent};
 use crate::runtime::Limits;
 
@@ -154,6 +156,47 @@ impl Drop for Link {
     }
 }
 
+/// The event recording that a plugin's queue of events was full, so that it missed one.
+const MISSED: &str = "plugin/missed";
+
+/// An event for a plugin's `on-event`: the event as the plugin sees it, and what the host
+/// keeps of it for the call.
+pub(super) struct Heard {
+    /// The event's id: the cause of whatever the plugin raises on hearing it.
+    pub(super) cause: EventId,
+    /// The session the event belongs to, which the plugin hears it for.
+    pub(super) session: Option<SessionId>,
+    pub(super) event: types::Event,
+}
+
+/// Why a call could not have the instance.
+enum Refused {
+    /// The instance is further up this thread's chain of calls.
+    Running,
+    /// It stayed in a call on another thread for this long.
+    Busy(Duration),
+    /// It trapped this many times, and is stopped until reloaded.
+    Stopped(u32),
+}
+
+impl Refused {
+    /// Why, in words, for the plugin `name`.
+    fn said(&self, name: &str) -> String {
+        match self {
+            Self::Running => format!(
+                "plugin `{name}` is already running further up this call: a plugin is never \
+                 called back while it runs"
+            ),
+            Self::Busy(wait) => {
+                format!("plugin `{name}` stayed busy with another call for {wait:?}")
+            }
+            Self::Stopped(traps) => format!(
+                "plugin `{name}` was stopped after trapping {traps} times and must be reloaded"
+            ),
+        }
+    }
+}
+
 /// The instance, if it is alive, how often it has trapped, and whether a call has it.
 struct Slot {
     /// `None` once a call has trapped: a trapped component instance cannot be entered again.
@@ -162,6 +205,10 @@ struct Slot {
     traps: u32,
     /// A call is running. Others wait on [`Instance::freed`].
     busy: bool,
+    /// Events that arrived while a call was running, oldest first, for when it returns.
+    missed: VecDeque<Heard>,
+    /// A thread is handing `missed` over. Another call that ends leaves it to that thread.
+    draining: bool,
 }
 
 /// A call's hold on the instance. Dropping it, even while unwinding, puts the instance back
@@ -196,6 +243,11 @@ impl Drop for Claim<'_> {
 /// that two chains waiting on each other give up rather than deadlock. Only a call from
 /// outside every plugin waits for as long as it takes.
 ///
+/// An event that arrives for the plugin while it is in a call is not lost: it is kept, up to
+/// [`Limits::missed_events`] of them, and handed over when the call returns, in the order
+/// the events arrived. They outlive a trap, and the instance started in its place hears them;
+/// a plugin that is stopped hears nothing more.
+///
 /// A call that traps kills the instance. The next call makes a new one from the blueprint
 /// and activates it with the plugin's configuration again, so the plugin starts from fresh
 /// memory and keeps its registrations. After [`Limits::restarts`] restarts, the next trap
@@ -218,6 +270,8 @@ impl Instance {
                 live: Some(inner),
                 traps: 0,
                 busy: false,
+                missed: VecDeque::new(),
+                draining: false,
             }),
             freed: Condvar::new(),
             events,
@@ -270,7 +324,18 @@ impl Instance {
         cause: Option<EventId>,
         call: impl FnOnce(&bindings::Plugin, &mut Store<HostState>) -> wasmtime::Result<T>,
     ) -> Result<T, String> {
-        let mut claim = self.claim()?;
+        let claim = self.claim().map_err(|refused| refused.said(self.name()))?;
+        self.run(claim, cause, call)
+    }
+
+    /// Run `call` in the instance `claim` holds, put the instance back, commit what the
+    /// call raised, and hand over the events that arrived meanwhile.
+    fn run<T>(
+        &self,
+        mut claim: Claim<'_>,
+        cause: Option<EventId>,
+        call: impl FnOnce(&bindings::Plugin, &mut Store<HostState>) -> wasmtime::Result<T>,
+    ) -> Result<T, String> {
         let link = Link::push(self.id);
         let mut raised = Vec::new();
         let result = self.revive(&mut claim, &mut raised).and_then(|mut inner| {
@@ -300,18 +365,125 @@ impl Instance {
         // The plugin's call has returned, so there is nobody to hand a refused commit to. The
         // stream is closed by then and the next commit of the run reports it.
         drop(self.events.commit(raised));
+        self.drain();
         result
     }
 
+    /// Hand the plugin an event: now if it is free, and once the call it is in has returned
+    /// if it is not, so that a plugin does not miss an event because it was busy.
+    pub(super) fn hear(&self, heard: Heard) {
+        self.offer(heard, false);
+    }
+
+    /// Call `on-event` with `heard`, or keep it for when the plugin is free: at the front of
+    /// what is kept if `first`. Returns whether it was kept.
+    fn offer(&self, heard: Heard, first: bool) -> bool {
+        match self.claim() {
+            Ok(claim) => {
+                self.handle(claim, heard);
+                false
+            }
+            Err(Refused::Stopped(_)) => false,
+            Err(Refused::Running | Refused::Busy(_)) => {
+                self.keep(heard, first);
+                true
+            }
+        }
+    }
+
+    /// Call `on-event` with `heard` in the instance `claim` holds.
+    fn handle(&self, claim: Claim<'_>, heard: Heard) {
+        let Heard {
+            cause,
+            session,
+            event,
+        } = heard;
+        // A trap is already on the event stream as `plugin/trapped`; a listener has nobody
+        // to return it to.
+        let handle = || {
+            let heard = |plugin: &bindings::Plugin, store: &mut Store<HostState>| {
+                plugin.call_on_event(store, &event)
+            };
+            drop(self.run(claim, Some(cause), heard));
+        };
+        // An event of a session is handled for that session: the plugin can ask which it
+        // is, and what it raises belongs to it.
+        match session {
+            Some(session) => drop(Serve::session(session).run(handle)),
+            None => handle(),
+        }
+    }
+
+    /// Keep `heard` for when the call the plugin is in returns. When as many are kept as the
+    /// limit allows, the oldest goes, and the stream says so.
+    fn keep(&self, heard: Heard, first: bool) {
+        let mut slot = self.slot();
+        if first {
+            slot.missed.push_front(heard);
+        } else {
+            slot.missed.push_back(heard);
+        }
+        let dropped = if slot.missed.len() > self.blueprint.limits.missed_events {
+            slot.missed.pop_front()
+        } else {
+            None
+        };
+        drop(slot);
+        // The record of a missed event is not itself counted as missed: a plugin that
+        // listens to everything would be told of each one's loss for ever.
+        if let Some(dropped) = dropped.filter(|dropped| dropped.event.topic != MISSED) {
+            let missed = self
+                .host_event(MISSED, &format!("\"event\":{}", dropped.cause.get()))
+                .cause(dropped.cause);
+            drop(self.events.emit(missed));
+        }
+    }
+
+    /// Hand the plugin the events kept while it was in a call, oldest first, until none is
+    /// left or the plugin is in another call, whose end hands over the rest.
+    fn drain(&self) {
+        {
+            let mut slot = self.slot();
+            if slot.draining || slot.missed.is_empty() {
+                return;
+            }
+            slot.draining = true;
+        }
+        while let Some(next) = self.next_missed() {
+            // Kept again, and the plugin is in a call: its end hands over the rest.
+            if self.offer(next, true) && self.left_to_the_call() {
+                return;
+            }
+        }
+    }
+
+    /// The oldest event kept, for the thread that hands them over; with none left, that
+    /// thread is done.
+    fn next_missed(&self) -> Option<Heard> {
+        let mut slot = self.slot();
+        let next = slot.missed.pop_front();
+        if next.is_none() {
+            slot.draining = false;
+        }
+        next
+    }
+
+    /// Whether a call has the instance, to whose end the events kept are then left. If it
+    /// was freed in the meantime nobody else will hand them over, and this thread goes on.
+    fn left_to_the_call(&self) -> bool {
+        let mut slot = self.slot();
+        let busy = slot.busy;
+        if busy {
+            slot.draining = false;
+        }
+        busy
+    }
+
     /// Take the instance for one call, waiting for any call running on another thread.
-    fn claim(&self) -> Result<Claim<'_>, String> {
+    fn claim(&self) -> Result<Claim<'_>, Refused> {
         let (reentry, outermost) = chain_has(self.id);
         if reentry {
-            return Err(format!(
-                "plugin `{}` is already running further up this call: a plugin is never \
-                 called back while it runs",
-                self.name()
-            ));
+            return Err(Refused::Running);
         }
         let slot = self.slot();
         let mut slot = if outermost {
@@ -325,19 +497,14 @@ impl Instance {
                 .wait_timeout_while(slot, wait, |slot| slot.busy)
                 .unwrap_or_else(PoisonError::into_inner);
             if slot.busy {
-                return Err(format!(
-                    "plugin `{}` stayed busy with another call for {wait:?}",
-                    self.name()
-                ));
+                return Err(Refused::Busy(wait));
             }
             slot
         };
         if slot.live.is_none() && slot.traps > self.blueprint.limits.restarts {
-            return Err(format!(
-                "plugin `{}` was stopped after trapping {} times and must be reloaded",
-                self.name(),
-                slot.traps
-            ));
+            // A stopped plugin hears nothing more, of what was kept for it either.
+            slot.missed.clear();
+            return Err(Refused::Stopped(slot.traps));
         }
         slot.busy = true;
         Ok(Claim {

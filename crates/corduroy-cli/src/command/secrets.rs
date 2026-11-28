@@ -138,15 +138,52 @@ fn chosen(
     }
 }
 
+/// What follows `secrets set` or `secrets remove` on the command line.
+pub(super) struct Said<'a> {
+    /// The secret's name, if one is given.
+    named: Option<&'a str>,
+    /// The hosts `--hosts` lists, if it is there: none at all for `--hosts ""`.
+    hosts: Option<Vec<String>>,
+}
+
+/// The words after `secrets set` or `secrets remove`, as what they say: a name, and
+/// `--hosts` with host names separated by commas. `None` if they are anything else.
+pub(super) fn words<'a>(words: &[&'a str]) -> Option<Said<'a>> {
+    let (mut named, mut hosts) = (None, None);
+    let mut words = words.iter().copied();
+    while let Some(word) = words.next() {
+        if word == "--hosts" && hosts.is_none() {
+            let listed = words.next()?;
+            hosts = Some(
+                listed
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|host| !host.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
+            );
+        } else if named.is_none() && !word.starts_with("--") {
+            named = Some(word);
+        } else {
+            return None;
+        }
+    }
+    Some(Said { named, hosts })
+}
+
 /// Put in (or, if not `set`, take out) the value of a secret of the agent file whose kind
-/// keeps one: the one `named`, or the only such secret.
+/// keeps one: the one `named`, or the only such secret. With `hosts`, the hosts the value
+/// may be sent to are kept beside it.
 pub(super) fn change(
     set: bool,
-    named: Option<&str>,
+    Said { named, hosts }: Said<'_>,
     described: &Described,
     standard: &Standard,
     console: &mut Console,
 ) -> Done {
+    if !set && hosts.is_some() {
+        return Err("`--hosts` goes with `secrets set`: removing a value removes its hosts".into());
+    }
     let kept = those(described, |kind| standard.keep(kind).is_some());
     let name = chosen(named, &kept, ADD_KEPT)?;
     let SecretAsked { kind, config } = described.secret(&name)?;
@@ -169,7 +206,18 @@ pub(super) fn change(
         let prompt = format!("Value for `{name}` (not shown as you type or paste): ");
         let value = console.secret(&prompt)?;
         let place = keep.put(&asked, &value)?;
-        say(&console.out, &format!("kept `{name}` in {place}"));
+        let going = match &hosts {
+            Some(hosts) => {
+                keep.bind(&asked, hosts)?;
+                if hosts.is_empty() {
+                    ", to be sent nowhere".to_owned()
+                } else {
+                    format!(", to be sent only to {}", hosts.join(", "))
+                }
+            }
+            None => String::new(),
+        };
+        say(&console.out, &format!("kept `{name}` in {place}{going}"));
     } else if keep.remove(&asked)? {
         say(&console.out, &format!("removed the value of `{name}`"));
     } else {

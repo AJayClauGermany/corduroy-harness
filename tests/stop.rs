@@ -137,7 +137,7 @@ async fn a_running_tool_is_told_and_the_calls_after_it_are_not_run() {
     assert_eq!(payloads(&harness, "run/stop").len(), 1);
     assert_eq!(
         payloads(&harness, "turn/end"),
-        [json!({"status": "stopped"})]
+        [json!({"status": "stopped", "used": {"requests": 1}})]
     );
 
     // The session takes a new prompt, and the model hears what happened.
@@ -256,9 +256,12 @@ async fn stopping_a_run_stops_the_sub_agent_it_waits_for() {
         [
             (
                 Some(child.as_str().to_owned()),
-                json!({"status": "stopped"})
+                json!({"status": "stopped", "used": {"requests": 1}})
             ),
-            (Some(MAIN.to_owned()), json!({"status": "stopped"})),
+            (
+                Some(MAIN.to_owned()),
+                json!({"status": "stopped", "used": {"requests": 1}})
+            ),
         ]
     );
     // The parent's call was answered with what the sub-agent's end brought.

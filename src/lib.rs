@@ -89,6 +89,7 @@ extern crate alloc;
 #[cfg(any(feature = "std", test))]
 extern crate std;
 
+pub mod asks;
 pub mod bound;
 pub mod children;
 pub mod compact;
@@ -103,10 +104,12 @@ pub mod outside;
 pub mod provider;
 pub mod scripted;
 pub mod session;
+pub mod shape;
 pub mod stop;
 pub mod tools;
 
-pub use children::SESSIONS;
+pub use asks::OpenAsk;
+pub use children::{SESSION_START, SESSIONS};
 pub use compact::CompactOperation;
 pub use corduroy_core as core;
 pub use corduroy_core::{ModelInfo, ModelReply, ModelRequest, StopReason, Usage};
@@ -128,3 +131,4 @@ pub use session::{
     MODEL_REQUEST, MODEL_RETRY, MODEL_SHOWN, PROCESS_START, ProcessInfo, Removal, SESSION_REMOVED,
     SIGNAL, Session, SessionInfo, Sessions, Wait, removal,
 };
+pub use shape::{SHAPERS, Shape, Shaped, Shapers};
