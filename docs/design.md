@@ -916,7 +916,8 @@ which files, which hosts, which models, which tools. It is the
   serves. It is to say what that session is granted as well, so the WebAssembly host and a
   kernel read the grants where they already read the session. That is in the core, and is
   marked before the freeze. Work handed to another thread has to take the scope with it, or
-  it is done under no session's limits at all (B17 in [Open questions](open-questions.md)).
+  it is done under no session's limits at all (B17 in [Open questions](open-questions.md);
+  one form of the handle is a [prototype](prototypes.md#x6-a-calls-scope-carried-to-another-thread)).
 - *It is the fourth guarantee, one step further.* The
   [six](#what-is-safe-by-default) gain no seventh: the fourth is read as covering a session
   started as well as an add-on loaded, and its test covers both.
@@ -998,7 +999,9 @@ what an agent may do. A gate is told the session, and may treat sessions differe
   plugin), its parent, and what it would be started with. That a reviewer does not run on
   its starter's model, or that an orchestrator does not start orchestrators, is then a
   gate's to say. A session a gate asked about is recorded and waits, in the log, for the
-  person's answer.
+  person's answer. The point is declared and asked before a child is started, with a
+  request that is a [prototype](prototypes.md#x5-the-decision-point-before-a-session-starts)
+  and holds only what a child is started with today; an ask there is still a denial.
 - *What a grant of `sessions` means.* An add-on granted the `sessions` service can start an
   agent as capable as the session it serves, whatever the add-on's own grants are. That is
   accepted, and stated: it is what `delegate` is for. The gate and the limit on depth are
@@ -2728,7 +2731,8 @@ settled by 1.0 is there as well, and one that can wait is only here.
   of entries, so one session can branch from any earlier point, which gives rewinding and a
   common starting point for several attempts. Because every event names its session and a
   session names its parent, branching can be added as "a new session whose parent is event N
-  of another" without changing the log.
+  of another" without changing the log. A [spike](prototypes.md#x8-a-session-that-branches-from-another)
+  bears that out, and found where a branch can and cannot begin.
 - **Operations from plugins.** Loop steps are native `Operation`s, which extensions
   register in `Operations`. A WebAssembly plugin will not get an export for one: the
   exports are closed at six ([How the plugin world grows](#how-the-plugin-world-grows)). It

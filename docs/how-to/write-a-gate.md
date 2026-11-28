@@ -113,8 +113,8 @@ A gate that only reads its request needs no grants. `corduroy check` lists it un
   denies anyway.
 - **A gate makes no tool calls.** An add-on that gates `tool/call` and imports `tools` is
   refused at activation, since it would be asked about its own calls.
-- **Only declared points.** `tool/call` and `plugin/load` always exist; others exist only if
-  an extension declares them. Gating an undeclared point is refused at activation.
+- **Only declared points.** `tool/call`, `plugin/load` and `session/start` always exist;
+  others exist only if an extension declares them. Gating an undeclared point is refused at activation.
 - **Remembering answers** ("always allow this") is up to your gate: subscribe to
   `gate/answer` events and keep what you learn in `state`.
 - **No rewriting.** A gate cannot change a call's input. Deny with a reason and the model

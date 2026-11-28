@@ -155,7 +155,8 @@ as design guidance, not noise.
   the replaced tool is called again when the replacement is unloaded. Never take a name
   over by removing what holds it.
 - **Decision points are declared.** Ask the gates only at a point declared in `Gates`
-  (the core's two, or one an extension declared); an undeclared point is denied.
+  (the core's two, the loop's `session/start`, or one an extension declared); an
+  undeclared point is denied.
 - **Every registration is an effect.** Plugins set things up only through their `Context`
   (`ctx.effect`, `ctx.provide`, `ctx.on`, `registry.register(ctx, ..)`), so unloading reverts
   it. Never reach around the context to mutate shared state from `apply`.

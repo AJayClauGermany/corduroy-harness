@@ -135,7 +135,7 @@ log       /home/you/corduroy-tutorial/.corduroy/log.jsonl
 providers main
 kernels   shell
 gates     approval, inspect
-points    plugin/load, tool/call
+points    plugin/load, session/start, tool/call
 fronts    none (the terminal alone)
 tool      bash
 tool      delegate

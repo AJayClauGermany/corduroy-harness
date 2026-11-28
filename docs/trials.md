@@ -130,13 +130,24 @@ that way round?
 
 ## T8. Who adds up what a run used?
 
-*Answers:* [G17](open-questions.md#g17-where-is-usage-added-up). `corduroy report` now has a
-`used` line for each run, added up by the report from the `usage` events: the reader's sum,
-with nothing new in the log.
+*Answers:* [G17](open-questions.md#g17-where-is-usage-added-up).
+
+**A.** `corduroy report` has a `used` line for each run, added up by the report from the
+`usage` events: the reader's sum, with nothing new in the log.
 
 ```bash
 corduroy run "say hi" && corduroy report
 ```
+
+**B.** The run's end holds the total: `used` on its `turn/end`, kept by the harness
+([a prototype](prototypes.md#x7-what-a-run-used-on-its-end)).
+
+```bash
+corduroy log | grep turn/end
+```
+
+The two differ on purpose where a run started sub-agents: the report's sum has what they
+used, and a `turn/end` has its own session's requests only.
 
 *Look at:* whether a sum made when you ask is enough, or you want the total somewhere a
 program reads without adding (on the run's end, in the log); whether it should count the

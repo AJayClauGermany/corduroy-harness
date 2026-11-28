@@ -203,7 +203,7 @@ the add-on fixtures, decide which guest languages are kept and where: a JavaScri
 Python add-on is 12 to 19 MB, which is a lot to hold in the repository for every release.
 
 *Prototype.* [X4](prototypes.md#x4-the-trusted-base-measured): a script that measures the
-trusted base (10 168 lines; 19 crates from outside without the WebAssembly engine and 110
+trusted base (10 428 lines; 19 crates from outside without the WebAssembly engine and 110
 with it) and compares it with a budget file. It only measures: the file holds the day's
 figures, and nothing fails on it.
 
@@ -453,6 +453,11 @@ before the freeze. An add-on is to have an instance for each session, so its own
 keep their session whatever the thread; what loses it is native code that calls a tool or a
 kernel from a thread of its own. Say what such a call is served as.
 
+*Prototype.* [X6](prototypes.md#x6-a-calls-scope-carried-to-another-thread): `call::carry`
+and `Carried::enter`, an addition to the core's `call`. It found that a wait said on the
+other thread does not reach the call unless the tool says it again, and that nothing makes
+a tool carry its scope.
+
 ### B19. Is polling the only way to learn of a stop?
 
 `call::stopping()` is asked "now and then". Nothing wakes work that is blocked. A plugin
@@ -602,6 +607,12 @@ store ([What the record promises](design.md#what-the-record-promises)), where a 
 new file whose start names an event in another. Say what a branch means once the session it
 came from has been removed.
 
+*Prototype.* [X8](prototypes.md#x8-a-session-that-branches-from-another): a spike against
+the store in memory and the JSON Lines file, not the folder store. The log did not change:
+a branch is one `session/start` with `parent` and `from`. It found that a branch can begin
+only where the conversation is whole, that `parent` then means two things, and that
+removing a session has to remove its branches, since they begin with its events.
+
 ### C15. Can a person answer an ask at `plugin/load`?
 
 Not yet (design, "still to do"). Asks are answered per tool call (`Harness::answer`).
@@ -626,6 +637,11 @@ is kept at account level, where it also brings the package back after a restart.
 `Harness::answer` name a load or a session, with old logs' answers, which name a tool call,
 still read; and whether a refusal the person may lift afterwards (the host, the credential)
 is an ask of that kind or an event of its own.
+
+One choice comes before any of it can be built, and is laid out in
+[Prototypes](prototypes.md#what-waits-on-a-decision): whether the call that led to an ask
+waits, as a tool call a gate asked about does, or fails and is made again once the person
+has answered. `session/start` meets the same choice.
 
 ### C18. How many processes may use one log?
 
@@ -715,6 +731,12 @@ by third parties will key on the names. For `session/start`, what is left is the
 JSON ([D2](#d2-are-the-gate-requests-json-shapes-contract)). Decide whether taking away a
 plugin that guards a point is asked first, as loading one is. The leaning is yes, as a
 point the gates are asked at; what it might break has not been thought through.
+
+*Prototype.* [X5](prototypes.md#x5-the-decision-point-before-a-session-starts): the harness
+declares `session/start` and asks before the `sessions` service starts a child, with
+`{"session", "parent", "starter", "task"}`. That is all there is to put in the request
+until a session is started with a model, a loop, grants and limits. An ask there is a
+denial, for want of somewhere to wait.
 
 ### D4. Is name order, first strictest, the final rule?
 
@@ -873,6 +895,12 @@ script returns, which keeps it readable and lets it be assembled. Either way it 
 registered under a name by native code on the add-on's behalf. Models and kernels can
 still be "never"; one that does come is a service an extension registers in the core's
 registry.
+
+Writing the description was not started: the first thing such a loop does beyond the
+standard one, running a check and telling the model what came of it, has no form yet
+([Prototypes](prototypes.md#what-waits-on-a-decision)). It waits on how a message says who
+sent it ([B28](#b28-is-there-one-person)) and on a tool call a loop can make with its
+trail.
 
 ### E13. When is a value JSON text and when a typed record?
 
@@ -1145,6 +1173,12 @@ the unit.
 
 *Direction.* Decide whether totals are the harness's to keep or a reader's to compute, and
 in what unit a cost is written, since it is in the log.
+
+*Prototype.* [X7](prototypes.md#x7-what-a-run-used-on-its-end): a `turn/end` holds `used`,
+the run's own requests added up, beside the report's sum
+([T8](trials.md#t8-who-adds-up-what-a-run-used) offers both). The two differ where a run
+started sub-agents, and neither counts an add-on's own model calls, so a total has to say
+which requests it counts before it says anything.
 
 ### G19. Who decides what the model sees?
 

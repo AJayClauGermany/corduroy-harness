@@ -1,10 +1,10 @@
 # Not a decision: the figures as scripts/trusted-base.sh measured them on 28 November 2026,
 # so that the check can be tried. The budget itself is A4 in docs/open-questions.md.
-lines.core 2967
+lines.core 3016
 lines.wasm-host 2171
-lines.loop 4800
+lines.loop 5011
 lines.world 230
-lines.total 10168
+lines.total 10428
 crates.core 0
 crates.without-add-ons 19
 crates.with-add-ons 110

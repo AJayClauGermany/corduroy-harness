@@ -35,11 +35,15 @@ The rules a prototype is held to:
 | [X2](#x2-shaping-a-request) | [G19](open-questions.md#g19-who-decides-what-the-model-sees) | Steps that change what the model is sent, registered by name, with what they did recorded | `src/shape.rs`, `src/loops.rs` |
 | [X3](#x3-one-list-of-topics-checked) | [C11](open-questions.md#c11-which-topics-and-payload-fields-are-frozen-and-where-is-the-one-list) | A test that holds the events reference to the topics the code raises | `crates/corduroy-cli/tests/topics.rs` |
 | [X4](#x4-the-trusted-base-measured) | [A4](open-questions.md#a4-what-enforces-the-freeze) | A script that measures the trusted base and compares it with a budget | `scripts/trusted-base.sh` |
+| [X5](#x5-the-decision-point-before-a-session-starts) | [D3](open-questions.md#d3-which-decision-points-exist-at-10), [D2](open-questions.md#d2-are-the-gate-requests-json-shapes-contract) | `session/start` declared by the harness, and the gates asked before a child session starts | `src/children.rs` |
+| [X6](#x6-a-calls-scope-carried-to-another-thread) | [B17](open-questions.md#b17-does-the-call-scope-follow-work-to-another-thread) | A handle that takes what a thread serves to another thread | `corduroy-core` (`call`) |
+| [X7](#x7-what-a-run-used-on-its-end) | [G17](open-questions.md#g17-where-is-usage-added-up), with [T8](trials.md#t8-who-adds-up-what-a-run-used) | A total of what a run's requests used, on its `turn/end` | `src/session.rs` |
+| [X8](#x8-a-session-that-branches-from-another) | [C14](open-questions.md#c14-can-a-session-branch-from-an-earlier-point) | A session that begins where another stood at an event | `src/session.rs` |
 
 [Built from decisions](#built-from-decisions-and-what-that-left-open) lists three things
 that were decided and are now built, each of which made a choice an open question still has
-to confirm. [What could be prototyped next](#what-could-be-prototyped-next) says how the
-next questions could be tried.
+to confirm. [What waits on a decision](#what-waits-on-a-decision) lists the questions that
+could be tried next, and what has to be said before each can be.
 
 ---
 
@@ -257,11 +261,11 @@ scripts/trusted-base.sh
 
 | | Lines | | Crates from outside |
 | --- | --- | --- | --- |
-| The core | 2967 | The core | 0 |
+| The core | 3016 | The core | 0 |
 | The WebAssembly host | 2171 | The loop without add-ons | 19 |
-| The loop | 4800 | The loop with add-ons | 110 |
+| The loop | 5011 | The loop with add-ons | 110 |
 | The plugin world | 230 | | |
-| Together | 10 168 | | |
+| Together | 10 428 | | |
 
 **What it found.**
 
@@ -269,7 +273,8 @@ scripts/trusted-base.sh
    budget of dependencies is in practice a statement about wasmtime's tree, which moves
    with each of its releases and is not ours to hold down.
 2. *The loop is the largest part,* at close to half the lines, and `src/session.rs` alone
-   is a seventh of the whole. The prototypes on this page added to it.
+   is a sixth of the whole. What this page describes added to it: the three decided
+   items and the prototypes came to some 550 lines of the trusted base, of 9871 before.
 3. *What counts has to be said before a figure means anything.* The measure leaves out the
    store (`corduroy-jsonl`), which keeps the record; the standard extensions, which hold
    the host's authority; and the provider library. Each is arguably trusted.
@@ -277,6 +282,184 @@ scripts/trusted-base.sh
 **Still to decide.** The figures: the budget file holds the day's measurements, which is
 not a decision. Whether dependencies are counted with the engine, without it, or both.
 Which crates are the trusted base. Whether going over fails the check or is only reported.
+
+## X5. The decision point before a session starts
+
+*For:* [D3](open-questions.md#d3-which-decision-points-exist-at-10) and
+[D2](open-questions.md#d2-are-the-gate-requests-json-shapes-contract). Decided
+([What an extension can reach](design.md#what-an-extension-can-reach)): the loop declares
+`session/start`, and the gates are asked with who is starting the session, its parent and
+what it would be started with. Open: the request's JSON.
+
+**The form tried.** The harness declares the point, and the `sessions` service asks the
+gates before it starts a child, with `{"session", "parent", "starter", "task"}`: the id the
+session would have, the session whose tool call starts it, who asks (`plugin:subagents`)
+and what it is for. A denied session is not started, and the call fails with the gate's
+reason, which the model reads. The decision is recorded as a `gate/decision` in the session
+that asked. A gate that asks is refused, as at `plugin/load`.
+
+**Try it.** `tests/subagents.rs` has a gate of a few lines that lets the session a person
+started start sessions and no session started that way: the policy "an orchestrator starts
+no orchestrators", which the decision names as a gate's to say.
+
+**What building it answered.**
+
+- It is the loop's point, declared with no change to the core, and a gate written for
+  `tool/call` is not asked at it.
+- The policy the decision gives as its example can be written from the request as it is:
+  the parent's id says how deep the starter is.
+
+**What it found.**
+
+1. *Most of the request does not exist yet.* The decision lists a model, a loop,
+   instructions, grants and limits. A child is started with a task and nothing else today,
+   so "a reviewer does not run on its starter's model" cannot be written until a session
+   is started with one.
+2. *The starter is always a plugin.* The person's own session is there before any gate is
+   loaded, and a session started from outside is not built, so `starter` has one form.
+3. *An ask has nowhere to wait.* It is a denial, with a reason that says so. It is the
+   same gap as at `plugin/load`, and the same decision closes both (below).
+4. *The decision is recorded without a call.* A `gate/decision` has named a tool call
+   until now (`id`, `tool`). This one names a session, and readers that take `id` for
+   granted (the report's "waited on" list, for an ask) have to learn the other shape.
+5. *The gate is asked without the tool call's scope,* for the parent session only, so that
+   a gate cannot make the call it is asked about wait.
+6. *A gate that starts sessions cannot be asked about its own.* It is in a call when the
+   question comes, so it cannot answer and the start is denied. That is right, and worth
+   a check at activation like the one for `tool/call` and `tools`.
+
+**Still to decide.** The request's fields and their names. Whether a session the person
+starts with the command is asked about too. What an ask does (with C15).
+
+## X6. A call's scope carried to another thread
+
+*For:* [B17](open-questions.md#b17-does-the-call-scope-follow-work-to-another-thread). Its
+direction: a handle that captures the current scope and enters it elsewhere, in the core
+before the freeze.
+
+**The form tried.** `call::carry()` takes what the thread serves (the session, the tool
+call, what stops the run, what bounds the result), and `Carried::enter(work)` serves it on
+whichever thread calls it, for as long as `work` runs. `enter` hands back the signals the
+work said the call waits for.
+
+**Try it.** `fan` in `tests/subagents.rs` is a tool that does its work on a thread of its
+own.
+
+**What building it answered.**
+
+- It is an addition to `call`: two functions and a type, nothing existing changed, and it
+  builds without the standard library.
+- A stop reaches the other thread, an outer call's included, because the flag is shared
+  and not copied.
+
+**What it found.**
+
+1. *Waits do not cross by themselves.* A wait said on the other thread is collected there.
+   The tool has to say it again on the thread it was called on, or the run does not wait:
+   the call returns at once and the signal, when it comes, answers nothing. The test shows
+   both. A handle that carried the waits back would need the two threads to share them,
+   which the scope does not do today.
+2. *Nothing makes a tool carry its scope.* A thread started without it serves no session,
+   in silence. Once the scope carries a session's grants, that is work done under no
+   limits, which is what B17 warns of. The host could refuse a host call made with no
+   scope from a thread that is not the host's own; that is a rule to decide, not a
+   mechanism to add.
+3. *The handle outlives the call.* It can be kept and entered after the call has returned,
+   and work done then is attributed to a call that is over.
+4. *Not tried:* an async tool whose work moves between an executor's threads, which is the
+   case a native tool on tokio would meet first.
+
+**Still to decide.** Whether this is the handle. Whether a wait said elsewhere reaches the
+call by itself. What a host call with no scope is served as. The names `carry`, `Carried`
+and `enter`.
+
+## X7. What a run used, on its end
+
+*For:* [G17](open-questions.md#g17-where-is-usage-added-up). It asks whether totals are
+the harness's to keep or a reader's to compute. [T8](trials.md#t8-who-adds-up-what-a-run-used)
+offered the reader's sum; this is the other way, so both can be looked at.
+
+**The form tried.** A `turn/end` gains `used`: `{"requests"}` and each count a `usage`
+event gives (`input_tokens`, `output_tokens` and the rest), added up over the model
+requests of the run that answered. It counts the session's own requests.
+
+**What building it answered.**
+
+- The total is the same whether a run went through in one process or was picked up from
+  the log by another: it is added up from the `usage` events either way.
+- A log line gained a field and nothing that reads the log had to change.
+
+**What it found.**
+
+1. *The two sums differ, on purpose or not.* The report's sum has what the sessions a run
+   started used; a `turn/end` has its own session's. Neither has what an add-on's own
+   model calls used (`summarize`, `review`, `compact`). So "what did this cost" has three
+   answers today, and a total the harness keeps has to say which it is. That is also what
+   G20 asks of a child's budget.
+2. *Five tests compared a `turn/end` exactly* and had to be told of the new field, the
+   command's own among them. A program outside that does the same will notice. Adding a
+   field is the rule; it is not free.
+3. *It was first built wrong.* The count was kept where a session is read from the log and
+   not where a commit is applied while it runs, so it was right after a restart and empty
+   otherwise, and every test passed. Two paths bring a session up to date and have to be
+   kept in step by hand; the test that catches it compares a run with the same run picked
+   up.
+4. *Nothing reads it yet.* `Outcome` has no total, and the report still adds up by
+   itself.
+
+**Still to decide.** Which requests a total counts. Whether `Outcome` carries it. The unit
+a cost is written in, which no count here settles.
+
+## X8. A session that branches from another
+
+*For:* [C14](open-questions.md#c14-can-a-session-branch-from-an-earlier-point). Design
+holds that branching can be added as "a new session whose parent is event N of another"
+without changing the log. C14 asks for a spike that shows it.
+
+**The form tried.** `Sessions::branch(id, from, at)` (and `Harness::branch_session`) stores
+one event: a `session/start` with `{"parent", "from"}`, where `from` is the id of an event
+of the parent. The branch's journal begins with what the parent held once that event was
+stored, with nothing under way, and then reads its own events. The parent is not touched.
+There is no command for it.
+
+**Try it.** `tests/branching.rs`: two answers in a session, a branch after the first, and
+each going its own way.
+
+**What building it answered.**
+
+- Design is right about the log: no new topic, no change to a store, one field on
+  `session/start`. An older reader sees a child session with an empty conversation.
+- A branch of a branch works by the same rule, to a depth the code bounds.
+- It is read back from the log by another process as it was.
+
+**What it found.**
+
+1. *Not every event is a place to branch.* After what the person said, the model has not
+   answered, and the branch would begin with two messages from the person in a row. After
+   the model's tool call, the call has no result, and the branch would run it again in its
+   own name. The spike refuses both and allows a branch after the model's answer, after a
+   run's end, or before anything was said. Rewinding to "just before this tool call" is
+   then not a branch at that event but at the answer before it.
+2. *`parent` now means two things:* the session that started this one and waits for it,
+   and the session this one branched from. They share the field and so its consequences. A
+   branch counts as one level deep for nesting, and when its run ends the harness looks
+   whether its parent waits for it.
+3. *Removing a session removes its branches,* because removal follows `parent`. That is
+   forced: the branch's beginning is the parent's events, and without them it has none.
+   The other answer, a branch that keeps a copy, is no longer one event.
+4. *A branch reads its parent each time it is opened,* up to the event. Cheap in memory.
+   With a store that keeps a file per session it is two files for one conversation, and
+   more for a branch of a branch.
+5. *Ids in a branch come from two sessions.* A compaction's `keep_from` in the parent
+   holds for the branch as well, which is right, and means a branch cannot be read without
+   its parent's ids.
+6. *What the parent was started with is not copied,* because nothing is recorded there
+   yet. When a session keeps a model, grants and limits, a branch has to say whether it
+   keeps its parent's.
+
+**Still to decide.** The field's name, and whether a branch is a `parent` or a link of its
+own. Where a branch may begin. What a branch keeps of what its parent was started with.
+The command, if there is to be one.
 
 ---
 
@@ -326,17 +509,44 @@ for what one instance has seen.
 - A file is known by the path it was given under, so one file reached by two spellings is
   two files. `./a` and `a` are told to be one; a symbolic link is not.
 
-## What could be prototyped next
+## What waits on a decision
 
-Open questions that building would inform, with the smallest thing that would. None is
-started.
+Two questions were to be tried next. Each stops at a choice that shapes everything built
+on it, so it is a person's to make first.
 
-| Question | What to build | What it would answer |
+**An ask that waits for a person, anywhere but a tool call**
+([C15](open-questions.md#c15-can-a-person-answer-an-ask-at-pluginload),
+[G6](open-questions.md#g6-what-can-a-person-answer-to-an-ask),
+[E16](open-questions.md#e16-are-loads-by-a-plugin-durable)). The fourth guarantee waits on
+it, and X5 found the same gap at `session/start`. What is decided: the ask is recorded and
+waits in the log, and one `gate/answer` names whichever it was. What has to be chosen
+before any of it is built is what the call that led to the ask does meanwhile:
+
+| | The call waits | The call fails, and is made again |
 | --- | --- | --- |
-| [C15](open-questions.md#c15-can-a-person-answer-an-ask-at-pluginload), [G6](open-questions.md#g6-what-can-a-person-answer-to-an-ask) | An ask at `plugin/load` that is recorded and waits, listed by `Outside` beside a tool call's, and answered by one `gate/answer` | The fields by which an answer names what it is for, with old logs still read; what `plugins.load` hands back while the person has not answered (E16). It is also what the fourth guarantee waits on |
-| [D3](open-questions.md#d3-which-decision-points-exist-at-10) | `session/start` declared by the harness and asked where the `sessions` service starts a child | The request's JSON (D2), with only a parent and a task to put in it until a session is started with more |
-| [E12](open-questions.md#e12-can-an-add-on-ever-contribute-a-loop-step-a-model-or-a-kernel) | The test-driven pair written as a description, and one native loop that carries a description out | What a description cannot say, which is the list E12 asks for |
-| [B17](open-questions.md#b17-does-the-call-scope-follow-work-to-another-thread) | A handle that captures the call scope and enters it on another thread | Whether it is an addition to `call`, and what a tool that fans out has to do |
-| [C14](open-questions.md#c14-can-a-session-branch-from-an-earlier-point) | A `session/start` that names an event of another session, and a projection that reads up to it | Whether the log changes, as Design holds it does not |
-| [G17](open-questions.md#g17-where-is-usage-added-up) | A total on `turn/end`, beside the report's own sum ([T8](trials.md#t8-who-adds-up-what-a-run-used)) | Whether a reader's sum and a recorded one ever differ, and by what (an add-on's model calls) |
-| [E1](open-questions.md#e1-what-can-a-host-call-fail-with) | The three cases added to `host-error` | Nothing building would: it is a decision, and costs a rebuild of every guest in three languages |
+| What happens | The run stops and waits in the log, as it does for a tool call a gate asked about. The answer brings the call its result, and the host does the load. | The call returns a refusal that says a person was asked. The answer is kept; the next call for the same thing goes through. |
+| What it needs | The host to make an add-on's call wait, which is E6 without its interface; and the load carried out by the host on the answer. | The answer matched to a later call: by name and grants, since the yes is for the grants. |
+| What it costs | `Harness::answer`, `Ask` and every front end learn a second kind of thing that waits. | A model round trip, and a model that has to try again. Design uses this form already for a refused host and a credential. |
+
+Either way an ask needs an id of its own, since it has no tool call's, and `gate/answer`
+a way to say which ask it answers that old logs do not have.
+
+**A loop written as a description**
+([E12](open-questions.md#e12-can-an-add-on-ever-contribute-a-loop-step-a-model-or-a-kernel)).
+Its direction is to write the test-driven loop as a description and see what it cannot
+say. The first thing such a loop does that the standard one does not is run a check and
+tell the model what came of it, and neither half has a form:
+
+- *A message nobody typed.* The check's result goes into the conversation as something
+  said to the model, by the loop. How a message says who sent it is
+  [B28](open-questions.md#b28-is-there-one-person): a field on `message`, or a source of
+  its own.
+- *A tool call the model did not make.* Running the check with its trail is "a single
+  tool call on `Run`", decided and not built; and a result with no call before it is not
+  a conversation a provider accepts, so the loop cannot record it as a tool's.
+
+The pair itself needs two sessions that differ in loop, tools and view, which waits on a
+session being started with them.
+
+**[E1](open-questions.md#e1-what-can-a-host-call-fail-with)** needs no prototype: it is a
+decision, and its cost is known (every guest rebuilt, in three languages).
