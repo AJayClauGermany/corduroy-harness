@@ -34,8 +34,10 @@ import re
 import secrets
 import shutil
 import signal
+import socket
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 import urllib.error
@@ -47,6 +49,59 @@ ROOT = HERE.parent.parent
 DEFAULT_URL = "http://127.0.0.1:8080/v1/chat/completions"
 LOCAL_MODEL = ROOT / "scripts/local-model.sh"
 MACOS = platform.system() == "Darwin"
+
+
+def srt_prefix(srt: str, settings: Path, workspace: Path, *read_only: Path) -> list[str]:
+    """Constrain tool processes, leaving model connections in the trusted CLI."""
+    def literal(path: Path) -> dict:
+        return {"path": str(path), "literal": True}
+
+    state = literal(workspace / ".corduroy")
+    runtime = ["/bin", "/usr/bin", "/usr/lib", "/usr/libexec", "/usr/share", "/System/Library",
+               "/dev/null", "/dev/urandom", "/private/etc/passwd", "/private/etc/group"]
+    settings.write_text(json.dumps({
+        "network": {"allowedDomains": [], "deniedDomains": ["*"], "allowLocalBinding": False},
+        "filesystem": {
+            "denyRead": ["/", state],
+            "allowRead": runtime + [literal(path) for path in (workspace, *read_only)],
+            "allowWrite": [literal(workspace)],
+            "denyWrite": ["/tmp/claude", state],
+        },
+    }))
+    return [srt, "--settings", str(settings), "--"]
+
+
+def check_srt(srt: str, path: str) -> None:
+    """A successful shell must enter the sandbox, do trial I/O, and hit both denials."""
+    with tempfile.TemporaryDirectory() as temporary, socket.socket() as listener:
+        root = Path(temporary).resolve()
+        workspace = root / "workspace"
+        workspace.mkdir()
+        (workspace / "inside").write_text("inside\n")
+        outside = root / "outside"
+        outside.write_text("outside\n")
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        port = str(listener.getsockname()[1])
+        nc = ["/usr/bin/nc", "-z", "-w", "1", "127.0.0.1", port]
+        subprocess.run(nc, check=True, capture_output=True, timeout=5)
+        prefix = srt_prefix(srt, root / "settings.json", workspace)
+        probe = '''
+            IFS= read -r line < inside && test "$line" = inside || exit 10
+            printf 'ok\\n' > new && /bin/rm new || exit 11
+            if (IFS= read -r line < "$1"); then exit 12; fi
+            if (printf 'bad\\n' >> "$1"); then exit 13; fi
+            test -x /usr/bin/nc || exit 14
+            if /usr/bin/nc -z -w 1 127.0.0.1 "$2"; then exit 15; fi
+            printf 'srt-check-ok\\n'
+        '''
+        result = subprocess.run(
+            [*prefix, "/bin/sh", "-c", probe, "probe", str(outside), port],
+            cwd=workspace, env={"PATH": path, "HOME": str(Path.home())},
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        if result.returncode or "srt-check-ok" not in result.stdout.splitlines():
+            raise RuntimeError(f"SRT probe failed (exit {result.returncode}): {result.stderr.strip()}")
 
 # What the default agent has beyond the local-model example: searching without a shell, and
 # the date. `corduroy init` writes both.
@@ -80,13 +135,18 @@ class Config:
         # A hosted model in the local one's place: the provider's kind and the model's name.
         self.provider: str | None = args.provider
         self.model_id: str | None = args.model_id
-        self.key_env: str | None = args.api_key_env or (
+        self.keychain_secret: str | None = args.keychain_secret
+        self.key_env: str | None = None if self.keychain_secret else args.api_key_env or (
             {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}.get(args.provider or "")
         )
         self.platform = f"{platform.system()} {platform.machine()}"
+        self.srt = args.srt_path
+        self.srt_path_env = args.srt_path_env
+        if self.srt and not self.out.is_relative_to(ROOT / ".bench-runs"):
+            raise SystemExit("--srt needs an output directory under .bench-runs in this checkout")
         # macOS: no user to drop to without an administrator's tools, but a sandbox profile
         # that denies the same places, for which nobody has to be root.
-        self.sandbox = MACOS and shutil.which("sandbox-exec") is not None
+        self.sandbox = MACOS and not self.srt and shutil.which("sandbox-exec") is not None
         if os.geteuid() == 0 and not MACOS:
             try:
                 entry = pwd.getpwnam(args.user)
@@ -119,7 +179,7 @@ class Config:
 
     @property
     def isolated(self) -> bool:
-        return bool(self.user) or self.sandbox
+        return bool(self.user) or self.sandbox or bool(self.srt)
 
     def wall(self, *hidden: Path) -> list[str]:
         """What goes before a command on macOS so that it cannot read the checks, the results
@@ -138,6 +198,8 @@ class Config:
         if not self.provider:
             return text
         key = f'\napi_key_env = "{self.key_env}"' if self.key_env else ""
+        if self.keychain_secret:
+            key = f'\nsecret = "{self.keychain_secret}"'
         text = text.replace(
             f'kind = "openai-compatible"\nbase_url = "{DEFAULT_URL}"',
             f'kind = "{self.provider}"{key}',
@@ -152,17 +214,17 @@ class Config:
             return {}
         return {"user": self.uid, "group": self.gid, "extra_groups": []}
 
-    def env(self, extra: dict | None = None) -> dict:
+    def env(self, extra: dict | None = None, *, provider_key: bool = True) -> dict:
         env = {
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "PATH": self.srt_path_env or os.environ.get("PATH", "/usr/bin:/bin"),
             "HOME": self.home or os.environ.get("HOME", "/"),
             "USER": self.user or os.environ.get("USER", ""),
             "LANG": "C.UTF-8",
             "CORDUROY_PLUGIN_PATH": str(self.plugins),
         }
-        # The command reads a hosted model's key from its environment; a kernel starts from
-        # an empty one, so the agent's shell never has it (`environment_kept` checks).
-        if self.provider and self.key_env and self.key_env in os.environ:
+        # Keychain values are read only by the command, never by this runner. Forward an
+        # environment key only when that credential source was selected.
+        if provider_key and self.provider and self.key_env and self.key_env in os.environ:
             env[self.key_env] = os.environ[self.key_env]
         env.update(extra or {})
         return env
@@ -196,6 +258,16 @@ class Trial:
         self.agent = self.dir / "corduroy.toml"
         base = (ROOT / "examples/local-model/corduroy.toml").read_text()
         self.agent_text = config.hosted(base).replace(DEFAULT_URL, config.url) + EXTRA_PLUGINS
+        if config.keychain_secret:
+            self.agent_text += f'\n[secrets.{config.keychain_secret}]\nkind = "keychain"\n'
+        if config.srt:
+            fixtures = [config.vault] if task == "mcp" else []
+            prefix = srt_prefix(config.srt, self.private / "srt.json", self.ws, *fixtures)
+            self.agent_text = self.agent_text.replace(
+                '[kernels.shell]\nkind = "shell"\n',
+                f'[kernels.shell]\nkind = "shell"\nprefix = {json.dumps(prefix, ensure_ascii=False)}\n',
+                1,
+            )
         self.failures: list[str] = []
         self.notes: list[str] = []
         self.commands: list[dict] = []
@@ -261,7 +333,11 @@ class Trial:
     ) -> Ran:
         """A command in the workspace, as the agent's user (for setting up, and for running
         what the model wrote: never as root)."""
-        return self._spawn(["sh", "-c", command], cwd or self.ws, None, timeout, {}, private)
+        directory = cwd or self.ws
+        argv = ["sh", "-c", command]
+        if self.config.srt:
+            argv = srt_prefix(self.config.srt, self.private / "srt-check.json", directory) + argv
+        return self._spawn(argv, directory, None, timeout, {}, private, provider_key=not self.config.srt)
 
     def walled(self, argv: list[str], private: bool = False) -> list[str]:
         """`argv` behind the macOS wall; the trial's own private directory is behind it too
@@ -270,7 +346,7 @@ class Trial:
 
     # -- driving ------------------------------------------------------------------------
 
-    def _spawn(self, argv, cwd, stdin, timeout, env, private=False) -> Ran:
+    def _spawn(self, argv, cwd, stdin, timeout, env, private=False, *, provider_key=True) -> Ran:
         started = time.monotonic()
         process = subprocess.Popen(
             self.walled(argv, private),
@@ -278,7 +354,7 @@ class Trial:
             stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env=self.config.env(env),
+            env=self.config.env(env, provider_key=provider_key),
             text=True,
             start_new_session=True,
             **self.config.demote(),
@@ -745,7 +821,7 @@ def run_model(args, chosen: list[dict], tasks, model: str | None) -> Path:
     results.parent.mkdir(parents=True, exist_ok=True)
     if config.user and not args.results:
         os.chmod(results.parent, 0o700)
-    if config.isolated:
+    if config.isolated and not config.srt:
         probe = subprocess.run(
             [*config.wall(), "ls", str(HERE)], capture_output=True, check=False, **config.demote()
         )
@@ -814,11 +890,13 @@ def run_model(args, chosen: list[dict], tasks, model: str | None) -> Path:
             crashed = traceback.format_exc(limit=4)
         record = trial.record(task, number, time.monotonic() - started, crashed)
         record["isolated"] = config.isolated
+        if config.srt:
+            record["sandbox_backend"] = "srt-tools"
         if config.user:
             # A later trial must not find this one's attempt.
             os.chown(trial.dir, 0, 0)
             os.chmod(trial.dir, 0o700)
-        elif config.sandbox:
+        elif config.sandbox or config.srt:
             kept = config.out / "private" / "trials" / task["name"] / str(number)
             shutil.rmtree(kept, ignore_errors=True)
             kept.parent.mkdir(parents=True, exist_ok=True)
@@ -866,7 +944,12 @@ def main() -> int:
         "`openai`), with --model-id; results go under <out>/<label>",
     )
     parser.add_argument("--model-id", help="the hosted model's name, as its provider knows it")
-    parser.add_argument("--api-key-env", help="the variable holding the key (the kind's own by default)")
+    credentials = parser.add_mutually_exclusive_group()
+    credentials.add_argument("--api-key-env", help="the variable holding the key (the kind's own by default)")
+    credentials.add_argument(
+        "--keychain-secret", metavar="NAME",
+        help="read the named Corduroy keychain secret instead of an environment variable",
+    )
     parser.add_argument(
         "--climb",
         type=float,
@@ -875,6 +958,8 @@ def main() -> int:
         "this share of trials passed (0.25, say): the tiers above are not tried",
     )
     parser.add_argument("--quiet", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--srt", action="store_true", help="sandbox trial tools using SRT on macOS")
+    parser.add_argument("--srt-check", action="store_true", help="check SRT isolation without running a model")
     parser.add_argument("--fresh", action="store_true", help="forget earlier results instead of going on from them")
     parser.add_argument("--url", default=os.environ.get("CORDUROY_LOCAL_MODEL_URL", DEFAULT_URL))
     parser.add_argument("--out", default="/var/tmp/corduroy-bench")
@@ -891,6 +976,36 @@ def main() -> int:
         "--plugins", default=str(ROOT / "plugins/target/wasm32-unknown-unknown/release")
     )
     args = parser.parse_args()
+    if args.keychain_secret is not None:
+        if not args.provider or not args.model_id:
+            parser.error("--keychain-secret needs --provider and --model-id")
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", args.keychain_secret):
+            parser.error("--keychain-secret must contain only letters, digits, '-' and '_'")
+    args.srt_path = args.srt_path_env = None
+    if args.srt_check or (args.srt and not (args.summary or args.compare or args.list)):
+        srt, node = shutil.which("srt"), shutil.which("node")
+        if not MACOS or not srt or not node or not all(Path(p).is_absolute() for p in (srt, node)):
+            parser.error("SRT mode needs macOS and absolute PATH entries for srt (0.0.81+) and node")
+        try:
+            # Resolve version-manager shims in the trusted launcher, before dropping its env.
+            executable = subprocess.run(
+                [node, "-p", "process.execPath"], check=True, capture_output=True, text=True, timeout=10,
+            ).stdout.strip()
+            node_path = Path(executable)
+            if not node_path.is_absolute() or node_path.name != "node" or not os.access(node_path, os.X_OK):
+                raise RuntimeError("node did not resolve to an absolute executable named node")
+            args.srt_path = srt
+            args.srt_path_env = f"{node_path.parent}:/usr/bin:/bin:/usr/sbin:/sbin"
+            check_srt(srt, args.srt_path_env)
+        except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+            parser.exit(1, f"SRT isolation not verified; no trials started. {error}\n")
+        if args.srt_check:
+            sys.stdout.write("SRT trial sandbox check passed.\n")
+            return 0
+        if not Path(args.out).resolve().is_relative_to(ROOT / ".bench-runs"):
+            parser.error("--srt needs --out .bench-runs/<run>")
+        if Path(args.workspace_name).name != args.workspace_name or args.workspace_name in {"", ".", "..", "private"}:
+            parser.error("--srt needs a single, non-reserved trial workspace directory name")
     if args.summary:
         sys.stdout.write(summarize(Path(args.summary)) + "\n")
         return 0
@@ -906,7 +1021,7 @@ def main() -> int:
     key = args.api_key_env or {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}.get(
         args.provider or ""
     )
-    if args.provider and key and not os.environ.get(key) and not args.list:
+    if args.provider and not args.keychain_secret and key and not os.environ.get(key) and not args.list:
         parser.error(f"{key} is not set: a hosted model needs its key in the environment")
     if args.provider and args.models:
         parser.error("--provider is one hosted model; run it beside --models, as a command of its own")
