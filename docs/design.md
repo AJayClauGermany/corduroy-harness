@@ -106,6 +106,11 @@ define a loop and sessions to be able to differ; neither is possible yet. How se
 differ is decided ([What an extension can reach](#what-an-extension-can-reach)), and how an
 add-on defines a loop is still in [Open questions](open-questions.md) (E12).
 
+**The pair is a proof, not the demonstration.** It shows that the surface is enough for the
+second use, and it is easy to test. It does not show the thesis, which is growth: that what
+the agent builds takes the place of model calls it used to make. What will show that is not
+chosen yet (P15 in [Open questions](open-questions.md)).
+
 **What is left out.** Nothing is refused for good. The test for anything proposed is whether
 it serves the agent adapting itself, for this use; what does not is neither built in nor
 promised. The command line is the front end, and enough. A page in a browser showing what
@@ -841,6 +846,19 @@ request's count and answer, and an estimate of what was added since), and that a
 `overflowed`: its last run ended because the request was more than the model holds. Such a
 session is due whatever the counts say, which is what lets it be used again.
 
+**Shaping a request is a step, and leaves the record alone (decided, not built).** What the
+model is sent is the session's projection, which only a `compaction` event changes. Other
+ways of keeping a context small or cheap (dropping old tool results, trimming images,
+marking where a provider may cache, adding a reminder) change what is *sent* and not what
+happened, so they are not written into the conversation, and they should not each need a
+loop of their own. They are steps an extension registers, as it registers an `Operation`:
+each is handed the request the loop is about to make and gives back the one to send. It
+is a part of the loop and not a ninth kind of thing a plugin contributes. `StandardLoop`
+runs them, and a loop an extension wrote may; the session in the log is the same whether
+any ran. What is recorded of a shaped request, so that a review can still say what the
+model was shown, is open with the rest of its form (G19 in
+[Open questions](open-questions.md)).
+
 ## What an extension can reach
 
 Five things are decided here: what a session is started with and held to, what something
@@ -1137,6 +1155,14 @@ and it is to be the other way round.
 - *Steering a run under way,* named agents in an agent file, a scheduler, and a protocol
   for front ends.
 
+**A grant can name one method of a service (decided, not built).** The `service`
+capability's resource is `service:method`. A bare service name means every method, as it
+does today, so agent files already written read as before. `sessions` is why: starting a
+child, starting a session from outside, raising a signal and sending a session a message
+are four things to allow, and an add-on that delegates is granted the first and no other.
+The grant is about what the add-on that calls may ask for, and says nothing of the
+sessions it starts, whose own grants are what they are started with.
+
 ## What is stable
 
 Contracts hold at one of two levels, so that extensions and add-ons written against them
@@ -1223,6 +1249,14 @@ Four things about the plugin world after 1.0 are decided here: what is promised 
 that is already built, how the capabilities grow, that the exports do not, and which
 versions a host accepts. The check of versions at load is built; the rest is *planned*, and
 [Order of work](#order-of-work) lists what changes.
+
+**The world is ours alone, at least until 1.0.** It is the boundary between this host and
+its add-ons, and not a specification for other hosts to implement: there is no second
+implementation to prove one, no home for it outside this repository, and nobody but us
+builds against it. Until 1.0 it changes as it needs to, without breaking for the sake of
+it. Whether it is offered to other hosts is taken up after 1.0, if there is someone who
+wants it; it is kept typed, versioned and one capability to an interface, so that it could
+be.
 
 **A built add-on loads on every 1.x host.** The promise is about the built thing, the
 `.wasm` file, and not only its source. An add-on built against the world of 1.0 loads on
@@ -1482,8 +1516,20 @@ what it did, what it was refused and where it failed can be checked afterwards, 
 included. What follows is decided; which parts are built is said for each.
 
 **Everything that can be logged is logged.** That is the working assumption every other
-answer here is read against. What should be kept *out* (a private value in a prompt or a
-tool call) is not decided, and stays in [Open questions](open-questions.md) (C6).
+answer here is read against.
+
+**The core keeps nothing out; a store may.** There is no point in the core where a batch is
+filtered before it is stored. Something kept out of the log (a private value in a prompt or
+a tool call) is kept out by the store: a `Log` that wraps another and writes what it was
+given with the value taken out, which the trait allows as it stands. Three things follow,
+and are accepted. Listeners hear the event as it was committed, and the stream holds it so
+while the command runs, so the value is out of what is kept and not out of the run. What
+is read back after a restart is what the store kept, so a run picked up again, and the
+agent reading its own history, see the gap. And checkpoints of live output pass through
+the same store, so one wrapper covers them. No such store is shipped yet, and what one
+should take out is not settled: every value removed is one the agent and a reviewer can no
+longer read, so privacy is paid for in what the record can tell
+([Open questions](#open-questions)).
 
 **A payload is JSON.** An event's payload is text in the core, which has no parser, and
 by contract JSON for every topic the core and the loop define: an object that gains fields
@@ -2653,8 +2699,13 @@ settled by 1.0 is there as well, and one that can wait is only here.
   gets ([How people meet it](#how-people-meet-it)).
 - **Scrubbing the log.** If the model does write a sensitive value into a tool call, the
   assistant message holding it is committed before any gate is asked, so neither a deny nor a
-  rewrite keeps it out of the log. If that matters it is a property of the log (a filter
-  applied to a batch before it is stored), not of gates.
+  rewrite keeps it out of the log. Decided: keeping it out is a store's work, a `Log` that
+  wraps another, and the core has no filter of its own
+  ([What the record promises](#what-the-record-promises)). Still open, and able to wait,
+  since a store is an extension: what a shipped wrapper takes out and how it is told;
+  and whether there are two views, the whole record kept where the agent's tools cannot
+  read it and a filtered one that they can, which would give `log-read` less than the
+  record without losing it.
 - **Session tree.** Sessions are linear for now, with a parent link. Pi's sessions are a tree
   of entries, so one session can branch from any earlier point, which gives rewinding and a
   common starting point for several attempts. Because every event names its session and a
@@ -2683,8 +2734,9 @@ settled by 1.0 is there as well, and one that can wait is only here.
   of it shows in the agent file ([How people meet it](#how-people-meet-it)); when to replace
   it can wait.
 - **Scopes below a service.** The `service` capability is scoped by service name, so a
-  grant gives all of a service's methods. `service:method` resources would let a grant
-  name one.
+  grant gives all of a service's methods. Decided, not built: the resource is
+  `service:method`, and a bare service name still means every method
+  ([What an extension can reach](#what-an-extension-can-reach)).
 - **Listeners and re-entry.** An event a native tool emits while a WebAssembly plugin's
   call is in progress is delivered at once, and a listener in that same plugin is refused
   (it is running), so it misses the event. Events plugins raise themselves are queued and

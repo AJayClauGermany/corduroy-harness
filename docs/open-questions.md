@@ -127,17 +127,6 @@ component, with no registry and a version that decides nothing.
 finished before the SDKs' own packaging, and how much the tutorials turn towards reading
 and approving what an agent wrote.
 
-### P11. Is the plugin world ours alone, or meant for other hosts?
-
-A frozen, versioned, typed interface with capabilities as imports is close to a
-specification. If another host could implement it, an add-on would be portable between
-harnesses, which nothing offers today and which would be a contribution to the field rather
-than to one project. If it is ours alone, it is an internal boundary with good hygiene.
-
-*Direction.* Decide which. A specification needs a second implementation as proof and a
-home that is not one repository; an internal boundary needs neither, and should not carry
-the cost of pretending.
-
 ### P14. How does it reach people?
 
 A new terminal agent asks someone to change a habit. The alternatives are to sit behind
@@ -154,13 +143,27 @@ until there is someone other than its author to reach.
 ### P15. What will show that it is worth having?
 
 Nothing outside this repository depends on it yet. Before the core is frozen for good,
-something should show the purpose is real: a task done here that cannot be done, or cannot
-be done safely, elsewhere; an extension written by someone who is not us; a user who stayed.
+something should show the purpose is real.
 
-*Direction.* One demonstration that is the thesis made runnable, chosen before 1.0 and
-passed before it. The test-driven pair among the proofs
-[the freeze waits on](design.md#what-the-freeze-waits-on) is the candidate; decide whether it
-is the demonstration or only a proof that the surface is enough.
+One thing is decided ([What it is for](design.md#what-it-is-for)): the test-driven pair is
+a proof that the surface is enough, and not the demonstration. The demonstration has to
+show growth, which is the thesis: what the agent builds takes the place of model calls it
+used to make.
+
+The candidate, not yet chosen: a piece of work begun by a small model on this machine and
+carried to where the model is no longer needed. The agent builds the tools and automations
+the work takes until what is left runs as code, with no model call, or with none but a
+small one that decides between a few things. Like a developer hired once to build
+something that then runs without them. It would show that what was built stays and works
+when the model is taken away. It is still one case, and closer to the thesis than the
+pair.
+
+*Direction.* Choose the piece of work, before 1.0, and what is measured: model calls and
+tokens for the same task at the start and at the end, and whether the end state answers
+correctly with the model switched off. Say whether it is a condition of 1.0 or what 1.0 is
+shown with. It leans on what [I6](#i6-what-does-the-agent-extends-itself-need-at-10) lists
+as not built: what the agent made has to be there the next day, and something has to start
+it without a model asking.
 
 ### P16. Who keeps it going after 1.0?
 
@@ -202,6 +205,10 @@ Whether these move together decides what a guest SDK, a store and an extension e
 What a version of the world means is decided, and an add-on built against its 1.0 loads on
 every host whose world is 1.x
 ([How the plugin world grows](design.md#how-the-plugin-world-grows)).
+
+The world is ours alone at least until 1.0, and no other host implements it
+([How the plugin world grows](design.md#how-the-plugin-world-grows)), so nothing outside
+this repository has to follow its version yet.
 
 *Direction.* One version per contract, moving independently: the crates (semver), the WIT
 package, the log schema. Then say whether the world may reach a new major version while
@@ -367,7 +374,10 @@ added later as a new method.
 later (`**`, `?`, an escape) changes what an existing grant reaches.
 
 *Direction.* Declare the syntax final, or reserve the characters a later syntax would use
-by refusing them now.
+by refusing them now. A `service` grant is to be `service:method`
+([What an extension can reach](design.md#what-an-extension-can-reach)), so say with it what
+`:` means in a service's or a method's name (refused in both is the simplest), and that
+`sessions:*` and a bare `sessions` are the same grant.
 
 ### B13. Should two public types both be called `Scope`?
 
@@ -502,22 +512,6 @@ whether a person's identity is a field the front end puts in the payload of `mes
 `gate/answer`, and whether that is enough for a host with many users.
 
 ## C. Core: the event stream and the log
-
-### C6. Can anything be kept out of the log?
-
-A sensitive value the model writes into a tool call is committed before any gate is asked.
-A filter on a batch before it is stored would be a property of the log.
-
-[What the record promises](design.md#what-the-record-promises) works from "everything that
-can be logged is logged" and leaves this open. Review is part of the purpose, so what is
-kept out is a product question: a private value in a prompt is also something the person
-may not want kept. Once in, a value leaves only with its whole session. A credential the
-person passed through to a shell is such a value as soon as the model prints it
-([What is safe by default](design.md#what-is-safe-by-default)).
-
-*Direction.* Decide whether the core offers a filter point, or whether a `Log` that wraps
-another is the answer (listeners would still see the value). Checkpoints of live output
-pass the same point, so one answer has to cover them.
 
 ### C8. Who may emit which topics?
 
@@ -700,18 +694,6 @@ Gates are asked in name order and the first to give the strictest kind is record
 
 *Direction.* Confirm.
 
-### D5. Can a grant name one method of a service?
-
-The `service` capability is scoped by service name, so a grant gives every method.
-
-`sessions` is now the case for it. Starting a child, starting a session from outside,
-raising a signal and sending a session a message are four different things to allow, and
-one grant gives all four
-([What an extension can reach](design.md#what-an-extension-can-reach)).
-
-*Direction.* Decide whether the resource is `service` or `service:method` before grants are
-written against it.
-
 ### D10. What form does a tool's question to the person take?
 
 A gate's ask is the only question a run puts to a person today. That a tool can ask
@@ -860,8 +842,9 @@ a description of a loop that a native step carries out. Write the test-driven pa
 and see what it cannot say: every such thing is either a word the description gains, which
 is then frozen, or the reason to ask a service instead. A description may also be what a
 script returns, which keeps it readable and lets it be assembled. Either way it is
-registered under a name by native code on the add-on's behalf. Models and kernels can still be "never"; one
-that does come is a service an extension registers in the core's registry.
+registered under a name by native code on the add-on's behalf. Models and kernels can
+still be "never"; one that does come is a service an extension registers in the core's
+registry.
 
 ### E13. When is a value JSON text and when a typed record?
 
@@ -926,7 +909,9 @@ bare: the loop asks for `compaction`, the harness provides `sessions`, and an ad
 list any name in `provides`. `sessions` is about to grow: raising a signal, starting a
 session and sending one a message from anywhere
 ([What an extension can reach](design.md#what-an-extension-can-reach)), so its name and its
-methods' payloads are the first to settle.
+methods' payloads are the first to settle. Its methods' names are now written in grants: a
+`service` grant names `service:method`, and a bare name every method. Today `sessions` has
+one, `start`.
 
 *Direction.* Choose the prefix before 1.0, since the names in `provides` are inside built
 add-ons. Decide whether `compaction` and `sessions` move under it, what happens to an
@@ -1132,13 +1117,25 @@ The loop sends the session's projection, which only a `compaction` event changes
 old tool results, trimming images, marking cache points and adding reminders are other ways
 to manage a context, and an extension can do none of them without writing to the log.
 
-What the model was shown can be read back: a request names its system prompt and its tool
-declarations by hash, and the log holds each once
-([What the record promises](design.md#what-the-record-promises)). That is the record of it,
-and says nothing on who may change it.
+That shaping the request is a step of its own is decided
+([Keeping within what the model holds](design.md#keeping-within-what-the-model-holds)):
+extensions register one as they register an `Operation`, it changes what is sent and not
+the record, and it is not a ninth kind of contribution.
 
-*Direction.* Decide whether shaping the request is a contribution of its own (a step
-between the projection and the provider) or always means a custom `Loop`.
+What the model was shown can be read back only in part: a request names its system prompt
+and its tool declarations by hash, and the log holds each once
+([What the record promises](design.md#what-the-record-promises)). The messages it carried
+are taken to be the projection, which stops being true once a step may change them.
+
+*Direction.* What is left is the form, before extensions write such steps: the registry
+and the trait, and what a step is handed (the core's `ModelRequest`, and what of the
+session); the order several run in, name order as for prompt parts and gates or an order
+they state ([B10](#b10-in-what-order-are-prompt-parts-rendered)); whether a step may change
+the system prompt and the tools or only the messages; what is recorded when a request was
+shaped (which steps ran, and a hash of what was sent, at the least), so that review does
+not take the projection for what the model saw; and whether an add-on can be one, through
+`handle-call` under a name the harness defines
+([E18](#e18-which-service-names-are-the-harnesss)), or only an extension.
 
 ### G20. What limits a run besides the number of turns?
 
