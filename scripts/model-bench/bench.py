@@ -59,6 +59,7 @@ def tool_places() -> tuple[str, ...]:
     errors. `/bin/sh` reads `/var/select` too, and `curl` its configuration in `/etc/ssl`."""
     places = [
         "/private/var/select",
+        "/private/var/db/xcode_select_link",
         "/Library/Developer/CommandLineTools",
         "/private/etc/ssl",
         "/private/etc/localtime",
@@ -91,7 +92,12 @@ def srt_env(scratch: Path) -> dict:
     home, temporary = scratch / "home", scratch / "tmp"
     for made in (home, temporary):
         made.mkdir(parents=True, exist_ok=True)
-    return {"HOME": str(home), "CLAUDE_CODE_TMPDIR": str(temporary)}
+    # `CLAUDE_TMPDIR` is what earlier versions of SRT read.
+    return {
+        "HOME": str(home),
+        "CLAUDE_CODE_TMPDIR": str(temporary),
+        "CLAUDE_TMPDIR": str(temporary),
+    }
 
 
 def srt_prefix(
@@ -845,8 +851,32 @@ kill $server; test "$fetched" = yes""",
 }
 
 
+# What is looked at behind a wall that broke something, for whoever has to mend it.
+LOOK = """echo "TMPDIR=$TMPDIR HOME=$HOME PATH=$PATH"
+echo "xcode-select -p: $(xcode-select -p 2>&1)"
+ls -la /var/select 2>&1
+ls -d /Library/Developer/CommandLineTools/usr/bin/python3 /Applications/Xcode*.app 2>&1"""
+
+
+def denials(seconds: float) -> list[str]:
+    """What macOS's sandbox refused in the last `seconds`, each kind once: the operation
+    and the path, which is what the wall has to let through."""
+    try:
+        said = subprocess.run(
+            ["/usr/bin/log", "show", "--last", f"{int(seconds) + 5}s", "--style", "compact",
+             "--predicate", 'sender == "Sandbox" AND eventMessage CONTAINS "deny"'],
+            capture_output=True, text=True, timeout=120, check=False,
+        ).stdout
+    except (OSError, subprocess.SubprocessError) as error:
+        return [f"(the system log could not be read: {error})"]
+    found = re.findall(r"Sandbox: (\S+?)\(\d+\) deny\(\d+\) ([^\n]+)", said)
+    return list(dict.fromkeys(f"{program}: {what.strip()}" for program, what in found))[:80]
+
+
 def unusable(config: Config) -> list[tuple[str, str]]:
-    """Each of `NEEDED` that fails behind the wall, with the last thing it said."""
+    """Each of `NEEDED` that fails behind the wall, with what it said; and where anything
+    failed, what the wall looks like from inside and (macOS) what its sandbox refused."""
+    started = time.time()
     directory = config.out / "preflight"
     shutil.rmtree(directory, ignore_errors=True)
     workspace = directory / "workspace"
@@ -858,8 +888,8 @@ def unusable(config: Config) -> list[tuple[str, str]]:
         scratch = directory / "scratch"
         wall = srt_prefix(config.srt, directory / "srt.json", workspace, scratch=scratch)
         env.update(srt_env(scratch))
-    broken = []
-    for name, command in NEEDED.items():
+
+    def behind(command: str) -> tuple[bool, str]:
         try:
             ran = subprocess.run(
                 [*wall, "sh", "-c", command],
@@ -873,11 +903,20 @@ def unusable(config: Config) -> list[tuple[str, str]]:
                 **config.demote(),
             )
         except subprocess.TimeoutExpired:
-            broken.append((name, "no answer in 60s"))
-            continue
-        if ran.returncode != 0:
-            said = (ran.stderr.strip() or ran.stdout.strip() or f"exit {ran.returncode}").splitlines()
-            broken.append((name, said[-1][:200]))
+            return False, "no answer in 60s"
+        said = (ran.stderr.strip() + "\n" + ran.stdout.strip()).strip() or f"exit {ran.returncode}"
+        return ran.returncode == 0, "\n    ".join(said.splitlines()[:12])
+
+    broken = []
+    for name, command in NEEDED.items():
+        worked, said = behind(command)
+        if not worked:
+            broken.append((name, said))
+    if broken:
+        broken.append(("(seen from behind the wall)", behind(LOOK)[1]))
+        if MACOS:
+            refused = denials(time.time() - started) or ["(none in the system log)"]
+            broken.append(("(refused by the sandbox)", "\n    ".join(refused)))
     shutil.rmtree(directory, ignore_errors=True)
     return broken
 
