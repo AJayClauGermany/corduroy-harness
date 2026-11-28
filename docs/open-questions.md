@@ -14,6 +14,10 @@ the entry is deleted from this page. An empty section is a finished one.
 Defects found on the way (things that are simply wrong, with nothing to decide) are not
 listed here.
 
+Where one form of an answer has been built to be tried, the entry says so in a paragraph
+marked *Prototype*, and [Prototypes](prototypes.md) says what was built and what it found.
+A prototype decides nothing: the question stays here until it is answered.
+
 | Section | What it settles |
 | --- | --- |
 | [P. Purpose and place](#p-purpose-and-place) | what this is for, for whom, and what it offers that the others do not |
@@ -198,6 +202,11 @@ which check fails when one is passed. For
 the add-on fixtures, decide which guest languages are kept and where: a JavaScript or
 Python add-on is 12 to 19 MB, which is a lot to hold in the repository for every release.
 
+*Prototype.* [X4](prototypes.md#x4-the-trusted-base-measured): a script that measures the
+trusted base (10 168 lines; 19 crates from outside without the WebAssembly engine and 110
+with it) and compares it with a budget file. It only measures: the file holds the day's
+figures, and nothing fails on it.
+
 ### A5. What carries the version 1.0, and are the versions tied?
 
 The crates are `0.1.0`, the WIT package is `corduroy:plugin@0.1.0`, the log's schema is `2`.
@@ -345,6 +354,14 @@ lists them; how `corduroy secrets set` takes them and `corduroy secrets` shows t
 what becomes of an item put in before it had any, which now goes nowhere until the person
 says where.
 
+*Prototype.* [X1](prototypes.md#x1-a-secret-names-the-hosts-it-may-go-to): `Secret::hosts`
+as a scope over host names, checked for an add-on's request, a provider's key and an MCP
+server's token; `hosts` in an environment secret's entry; `corduroy secrets set --hosts`,
+kept beside a keychain value. A secret that says nothing is still sent as before, so the
+part of the decision that stops it is not on yet. It found, among other things, that
+`hosts()` cannot fail where a keychain can, and that hosts kept as a second item are a
+second read of the keychain.
+
 ### B10. In what order are prompt parts rendered?
 
 By name (`core/prompt.rs:31-43`), all into the system prompt, afresh on every request. A
@@ -378,6 +395,12 @@ by refusing them now. A `service` grant is to be `service:method`
 ([What an extension can reach](design.md#what-an-extension-can-reach)), so say with it what
 `:` means in a service's or a method's name (refused in both is the simplest), and that
 `sessions:*` and a bare `sessions` are the same grant.
+
+Where the code stands: `service:method` grants are built (`Scope::permits_part`), and
+`sessions`, `sessions:*` and `*` are the same grant, by a test. A `:` in a name is not
+refused anywhere yet. A secret's hosts, as [prototyped](prototypes.md#x1-a-secret-names-the-hosts-it-may-go-to),
+are patterns of the same syntax, where `*` crossing a `.` matters more than it does for a
+path.
 
 ### B13. Should two public types both be called `Scope`?
 
@@ -533,8 +556,8 @@ store's format with its own schema version.
 ### C11. Which topics and payload fields are frozen, and where is the one list?
 
 The table is in `src/session.rs`, the reference is `docs/reference/events.md`, and the core
-emits five topics of its own. They do not agree today (the reference lacks
-`plugin/suspended` and `plugin/dropped`).
+emits five topics of its own. Nothing but a person kept them in step, and the reference
+lacked `plugin/suspended` and `plugin/dropped` until a check was tried.
 
 [What an extension can reach](design.md#what-an-extension-can-reach) decides several things
 that are in the log and have no shape yet: what `session/start` holds (a model, a loop,
@@ -546,6 +569,11 @@ as starting at the last message a person wrote.
 *Direction.* One list, checked by a test, marked with which topics are contract and which
 are diagnostics. Shape the new ones as they are built, under the rule that old logs still
 read: a `session/start` that says nothing runs as the agent is configured.
+
+*Prototype.* [X3](prototypes.md#x3-one-list-of-topics-checked): a test that holds the
+reference to the topics the code raises, read from the sources as text. It found the two
+topics named above, which are now in the reference. It checks names only: nothing of a
+payload, and nothing of which topics are contract.
 
 ### C12. Which spelling do JSON keys use?
 
@@ -910,8 +938,8 @@ list any name in `provides`. `sessions` is about to grow: raising a signal, star
 session and sending one a message from anywhere
 ([What an extension can reach](design.md#what-an-extension-can-reach)), so its name and its
 methods' payloads are the first to settle. Its methods' names are now written in grants: a
-`service` grant names `service:method`, and a bare name every method. Today `sessions` has
-one, `start`.
+`service` grant names `service:method`, and a bare name every method, which is built.
+Today `sessions` has one, `start`.
 
 *Direction.* Choose the prefix before 1.0, since the names in `provides` are inside built
 add-ons. Decide whether `compaction` and `sessions` move under it, what happens to an
@@ -973,6 +1001,13 @@ a call is to wait in a queue of the add-on's own
 ([Events, gates and hooks](design.md#events-gates-and-hooks)): say whether that queue is
 each instance's, how many events it holds, and what becomes of them when the instance
 traps or the add-on is stopped.
+
+Where the code stands: the queue is built for the one instance there is, and so had to
+answer each of these one way, none of them confirmed
+([Prototypes](prototypes.md#built-from-decisions-and-what-that-left-open)): it holds 1024
+events (`Limits::missed_events`) and drops the oldest with a `plugin/missed`; it outlives a
+trap, and the instance started in its place hears what was kept; a stopped add-on's is
+dropped.
 
 ## G. The loop and the extension tier
 
@@ -1136,6 +1171,13 @@ shaped (which steps ran, and a hash of what was sent, at the least), so that rev
 not take the projection for what the model saw; and whether an add-on can be one, through
 `handle-call` under a name the harness defines
 ([E18](#e18-which-service-names-are-the-harnesss)), or only an extension.
+
+*Prototype.* [X2](prototypes.md#x2-shaping-a-request): a `Shapers` registry in the harness,
+a `Shape` handed the session and the core's `ModelRequest`, run in name order by the
+standard loop, free to change the messages, the system prompt and the tools and not the
+model, with `shaped` and `messages_hash` on the `model/request` of a request something
+changed. An add-on cannot be one. It found that the record says a request was shaped and
+not how, and that a loop which does not ask for shaping gets none.
 
 ### G20. What limits a run besides the number of turns?
 

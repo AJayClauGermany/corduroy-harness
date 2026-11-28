@@ -36,7 +36,7 @@ contracts must not break ("What is stable").
 | `wit/corduroy.wit` | The typed plugin boundary. Each imported interface is one capability. |
 | `plugins/` | The add-ons. **Separate workspace**, built for `wasm32-unknown-unknown`: `guest` (the `corduroy-guest` crate every Rust plugin builds on: bindings generated once, a `Plugin` trait with default exports, `export!`), `pi-tools` (read, write, edit, bash, tree), `shell-tool` (a library, not an add-on: `bash`'s contract, which `pi-tools` and `lean-shell` build on), `lean-shell` (`bash` in `pi-tools`' place, each command through `rtk`; the drop-in replacement `tests/replacement.rs` proves), `skills`, `approval` (a gate: permission modes), the Goose-baseline plugins `hints`, `todo`, `memory`, `recall`, `summarize`, `compact` (the `compaction` service), `subagents` (`delegate`), `inspect` (a gate) and `plugin-manager`; `review` (a second model reviews the change); `search` (`grep` and `find` through `fs-read` alone), `fetch` (`web_fetch`), `today` (the date in the prompt) and `viewer` (the log as a page of files, in `plugins/viewer/page/`); and `testbed` (for the host's tests only: host calls, loads, echoes and traps on demand). |
 | `sdk/js`, `sdk/python` | Guest SDKs: write a plugin in JavaScript/TypeScript or Python; `corduroy-js build` / `corduroy-py build` make a component importing only the listed capabilities. `sdk/js/script-host` is the script host (automations as scripts). |
-| `docs/` | User documentation, organised by [Diátaxis](https://diataxis.fr) from `docs/README.md`: `tutorials/`, `how-to/`, `reference/` (command, agent file, capabilities, shipped add-ons, events, the script host), `explanation/`; plus `design.md` (the design record), `guest-languages.md` and `open-questions.md` (the decisions still to make before 1.0: questions and directions, never answers; a decided entry is deleted there and its answer written where it belongs). **Update the matching reference page when you change a command, an agent-file key, a capability, a shipped add-on's tools or configuration, or an event topic.** |
+| `docs/` | User documentation, organised by [Diátaxis](https://diataxis.fr) from `docs/README.md`: `tutorials/`, `how-to/`, `reference/` (command, agent file, capabilities, shipped add-ons, events, the script host), `explanation/`; plus `design.md` (the design record), `guest-languages.md`, `open-questions.md` (the decisions still to make before 1.0: questions and directions, never answers; a decided entry is deleted there and its answer written where it belongs) and `prototypes.md` (one built form of an open answer, with what it found; its question stays open). **Update the matching reference page when you change a command, an agent-file key, a capability, a shipped add-on's tools or configuration, or an event topic.** |
 | `examples/` | `demo.rs` (`cargo demo`: a scripted model through the shell kernel and two add-ons); the same `notes` plugin in each guest language, built by `scripts/guests.sh`; `local-model/corduroy.toml`, the default agent with its model served on this machine (the agent `cargo eval` runs); `chatgpt-plan/corduroy.toml`, the same agent paid by a ChatGPT plan. |
 | `crates/corduroy-std` | The standard extensions for an ordinary computer (macOS, Windows, Linux): `Standard`, the set as swappable parts (extension kinds: kernels as `<kind>-kernel`, `[mcp.*]` as `mcp`, `[secrets.*]` as `env-secret` or `<kind>-secret`, `http-client`; sign-ins by kind, which `corduroy login` runs; the keychain, with how a value is put into it (`Keep`, which `corduroy secrets set` runs) and how each kind of secret says it stands; extensions every agent gets; the log store; add-ons on or off), `Extensions`/`Asked`/`Places` (the CLI re-exports them), and re-exports of the std extension crates. |
 | `crates/corduroy-cabi` | **A prototype, promised to nobody** (G23 in `docs/open-questions.md`; findings in `docs/c-extensions.md`): an extension written against a C header (`include/corduroy.h`, mirrored by hand in `src/abi.rs`) as a `Plugin`, `CExtension`. Not in the command or the `Standard`. The one host crate with `unsafe`, all of it in `src/raw.rs` and below; it carries a copy of the workspace lint table with `unsafe_code = "deny"`, to be kept in step. Features: `harness` (a provider answered through a completion), `load` (`CExtension::open`: an extension from a shared library at run time, never unloaded). Its tests run `examples/c/notes.c`, which the build script compiles where there is a C compiler; without one they are left out, unless `CORDUROY_REQUIRE_C` is set (CI). |
@@ -58,6 +58,7 @@ contracts must not break ("What is stable").
 | `cargo eval` | The evals: the agent in `examples/local-model/` doing small real tasks against that model, checked by outcome. Minutes, not seconds; needs `cargo plugins` and the server. |
 | `cargo demo` | Run a scripted agent through both plugins and print the event stream |
 | `scripts/check.sh` | fmt + clippy + plugins + nextest + doctests + docs, host and plugins: exactly what CI runs |
+| `scripts/trusted-base.sh` | Measure the trusted base (lines and outside crates of the core, the WebAssembly host, the loop and the world); `--budget` compares with `scripts/trusted-base.budget`. A prototype, not part of the check. |
 
 If `cargo nextest` is missing: `cargo install cargo-nextest --locked` (slow, ~3 min).
 
@@ -170,7 +171,9 @@ as design guidance, not noise.
   reloaded. A plugin must not rely on memory surviving a trap: durable state goes through the
   host.
 - **Never call back into a plugin while it is running.** Events a plugin raises are queued and
-  delivered after its call returns (`Instance::call`). A call that would re-enter a plugin
+  delivered after its call returns (`Instance::call`), and an event that arrives for it
+  meanwhile is kept and handed over then (`Instance::hear`), never dropped in silence: a
+  full queue says so with `plugin/missed`. A call that would re-enter a plugin
   on the same call chain is refused, and a nested call waits at most `Limits::nested_wait`
   for a plugin busy elsewhere; never add a wait without a bound inside a plugin's call.
 - **A gate does not make tool calls.** A WebAssembly plugin that gates `tool/call` and
@@ -229,6 +232,13 @@ as design guidance, not noise.
   `Standard::keychain` (or the `Keychain` it was handed), never by making an `Os` of its
   own, so that a command can swap it and no test touches a person's real keychain: tests
   hand in `Memory` or `Missing`.
+- **A prototype is marked and listed, and decides nothing.** One form of an open answer
+  may be built to be tried. Its code says it is a prototype and names the question, it is
+  listed in `docs/prototypes.md` with what it found, and the question stays in
+  `docs/open-questions.md` with a pointer. It changes a stable contract only by adding,
+  never the WIT world, and leaves every agent file, log and keychain item that exists
+  working. When the question is decided the code is made to match or taken out, and the
+  entry deleted. Do not write a prototype's form into `docs/design.md` as decided.
 - **A trial is offered both ways and written down.** Where an open question is easier to
   answer by use, the code may offer both answers; each such pair is listed in
   `docs/trials.md` with the commands for each way. When it is answered, the way that lost
@@ -239,6 +249,9 @@ as design guidance, not noise.
 - **What an add-on wants is a request.** A manifest grants nothing, a person's yes is kept
   for the grants and not the code, and only the person's own answer gives an add-on more
   than its loader holds.
+- **A secret is sent only where it says.** Whatever writes a secret's value into a request
+  asks `Secrets::may_go` with the request's host, after the value is revealed (so a secret
+  that cannot be read says why itself). A new place that sends a secret does the same.
 - **Secrets never reach a plugin or the log.** `secret` hands out a `credential` handle;
   host functions that take one write the value into what they send and record only the
   secret's name. Do not record response bodies, which may echo it. An `HttpClient` must not
@@ -254,6 +267,9 @@ as design guidance, not noise.
   checkpoints them (`model/progress`, `model/partial`). Telling a piece never waits, a
   watcher reads from its own task or thread, and nothing is rebuilt from pieces or acts on
   them: the reply is the `message` event. Neither topic is part of the conversation.
+- **A new topic goes in the events reference.** `crates/corduroy-cli/tests/topics.rs`
+  fails when the code raises a topic `docs/reference/events.md` does not name, or the page
+  names one nothing raises.
 - **The event stream is the record.** The conversation is a projection of `message` events
   (`src/session.rs`), and of `compaction` events, which hide what they summarise from the
   model without removing it; do not keep conversation state that cannot be rebuilt from the

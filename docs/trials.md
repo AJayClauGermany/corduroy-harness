@@ -88,8 +88,11 @@ key (a work account): today that is a second name, `[secrets.work-anthropic]`. A
 other side of sharing: any agent file that names `anthropic` gets the key, a file someone
 else wrote included, wherever its provider's `base_url` points. That part is answered: the
 hosts a key may go to are said when it is put in, and kept beside it
-([What is safe by default](design.md#what-is-safe-by-default)); it is not built, so today
-the key still follows the file.
+([What is safe by default](design.md#what-is-safe-by-default)). One form of it can be
+tried, as a [prototype](prototypes.md#x1-a-secret-names-the-hosts-it-may-go-to):
+`corduroy secrets set anthropic --hosts api.anthropic.com`, after which a file that points
+the provider elsewhere is refused the key. A key put in without `--hosts` still follows
+the file.
 
 > Found:
 
