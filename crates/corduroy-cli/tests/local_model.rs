@@ -98,7 +98,9 @@ fn run(workspace: &Path, agent: &Path, session: &str, prompt: &str) -> io::Resul
         .arg(agent)
         .arg("--workspace")
         .arg(workspace)
-        .args(["--session", session, "run", prompt])
+        // Progress goes to stderr when stdout is piped, as it is here; `succeeded` reads the
+        // tool lines from stdout.
+        .args(["--progress", "stdout", "--session", session, "run", prompt])
         .stdin(Stdio::null())
         .output()
 }
