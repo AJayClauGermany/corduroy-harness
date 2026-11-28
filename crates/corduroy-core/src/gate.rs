@@ -14,6 +14,15 @@
 //! request it sends. A point nobody declared does not exist: asking at one is denied, and a
 //! gate that names one is a mistake its host can catch (a WebAssembly gate is refused), so a
 //! policy never silently guards a point that is never asked.
+//!
+//! **An ask can be put to a person.** A gate that answers [`Verdict::Ask`] wants a person's
+//! word. For a tool call of the model's the loop waits for it. Anywhere else (a load, a
+//! session's start) whoever asked the gates hands the ask to [`Gates::settle`], which gives
+//! it to the host's [`Asks`], if the host set one: the ask is recorded, the thing asked
+//! about is refused for now, and once a person has answered, asking again finds the
+//! answer. That an ask at any point can reach a person is decided; this form of it
+//! (refuse, and be asked again) is a prototype, and waiting in its place is still open
+//! (C15 in `docs/open-questions.md`; see `docs/prototypes.md`).
 
 use alloc::borrow::ToOwned;
 use alloc::format;
@@ -24,6 +33,7 @@ use core::fmt;
 
 use crate::context::Context;
 use crate::registry::{Duplicate, Registry};
+use crate::sync::Lock;
 
 /// Name of the service under which the host provides the [`Gates`] registry.
 pub const GATES: &str = "gates";
@@ -50,9 +60,34 @@ pub const UNDECLARED: &str = "gates";
 
 /// The gates, asked in name order, and the decision points they may be asked at.
 pub struct Gates {
-    gates: Arc<Registry<dyn Gate>>,
+    registered: Arc<Registry<dyn Gate>>,
     /// Each declared point, with a description of what is decided there.
     points: Arc<Registry<str>>,
+    /// Where an ask is put to a person, if the host set somewhere.
+    asks: Lock<Option<Arc<dyn Asks>>>,
+}
+
+/// What became of something a gate asked a person about. A prototype: see
+/// [the module](self).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Asked {
+    /// Nobody has answered yet. The ask is recorded under this id and waits for a person;
+    /// what was asked about does not happen now, and may be asked for again.
+    Waiting(String),
+    /// A person allowed it.
+    Allowed,
+    /// A person refused it, with this reason.
+    Refused(String),
+}
+
+/// Where a gate's ask is put to a person, and their answer found. A prototype: see
+/// [the module](self).
+pub trait Asks: Send + Sync {
+    /// Put to a person what `decision` asked about `request` at `point`, or find what they
+    /// answered when the same was asked before. An answer is for one asking: once it has
+    /// been found here, the same request is a new question.
+    fn settle(&self, point: &str, request: &str, decision: &Decision) -> Asked;
 }
 
 impl Default for Gates {
@@ -64,8 +99,9 @@ impl Default for Gates {
 impl fmt::Debug for Gates {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Gates")
-            .field("gates", &self.gates.names())
+            .field("gates", &self.registered.names())
             .field("points", &self.points.names())
+            .field("asks", &self.asks.with(|held| held.is_some()))
             .finish()
     }
 }
@@ -83,9 +119,24 @@ impl Gates {
             drop(points.insert(point, Arc::from(description)));
         }
         Self {
-            gates: Arc::new(Registry::new()),
+            registered: Arc::new(Registry::new()),
             points: Arc::new(points),
+            asks: Lock::new(None),
         }
+    }
+
+    /// Put asks to a person through `asks` from now on. Until a host says where, an ask
+    /// anywhere but a tool call of the model's reaches nobody, and is a denial.
+    pub fn answered_through(&self, asks: Arc<dyn Asks>) {
+        self.asks.with(|held| *held = Some(asks));
+    }
+
+    /// Put to a person what `decision`, a [`Verdict::Ask`], asked about `request` at
+    /// `point`. `None` if the host set nowhere to put it: the ask then reaches nobody.
+    #[must_use]
+    pub fn settle(&self, point: &str, request: &str, decision: &Decision) -> Option<Asked> {
+        let asks = self.asks.with(|held| held.clone())?;
+        Some(asks.settle(point, request, decision))
     }
 
     /// Add a gate on behalf of the plugin behind `ctx`. It is removed when that plugin is
@@ -100,7 +151,7 @@ impl Gates {
         name: impl Into<String>,
         gate: Arc<dyn Gate>,
     ) -> Result<(), Duplicate> {
-        self.gates.register(ctx, name, gate)
+        self.registered.register(ctx, name, gate)
     }
 
     /// Add a gate with no owner. Prefer [`register`](Self::register) inside plugins.
@@ -109,18 +160,18 @@ impl Gates {
     ///
     /// Returns [`Duplicate`] if `name` is taken.
     pub fn insert(&self, name: impl Into<String>, gate: Arc<dyn Gate>) -> Result<(), Duplicate> {
-        self.gates.insert(name, gate)
+        self.registered.insert(name, gate)
     }
 
     /// Remove a gate. Unknown names are ignored.
     pub fn remove(&self, name: &str) {
-        drop(self.gates.remove(name));
+        drop(self.registered.remove(name));
     }
 
     /// The names of the registered gates, sorted.
     #[must_use]
     pub fn names(&self) -> Vec<String> {
-        self.gates.names()
+        self.registered.names()
     }
 
     /// Declare the decision point `point` on behalf of the plugin behind `ctx`, which will
@@ -269,10 +320,10 @@ impl Gates {
             });
         }
         let mut decision: Option<Decision> = None;
-        for name in self.gates.names() {
+        for name in self.registered.names() {
             // The registry lock is not held while a gate runs, so a gate may itself look at
             // the registry.
-            let gate = self.gates.get(&name);
+            let gate = self.registered.get(&name);
             let Some(verdict) = gate.and_then(|gate| gate.check(point, request)) else {
                 continue;
             };

@@ -18,13 +18,14 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use corduroy_core::call::Serve;
 use corduroy_core::sync::Lock;
 use corduroy_core::{
-    App, ContextError, EventId, EventStream, FiberId, GATES, Gates, HTTP, HttpClients, LogError,
-    MODELS, Message, ModelInfo, ModelRequest, Models, PROMPTS, Plugin, Prompts, Registry, Role,
-    SECRETS, SERVICES, Secrets, Services, SessionId, TOOLS, ToolCall, ToolResult, Tools,
+    App, Asks, ContextError, EventId, EventStream, FiberId, GATES, Gates, HTTP, HttpClients,
+    LogError, MODELS, Message, ModelInfo, ModelRequest, Models, PROMPTS, Plugin, Prompts, Registry,
+    Role, SECRETS, SERVICES, Secrets, Services, SessionId, TOOLS, ToolCall, ToolResult, Tools,
 };
 #[cfg(feature = "std")]
 use corduroy_core::{KERNELS, Kernels};
 
+use crate::asks::{LogAsks, OpenAsk};
 use crate::bound::Bounds;
 use crate::children::{SESSION_START, SESSIONS, SessionsService};
 use crate::compact::CompactOperation;
@@ -271,6 +272,8 @@ pub struct Harness {
     contributed: Arc<Operations>,
     /// What changes a request before it is sent, by name. A prototype: see [`crate::shape`].
     shapers: Arc<Shapers>,
+    /// The asks put to a person anywhere but a tool call. A prototype: see [`crate::asks`].
+    asks: Arc<LogAsks>,
     /// What a person reaches the agent through besides the host, by plugin.
     fronts: Arc<Fronts>,
     /// What an extension is handed to act on runs from outside them. It holds the sessions
@@ -436,6 +439,8 @@ impl Harness {
             app: Arc::new(Mutex::new(app)),
             #[cfg(not(feature = "std"))]
             app: Arc::new(Lock::new(app)),
+            // Before the stream is handed over: the asks are kept in it.
+            asks: Arc::new(LogAsks::new(Arc::clone(&events))),
             events,
             tools,
             prompts,
@@ -698,6 +703,36 @@ impl Harness {
     /// recorded and run by nobody.
     pub fn takes_messages(&self, takes: bool) {
         self.outside.hears(takes);
+    }
+
+    /// Say that this host shows a person what a gate asks at `plugin/load` and
+    /// `session/start`, and takes their answers ([`open_asks`](Self::open_asks),
+    /// [`answer_ask`](Self::answer_ask)). Until a host says so, an ask there reaches nobody
+    /// and is a denial. A prototype: see [`crate::asks`].
+    pub fn answers_asks(&self) {
+        let asks: Arc<dyn Asks> = Arc::<LogAsks>::clone(&self.asks);
+        self.gates.answered_through(asks);
+    }
+
+    /// The asks that wait for a person's answer, oldest first. A prototype: see
+    /// [`crate::asks`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HarnessError::Log`] if the log could not be read.
+    pub fn open_asks(&self) -> Result<Vec<OpenAsk>, HarnessError> {
+        Ok(self.asks.open()?)
+    }
+
+    /// Record a person's `answer` to the ask `id`. Whatever was asked about is not done by
+    /// this: it goes through, or is refused with the person's reason, the next time it is
+    /// asked for. Returns whether an ask of that id was waiting.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HarnessError::Log`] if the answer could not be stored.
+    pub fn answer_ask(&self, id: &str, answer: &Answer) -> Result<bool, HarnessError> {
+        Ok(self.asks.answer(id, answer, None)?)
     }
 
     /// What a person reaches the agent through besides the host: the front ends plugins

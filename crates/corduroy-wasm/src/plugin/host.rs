@@ -15,7 +15,7 @@ use std::time::{Duration, Instant, SystemTime};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use corduroy_core::{
-    CallError as CoreCallError, Content, Draft, Event, EventId, EventStream, FiberId, Gates,
+    Asked, CallError as CoreCallError, Content, Draft, Event, EventId, EventStream, FiberId, Gates,
     Grants, HttpClients, HttpRequest, Kernels, Message, ModelError, ModelRequest, Models,
     PLUGIN_LOAD, Query, Requests, Scope, Secrets, Services, SessionId, Source, TOOL_CALL,
     ToolError as CoreToolError, ToolOutput, Tools, Verdict, json,
@@ -659,11 +659,30 @@ impl HostState {
     /// Ask the gates whether `request` may be loaded, recording their decision. Returns why
     /// not, if not.
     fn gate_load(&mut self, request: &Value) -> Option<String> {
-        let decision = self
-            .lent
-            .gates
-            .as_ref()?
-            .decide(PLUGIN_LOAD, &request.to_string())?;
+        let gates = self.lent.gates.clone()?;
+        let asking = request.to_string();
+        let decision = gates.decide(PLUGIN_LOAD, &asking)?;
+        // An ask is put to a person where the host takes their answers: it is recorded
+        // there, and found answered when the same load is asked for again.
+        let asked = matches!(decision.verdict, Verdict::Ask(_))
+            .then(|| gates.settle(PLUGIN_LOAD, &asking, &decision))
+            .flatten();
+        match asked {
+            Some(Asked::Allowed) => return None,
+            Some(Asked::Refused(reason)) => {
+                return Some(format!("a person declined this: {reason}"));
+            }
+            Some(Asked::Waiting(id)) => {
+                return Some(format!(
+                    "gate `{}` asked a person whether this may be loaded (ask {id}): {}. It \
+                     has not been answered, so nothing was loaded. Go on with something \
+                     else, and ask for it again once a person has answered",
+                    decision.gate,
+                    decision.verdict.reason()
+                ));
+            }
+            Some(_) | None => {}
+        }
         let mut recorded = request.clone();
         if let Some(fields) = recorded.as_object_mut() {
             fields.insert("point".to_owned(), json!(PLUGIN_LOAD));

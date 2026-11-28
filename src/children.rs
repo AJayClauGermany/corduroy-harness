@@ -31,7 +31,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use corduroy_core::call::Serve;
-use corduroy_core::{CallError, Gates, Service, SessionId, Verdict};
+use corduroy_core::{Asked, CallError, Decision, Gates, Service, SessionId, Verdict};
 use serde_json::{Value, json};
 
 use crate::session::{Sessions, end_of};
@@ -50,6 +50,17 @@ pub const SESSIONS: &str = "sessions";
 
 /// How deep child sessions may nest below the session a person started.
 pub const MAX_DEPTH: usize = 3;
+
+/// What the model is told of something a person has been asked about and has not answered.
+fn waiting(decision: &Decision, ask: &str) -> String {
+    format!(
+        "gate `{}` asked a person whether this may be done (ask {ask}): {}. It has not been \
+         answered, so nothing was done. Go on with something else, and ask for it again once \
+         a person has answered",
+        decision.gate,
+        decision.verdict.reason()
+    )
+}
 
 /// The [`SESSIONS`] service.
 #[derive(Debug)]
@@ -129,15 +140,52 @@ impl SessionsService {
             "starter": format!("plugin:{caller}"),
             "task": task,
         });
+        let asking = request.to_string();
         // The gates are asked for the session that starts the other, without its tool
-        // call: a gate that waited there would hold the call it is asked about.
-        let asked = Serve::session(parent.clone());
-        let (decision, _) = asked.run(|| self.gates.decide(SESSION_START, &request.to_string()));
-        let Some(decision) = decision else {
+        // call: a gate that waited there would hold the call it is asked about. An ask is
+        // put to a person where the host takes their answers: it is recorded there, and
+        // found answered when the same session is asked for again.
+        let (settled, _) = Serve::session(parent.clone()).run(|| {
+            let decision = self.gates.decide(SESSION_START, &asking)?;
+            let asked = matches!(decision.verdict, Verdict::Ask(_))
+                .then(|| self.gates.settle(SESSION_START, &asking, &decision))
+                .flatten();
+            Some((decision, asked))
+        });
+        let Some((decision, asked)) = settled else {
             return Ok(());
         };
-        let mut recorded = request;
-        if let Some(fields) = recorded.as_object_mut() {
+        let denied = |why: String| Err(CallError::Denied(why));
+        match asked {
+            Some(Asked::Allowed) => return Ok(()),
+            Some(Asked::Refused(reason)) => {
+                return denied(format!("a person declined this: {reason}"));
+            }
+            Some(Asked::Waiting(id)) => return denied(waiting(&decision, &id)),
+            Some(_) | None => {}
+        }
+        self.record(parent, request, &decision)?;
+        match decision.verdict {
+            Verdict::Allow => Ok(()),
+            Verdict::Deny(reason) => {
+                denied(format!("denied by gate `{}`: {reason}", decision.gate))
+            }
+            Verdict::Ask(reason) => denied(format!(
+                "gate `{}` asked for a person's approval, which starting a session cannot \
+                 wait for yet: {reason}",
+                decision.gate
+            )),
+        }
+    }
+
+    /// Record what the gates decided about `request` in the session `parent`.
+    fn record(
+        &self,
+        parent: &SessionId,
+        mut request: Value,
+        decision: &Decision,
+    ) -> Result<(), CallError> {
+        if let Some(fields) = request.as_object_mut() {
             fields.insert("point".to_owned(), json!(SESSION_START));
             fields.insert("verdict".to_owned(), json!(decision.verdict.kind()));
             fields.insert("reason".to_owned(), json!(decision.verdict.reason()));
@@ -145,20 +193,8 @@ impl SessionsService {
         }
         self.sessions
             .journal(parent)
-            .and_then(|journal| Ok(journal.noted("gate/decision", &recorded)?))
-            .map_err(|error| CallError::Failed(error.to_string()))?;
-        match decision.verdict {
-            Verdict::Allow => Ok(()),
-            Verdict::Deny(reason) => Err(CallError::Denied(format!(
-                "denied by gate `{}`: {reason}",
-                decision.gate
-            ))),
-            Verdict::Ask(reason) => Err(CallError::Denied(format!(
-                "gate `{}` asked for a person's approval, which starting a session cannot \
-                 wait for yet: {reason}",
-                decision.gate
-            ))),
-        }
+            .and_then(|journal| Ok(journal.noted("gate/decision", &request)?))
+            .map_err(|error| CallError::Failed(error.to_string()))
     }
 
     /// How many parents `session` has.

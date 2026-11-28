@@ -89,6 +89,7 @@ extern crate alloc;
 #[cfg(any(feature = "std", test))]
 extern crate std;
 
+pub mod asks;
 pub mod bound;
 pub mod children;
 pub mod compact;
@@ -107,6 +108,7 @@ pub mod shape;
 pub mod stop;
 pub mod tools;
 
+pub use asks::OpenAsk;
 pub use children::{SESSION_START, SESSIONS};
 pub use compact::CompactOperation;
 pub use corduroy_core as core;
