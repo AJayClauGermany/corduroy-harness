@@ -743,6 +743,65 @@ impl Session {
     }
 }
 
+/// The counts a `usage` event may give.
+const COUNTS: [&str; 5] = [
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "reasoning_tokens",
+];
+
+/// What the model requests of a run used in all: how many answered, and each count added up
+/// over the requests whose provider gave it.
+///
+/// A prototype of a total the harness keeps (G17 in `docs/open-questions.md`; see
+/// `docs/prototypes.md`). It counts the session's own requests: not those of a session it
+/// started, and not a model a plugin asked.
+#[derive(Debug, Clone, Copy)]
+struct Used {
+    requests: u64,
+    counts: [Option<u64>; 5],
+}
+
+impl Used {
+    /// Nothing used: no request has answered.
+    const NONE: Self = Self {
+        requests: 0,
+        counts: [None; 5],
+    };
+
+    /// Add what the `usage` event with this payload says one request used.
+    fn add(&mut self, usage: &Value) {
+        self.requests = self.requests.saturating_add(1);
+        for (sum, name) in self.counts.iter_mut().zip(COUNTS) {
+            let given = usage
+                .get(name)
+                .or_else(|| usage.pointer(&format!("/usage/{name}")))
+                .and_then(Value::as_u64);
+            if let Some(given) = given {
+                *sum = Some(sum.unwrap_or(0).saturating_add(given));
+            }
+        }
+    }
+
+    /// The total as `turn/end` records it under `used`: `{"requests"}` and each count that
+    /// some request gave. `None` if no request answered.
+    fn total(&self) -> Option<Value> {
+        if self.requests == 0 {
+            return None;
+        }
+        let mut total = serde_json::Map::new();
+        total.insert("requests".to_owned(), json!(self.requests));
+        for (sum, name) in self.counts.iter().zip(COUNTS) {
+            if let Some(sum) = sum {
+                total.insert(name.to_owned(), json!(sum));
+            }
+        }
+        Some(Value::Object(total))
+    }
+}
+
 /// The message that stands in for what `summary` summarises.
 fn summary_message(summary: &str) -> Message {
     Message::user().text(format!("{SUMMARY_INTRO}\n<summary>\n{summary}\n</summary>"))
@@ -990,6 +1049,8 @@ struct State {
     stopped: Option<StopReason>,
     /// The output tokens of the model requests since a person last wrote.
     written: u64,
+    /// What the model requests since a person last wrote used in all.
+    used: Used,
     /// Tool calls that waited for a signal, by tool-call id, with the payload once it came.
     waits: BTreeMap<String, Waited>,
     /// The tool calls waiting for a response, by tool-call id.
@@ -1054,6 +1115,8 @@ struct Asked {
     output: u64,
     /// Why the model stopped, if its provider said.
     stopped: Option<StopReason>,
+    /// What the `usage` event says of it, for the run's total.
+    usage: Value,
 }
 
 impl Batch {
@@ -1102,6 +1165,7 @@ impl State {
             overflowed: false,
             stopped: None,
             written: 0,
+            used: Used::NONE,
             waits: BTreeMap::new(),
             calls: BTreeMap::new(),
             unfinished: false,
@@ -1172,6 +1236,7 @@ impl State {
         // A person's message begins a turn, and what the model writes is counted from there.
         if message.role == Role::User && !message.is_tool_results() {
             self.written = 0;
+            self.used = Used::NONE;
         }
         let message = self.resolved(message);
         self.added = self.added.saturating_add(size(&message));
@@ -1205,6 +1270,7 @@ impl State {
             .and_then(Value::as_u64)
             .unwrap_or(0);
         self.written = self.written.saturating_add(written);
+        self.used.add(&usage);
         (self.replied, self.added, self.overflowed) = (written, 0, false);
         self.stopped = usage
             .get("stop")
@@ -1497,6 +1563,7 @@ impl Journal {
                         input: usage.input_tokens.unwrap_or(0),
                         output: usage.output_tokens.unwrap_or(0),
                         stopped: stop,
+                        usage: payload,
                     });
                 }
                 Effect::Compacted {
@@ -1957,9 +2024,15 @@ impl Journal {
 
     /// Record that the run is over, and how it ended.
     pub(crate) fn end_turn(&self, end: &End) -> Result<()> {
+        let mut payload = end.payload();
+        // A prototype (G17): what the run's own model requests used, added up here.
+        let used = self.state(|state| state.used.total());
+        if let (Some(used), Some(fields)) = (used, payload.as_object_mut()) {
+            fields.insert("used".to_owned(), used);
+        }
         let draft = Draft::new(Source::Host, TURN_END)
             .session(self.id.clone())
-            .payload(end.payload().to_string());
+            .payload(payload.to_string());
         self.events.emit(draft)?;
         self.state(|state| {
             (state.unfinished, state.restarts) = (false, 0);
@@ -2036,6 +2109,7 @@ impl State {
         if let Some(asked) = batch.asked {
             (self.input_tokens, self.stopped) = (asked.input, asked.stopped);
             self.written = self.written.saturating_add(asked.output);
+            self.used.add(&asked.usage);
             (self.replied, self.added, self.overflowed) = (asked.output, 0, false);
         }
     }

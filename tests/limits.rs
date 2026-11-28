@@ -109,7 +109,13 @@ async fn a_run_that_has_written_all_it_may_is_not_asked_again() {
     assert_eq!(model.asked(), 2);
     assert_eq!(outcome.session.turn_output_tokens(), 120);
     assert_eq!(outcome.session.pending_calls(), vec![]);
-    assert_eq!(ends(&harness), [r#"{"status":"output-limit"}"#]);
+    // The end says what the run's two requests used in all.
+    assert_eq!(
+        ends(&harness),
+        [
+            r#"{"status":"output-limit","used":{"requests":2,"input_tokens":20,"output_tokens":120}}"#
+        ]
+    );
 }
 
 #[tokio::test]
@@ -191,7 +197,10 @@ async fn an_answer_cut_off_at_the_models_limit_is_not_a_finished_run() {
         panic!("expected a cut-off answer, got {:?}", outcome.status);
     };
     assert_eq!(answer, "The first half of");
-    assert_eq!(ends(&harness), [r#"{"status":"cut-off"}"#]);
+    assert_eq!(
+        ends(&harness),
+        [r#"{"status":"cut-off","used":{"requests":1,"input_tokens":10,"output_tokens":4096}}"#]
+    );
 
     // The next answer is whole, and so the run that asked for it finishes.
     let outcome = harness.run("go on").await.unwrap();
@@ -232,4 +241,40 @@ async fn a_log_that_says_finished_reads_as_finished() {
     let outcome = old.continue_run(&MAIN.into()).await.unwrap();
 
     assert!(matches!(outcome.status, Status::Finished { .. }));
+}
+
+/// What a run's requests used is added up on its `turn/end` (a prototype: G17 in
+/// `docs/open-questions.md`). The total is the same whether the run went through in one
+/// process or was picked up from the log by another, and each run has its own.
+#[tokio::test]
+async fn the_end_of_a_run_says_what_its_requests_used_in_all() {
+    let total = |end: &str| {
+        let end: serde_json::Value = serde_json::from_str(end).unwrap();
+        end["used"].clone()
+    };
+    let model = Counted::new([working("c1", 7), saying("done", 5), saying("again", 3)]);
+    let whole = harness(model).unwrap();
+    whole.run("work").await.unwrap();
+    whole.run("more").await.unwrap();
+
+    let ended = ends(&whole);
+    assert_eq!(
+        total(&ended[0]),
+        json!({"requests": 2, "input_tokens": 20, "output_tokens": 12})
+    );
+    // The next run counts from nothing.
+    assert_eq!(
+        total(&ended[1]),
+        json!({"requests": 1, "input_tokens": 10, "output_tokens": 3})
+    );
+
+    // A process that stopped after the first request left its `usage` in the log; the one
+    // that picks the run up adds its own request to it.
+    let all = whole.events().events();
+    let first_answer = all.iter().position(|event| event.topic == "usage").unwrap();
+    let survived = EventStream::load(all.into_iter().take(first_answer + 1));
+    let picked_up = Harness::resume(Counted::new([saying("done", 5)]), Arc::new(survived)).unwrap();
+    picked_up.plugin(plugin_fn("noop", &[TOOLS], noop));
+    picked_up.continue_run(&MAIN.into()).await.unwrap();
+    assert_eq!(total(&ends(&picked_up)[0]), total(&ended[0]));
 }
