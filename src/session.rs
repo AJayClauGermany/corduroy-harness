@@ -103,6 +103,7 @@ use crate::bound::text_bytes;
 use crate::harness::HarnessError;
 use crate::message::{decode, decode_content, encode, encode_content};
 use crate::provider::{Asking, ProviderError, ProviderErrorKind, Retry};
+use crate::shape::Shaped;
 
 /// Topic of the events that make up the conversation.
 pub const MESSAGE: &str = "message";
@@ -1852,10 +1853,11 @@ impl Journal {
     pub(crate) fn ask_started(
         &self,
         provider: &str,
-        request: &ModelRequest,
+        shaped: &Shaped,
         asking: &Asking,
         shown: &Shown,
     ) -> Result<()> {
+        let request = &shaped.request;
         let mut payload = json!({
             "provider": provider,
             "model": request.model,
@@ -1889,6 +1891,17 @@ impl Journal {
                 shown.name(&self.events, "tools", &declared, json!({"tools": tools}));
             drafts.extend(draft);
             said.insert("tools_hash".to_owned(), json!(hashed));
+        }
+        // A request something shaped is not the session's projection: it says what changed
+        // it, and what the messages it carried came to, so a review does not take the
+        // projection for what the model was shown.
+        if !shaped.by.is_empty() {
+            let messages: Vec<Value> = request.messages.iter().map(encode).collect();
+            said.insert("shaped".to_owned(), json!(shaped.by));
+            said.insert(
+                "messages_hash".to_owned(),
+                json!(hash(&Value::Array(messages).to_string())),
+            );
         }
         if let Some(fields) = payload.as_object_mut() {
             fields.extend(said);

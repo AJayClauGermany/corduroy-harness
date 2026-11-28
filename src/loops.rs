@@ -61,6 +61,7 @@ use corduroy_core::{Registry, Role, ToolCall};
 use crate::harness::{Harness, HarnessError};
 use crate::operation::Operation;
 use crate::session::{End, Journal, Session};
+use crate::shape::{self, Shaped};
 use crate::stop::Stop;
 use corduroy_core::ModelRequest;
 
@@ -199,6 +200,26 @@ impl<'run> Run<'run> {
         self.harness.request_for(session)
     }
 
+    /// `request` after every shaper in the [`Shapers`](crate::Shapers) registry has had
+    /// it, in name order: what to send, and which of them changed it. A prototype: see
+    /// [`crate::shape`].
+    #[must_use]
+    pub fn shape(&self, session: &Session, request: ModelRequest) -> Shaped {
+        shape::shape(self.harness.shapers(), session, request)
+    }
+
+    /// As [`ask_model`](Self::ask_model), for a request the shapers have had
+    /// ([`shape`](Self::shape)): the record of the request names those that changed it.
+    ///
+    /// # Errors
+    ///
+    /// As [`ask_model`](Self::ask_model).
+    pub async fn ask_shaped(&self, shaped: &Shaped) -> Result<Step, HarnessError> {
+        self.harness
+            .ask_model(self.journal, shaped, self.stop)
+            .await
+    }
+
     /// Ask the model `request`, of the provider the harness asks, and store its answer and
     /// what it cost as one commit. A model that fails ends the run as
     /// [failed](End::Failed); a person stopping the run does not wait for the answer.
@@ -212,9 +233,7 @@ impl<'run> Run<'run> {
     ///
     /// [`HarnessError::Log`] if the answer could not be stored.
     pub async fn ask_model(&self, request: &ModelRequest) -> Result<Step, HarnessError> {
-        self.harness
-            .ask_model(self.journal, request, self.stop)
-            .await
+        self.ask_shaped(&Shaped::plain(request.clone())).await
     }
 }
 
@@ -224,7 +243,7 @@ impl<'run> Run<'run> {
 /// [operations](Run::operations) (the host's, the plugins', compaction, the gates); the tool
 /// calls the model asked for; waiting, if a call waits for a signal; ending the run, if the
 /// model has answered; ending it at the [turn limit](Harness::max_turns); and asking the
-/// model.
+/// model, with the request as the [shapers](Run::shape) left it.
 ///
 /// A loop of one's own can wrap this one, to watch or adjust its steps, or take its parts
 /// from [`Run`] and order them differently.
@@ -256,7 +275,8 @@ impl Loop for StandardLoop {
         if session.model_turns() >= limit {
             return Ok(Step::End(End::TurnLimit));
         }
-        run.ask_model(&run.request(&session)).await
+        let shaped = run.shape(&session, run.request(&session));
+        run.ask_shaped(&shaped).await
     }
 }
 

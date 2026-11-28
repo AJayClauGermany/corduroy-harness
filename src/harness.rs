@@ -38,6 +38,7 @@ use crate::provider::{DEFAULT_PROVIDER, PROVIDERS, Provider, Providers};
 use crate::session::{
     Answer, Ask, Effect, End, Journal, MAIN, Progress, Session, SessionInfo, Sessions, Wait, ended,
 };
+use crate::shape::{SHAPERS, Shaped, Shapers};
 use crate::stop::Stop;
 use crate::tools::{NOT_RUN, PluginTools};
 
@@ -268,6 +269,8 @@ pub struct Harness {
     operations: Vec<Arc<dyn Operation>>,
     /// Steps plugins registered, tried next and in name order.
     contributed: Arc<Operations>,
+    /// What changes a request before it is sent, by name. A prototype: see [`crate::shape`].
+    shapers: Arc<Shapers>,
     /// What a person reaches the agent through besides the host, by plugin.
     fronts: Arc<Fronts>,
     /// What an extension is handed to act on runs from outside them. It holds the sessions
@@ -285,6 +288,9 @@ impl fmt::Debug for Harness {
             .finish_non_exhaustive()
     }
 }
+
+/// The registries of what a run's steps are made of.
+type Steps = (Arc<Operations>, Arc<Loops>, Arc<Shapers>);
 
 /// While alive, the session it names is being run, and [`Harness::stop`] reaches it.
 struct Running<'harness> {
@@ -408,8 +414,6 @@ impl Harness {
         let models = Arc::new(Models::new());
         let secrets = Arc::new(Secrets::new());
         let http = Arc::new(HttpClients::new());
-        let (contributed, loops) = (Arc::new(Operations::new()), Arc::new(Loops::new()));
-        Self::register_own(&loops, &services, &sessions)?;
         let mut app = App::with_events(Arc::clone(&events));
         app.provide(TOOLS, Arc::clone(&tools))?;
         app.provide(PROMPTS, Arc::clone(&prompts))?;
@@ -421,8 +425,8 @@ impl Harness {
         app.provide(MODELS, Arc::clone(&models))?;
         app.provide(SECRETS, Arc::clone(&secrets))?;
         app.provide(HTTP, Arc::clone(&http))?;
-        app.provide(OPERATIONS, Arc::clone(&contributed))?;
-        app.provide(LOOPS, Arc::clone(&loops))?;
+        let (contributed, loops, shapers) = Self::provide_steps(&mut app)?;
+        Self::register_own(&loops, &services, &sessions)?;
         let fronts = Arc::new(Fronts::new());
         app.provide(FRONTS, Arc::clone(&fronts))?;
         let outside = Arc::new(Outside::new(Arc::clone(&sessions)));
@@ -454,9 +458,22 @@ impl Harness {
             restart_limit: 5,
             operations: Vec::new(),
             contributed,
+            shapers,
             fronts,
             outside,
         })
+    }
+
+    /// Provide the registries of what a run's steps are made of: the operations plugins
+    /// contribute, the loops, and what shapes a request.
+    fn provide_steps(app: &mut App) -> Result<Steps, HarnessError> {
+        let contributed = Arc::new(Operations::new());
+        let loops = Arc::new(Loops::new());
+        let shapers = Arc::new(Shapers::new());
+        app.provide(OPERATIONS, Arc::clone(&contributed))?;
+        app.provide(LOOPS, Arc::clone(&loops))?;
+        app.provide(SHAPERS, Arc::clone(&shapers))?;
+        Ok((contributed, loops, shapers))
     }
 
     /// What the harness registers itself, as the host rather than as a plugin: the
@@ -1161,6 +1178,13 @@ impl Harness {
         Ok(Step::End(End::Stopped))
     }
 
+    /// The registry of what changes a request before it is sent. A prototype: see
+    /// [`crate::shape`].
+    #[must_use]
+    pub const fn shapers(&self) -> &Arc<Shapers> {
+        &self.shapers
+    }
+
     /// The request the harness makes of the model for `session`: its model, the system
     /// prompt, the conversation as the model sees it, and every tool.
     pub(crate) fn request_for(&self, session: &Session) -> ModelRequest {
@@ -1177,9 +1201,10 @@ impl Harness {
     pub(crate) async fn ask_model(
         &self,
         journal: &Arc<Journal>,
-        request: &ModelRequest,
+        shaped: &Shaped,
         stop: &Stop,
     ) -> Result<Step, HarnessError> {
+        let request = &shaped.request;
         let Some(provider) = self.providers.get(&self.provider) else {
             let reason = format!("no model provider is registered as `{}`", self.provider);
             return Ok(Step::End(End::Failed(reason)));
@@ -1189,7 +1214,7 @@ impl Harness {
         }
         journal.ask_started(
             &self.provider,
-            request,
+            shaped,
             &provider.asking(&request.model),
             self.sessions.shown(),
         )?;

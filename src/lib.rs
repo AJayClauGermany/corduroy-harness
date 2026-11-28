@@ -103,6 +103,7 @@ pub mod outside;
 pub mod provider;
 pub mod scripted;
 pub mod session;
+pub mod shape;
 pub mod stop;
 pub mod tools;
 
@@ -128,3 +129,4 @@ pub use session::{
     MODEL_REQUEST, MODEL_RETRY, MODEL_SHOWN, PROCESS_START, ProcessInfo, Removal, SESSION_REMOVED,
     SIGNAL, Session, SessionInfo, Sessions, Wait, removal,
 };
+pub use shape::{SHAPERS, Shape, Shaped, Shapers};
