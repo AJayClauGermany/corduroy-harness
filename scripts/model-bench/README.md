@@ -77,6 +77,15 @@ and `fresh`. It passes on no other option (`--binary`, `--out`, `--provider`), d
 It is for an agent whose own sandbox lets this one command out: allow
 `scripts/model-bench/local.sh` there, and not `run.sh`.
 
+Where the agent cannot be let out at all and may only write under `.bench-runs/`, leave
+`scripts/model-bench/local.sh watch` running in a terminal of your own. The agent asks by
+writing one line, `run MODELS NAME [settings]` or `stop`, to
+`.bench-runs/requests/<id>.request`, and reads `<id>.status` (`running`, then `exit N`) and
+`<id>.log` beside it. Each request is checked exactly as the same words on the command line
+are, they are done one at a time, and a link planted under `.bench-runs/` in a log's or a
+run's place is refused, not written through. Anything that can write there can start a run,
+and one that rearranges a run's directory while it is going is not guarded against.
+
 ### Several at once
 
 ```bash
