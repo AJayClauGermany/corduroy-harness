@@ -93,6 +93,22 @@ def tool_places() -> tuple[str, ...]:
     return tuple(places)
 
 
+@functools.cache
+def developer_dir() -> str:
+    """The developer directory the sandboxed tools are told to use: the command line tools
+    where they are installed (they ask for nothing outside their own directory), or else
+    what `xcode-select` has chosen."""
+    tools = "/Library/Developer/CommandLineTools"
+    if os.path.exists(f"{tools}/usr/bin/python3"):
+        return tools
+    try:
+        return subprocess.run(
+            ["/usr/bin/xcode-select", "-p"], capture_output=True, text=True, timeout=10, check=False
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
 def srt_env(scratch: Path) -> dict:
     """What `srt` is started with for a sandboxed shell: a home and a temporary directory
     of the trial's own, since the person's are behind the wall (`git` stops at a
@@ -105,11 +121,18 @@ def srt_env(scratch: Path) -> dict:
     for made in (home, temporary):
         made.mkdir(parents=True, exist_ok=True)
     # `CLAUDE_TMPDIR` is what earlier versions of SRT read.
-    return {
+    told = {
         "HOME": str(home),
         "CLAUDE_CODE_TMPDIR": str(temporary),
         "CLAUDE_TMPDIR": str(temporary),
     }
+    # The stubs in /usr/bin look for the developer directory through `/var/select`, and
+    # `/var` is a link the sandbox does not let them follow, whatever is allowed beyond it.
+    # Told where it is, they do not look.
+    developer = developer_dir()
+    if developer:
+        told["DEVELOPER_DIR"] = developer
+    return told
 
 
 def srt_prefix(
@@ -867,7 +890,8 @@ kill $server; test "$fetched" = yes""",
 
 
 # What is looked at behind a wall that broke something, for whoever has to mend it.
-LOOK = """echo "TMPDIR=$TMPDIR HOME=$HOME PATH=$PATH"
+LOOK = """echo "TMPDIR=$TMPDIR HOME=$HOME PATH=$PATH DEVELOPER_DIR=$DEVELOPER_DIR"
+ls -la /private/var/select 2>&1
 echo "xcode-select -p: $(xcode-select -p 2>&1)"
 ls -la /var/select 2>&1
 ls -d /Library/Developer/CommandLineTools/usr/bin/python3 /Applications/Xcode*.app 2>&1"""
