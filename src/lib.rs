@@ -107,7 +107,7 @@ pub mod shape;
 pub mod stop;
 pub mod tools;
 
-pub use children::SESSIONS;
+pub use children::{SESSION_START, SESSIONS};
 pub use compact::CompactOperation;
 pub use corduroy_core as core;
 pub use corduroy_core::{ModelInfo, ModelReply, ModelRequest, StopReason, Usage};

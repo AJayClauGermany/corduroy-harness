@@ -239,6 +239,158 @@ async fn sub_agents_nest_only_so_deep() {
     assert!(deepest[0].contains("nest at most 3 deep"), "{deepest:?}");
 }
 
+/// The tool `fan`: it does its work on a thread of its own, taking the call's scope there
+/// (`call::carry`, a prototype), and says what the thread saw. The waits said on that
+/// thread are said again here, where the call is served, unless the input says `forget`.
+fn fan(input: &str) -> Result<String, ToolError> {
+    use corduroy_harness::core::call;
+
+    let carried = call::carry().ok_or_else(|| ToolError::Failed("not in a call".into()))?;
+    let work = move || carried.enter(|| (call::wait_for("ci/done"), call::current()));
+    let ((waited, served), waits) = std::thread::spawn(work)
+        .join()
+        .map_err(|_| ToolError::Failed("the thread panicked".into()))?;
+    let said = input.contains("forget") || waits.iter().all(|signal| call::wait_for(signal));
+    let served = served.map(|scope| (scope.session.as_str().to_owned(), scope.call));
+    if said {
+        Ok(format!("{waited} {served:?} {waits:?}"))
+    } else {
+        Err(ToolError::Failed("the call cannot wait".into()))
+    }
+}
+
+/// A tool that does its work on a thread of its own takes the call's scope with it: what
+/// runs there serves the same session and call. A wait said there reaches the run only
+/// once the tool says it again where it was called.
+#[tokio::test]
+async fn a_tool_that_works_on_another_thread_carries_its_call_there() {
+    let model = Arc::new(ScriptedProvider::new([
+        call("f1", "fan", &json!({})),
+        call("f2", "fan", &json!({"forget": true})),
+        say("done"),
+    ]));
+    let harness = harness(&model, Arc::new(EventStream::new()));
+    harness.plugin(plugin_fn("fan", &[TOOLS], |ctx| {
+        let tool = Arc::new(tool_fn(spec("fan"), fan));
+        ctx.service::<Tools>(TOOLS)?.register(ctx, "fan", tool)?;
+        Ok(())
+    }));
+    let main = SessionId::new(MAIN);
+
+    // Said again, the wait holds the run, as a wait said on the call's own thread does.
+    let waiting = harness.run("fan out").await.unwrap();
+    let Status::Waiting { waits, .. } = waiting.status else {
+        panic!("expected to wait, got {:?}", waiting.status);
+    };
+    assert_eq!(waits[0].signal, "ci/done");
+    // Not said again, it is lost: the call returns at once with what the thread saw.
+    let done = harness.signal(&main, "ci/done", "green").await.unwrap();
+    assert_eq!(
+        done.status,
+        Status::Finished {
+            answer: "done".into()
+        }
+    );
+    assert_eq!(
+        results(&harness, MAIN),
+        ["green", r#"true Some(("main", Some("f2"))) ["ci/done"]"#]
+    );
+}
+
+/// What a gate was asked, in order.
+type Asked = Arc<std::sync::Mutex<Vec<serde_json::Value>>>;
+
+/// A gate at `session/start` that lets the session a person started start sessions, and
+/// no session started that way: a policy that an orchestrator starts no orchestrators.
+/// It notes each request in `asked`.
+fn flat(asked: &Asked) -> Arc<dyn Gate> {
+    let seen = Arc::clone(asked);
+    Arc::new(move |point: &str, request: &str| {
+        if point != corduroy_harness::SESSION_START {
+            return None;
+        }
+        let request: serde_json::Value = serde_json::from_str(request).ok()?;
+        let allowed = request["parent"] == MAIN;
+        seen.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(request);
+        Some(if allowed {
+            Verdict::Allow
+        } else {
+            Verdict::Deny("a sub-agent starts none of its own".into())
+        })
+    })
+}
+
+/// Each `gate/decision` in the log of `harness`, as `<session> <point> <verdict>`.
+fn decisions(harness: &Harness) -> Vec<String> {
+    harness
+        .events()
+        .matching(&Pattern::new("gate/decision"))
+        .into_iter()
+        .map(|event| {
+            let payload: serde_json::Value =
+                serde_json::from_str(&event.payload).unwrap_or_default();
+            let text = |name: &str| payload[name].as_str().unwrap_or_default().to_owned();
+            let session = event.session.map(|session| session.as_str().to_owned());
+            format!(
+                "{} {} {}",
+                session.unwrap_or_default(),
+                text("point"),
+                text("verdict")
+            )
+        })
+        .collect()
+}
+
+/// The gates are asked before a session is started (`session/start`, whose request is a
+/// prototype), and a session they deny is not started.
+#[tokio::test]
+async fn the_gates_are_asked_before_a_session_starts_and_a_denied_one_does_not() {
+    let delegate = |id: &str| call(id, "delegate", &json!({"task": "go deeper"}));
+    let model = Arc::new(ScriptedProvider::new([
+        delegate("a"),
+        delegate("b"),
+        say("could not go deeper"),
+        say("done"),
+    ]));
+    let harness = harness(&model, Arc::new(EventStream::new()));
+    assert!(harness.gates().declared(corduroy_harness::SESSION_START));
+    let asked = Asked::default();
+    harness.gates().insert("flat", flat(&asked)).unwrap();
+
+    harness.run("dig").await.unwrap();
+
+    // The gate was told who starts what, for whom and why.
+    let request = |session: &str, parent: &str| {
+        json!({
+            "session": session, "parent": parent, "starter": "plugin:subagents",
+            "task": "go deeper",
+        })
+    };
+    assert_eq!(
+        *asked.lock().unwrap(),
+        [request("main/1", "main"), request("main/1/1", "main/1")]
+    );
+    // The denied session was never started, and the model that asked for it was told why.
+    let sessions: Vec<_> = harness
+        .session_list()
+        .into_iter()
+        .map(|info| info.id)
+        .collect();
+    assert_eq!(sessions, [SessionId::new(MAIN), SessionId::new("main/1")]);
+    let refused = results(&harness, "main/1");
+    assert!(
+        refused[0].contains("denied by gate `flat`: a sub-agent starts none of its own"),
+        "{refused:?}"
+    );
+    // Each decision is in the log, in the session that asked to start the other.
+    assert_eq!(
+        decisions(&harness),
+        ["main session/start allow", "main/1 session/start deny"]
+    );
+}
+
 /// A crash right after a call began waiting, before its placeholder reached the
 /// conversation: picking the run up answers the call from the log rather than making it
 /// again, so there is still one sub-agent.

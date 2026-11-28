@@ -26,7 +26,7 @@ use corduroy_core::{
 use corduroy_core::{KERNELS, Kernels};
 
 use crate::bound::Bounds;
-use crate::children::{SESSIONS, SessionsService};
+use crate::children::{SESSION_START, SESSIONS, SessionsService};
 use crate::compact::CompactOperation;
 use crate::gates::GateOperation;
 use crate::hearing::{Checkpoints, Heard, Unanswered};
@@ -426,7 +426,7 @@ impl Harness {
         app.provide(SECRETS, Arc::clone(&secrets))?;
         app.provide(HTTP, Arc::clone(&http))?;
         let (contributed, loops, shapers) = Self::provide_steps(&mut app)?;
-        Self::register_own(&loops, &services, &sessions)?;
+        Self::register_own(&loops, &services, &sessions, &gates)?;
         let fronts = Arc::new(Fronts::new());
         app.provide(FRONTS, Arc::clone(&fronts))?;
         let outside = Arc::new(Outside::new(Arc::clone(&sessions)));
@@ -482,14 +482,20 @@ impl Harness {
         loops: &Loops,
         services: &Services,
         sessions: &Arc<Sessions>,
+        gates: &Arc<Gates>,
     ) -> Result<(), HarnessError> {
         let duplicate =
             |duplicate: corduroy_core::Duplicate| HarnessError::Run(duplicate.to_string());
         loops
             .insert(DEFAULT_LOOP, Arc::new(StandardLoop))
             .map_err(duplicate)?;
+        // The loop's own decision point, beside the core's two.
+        gates
+            .declare_point(SESSION_START, "before a session is started")
+            .map_err(duplicate)?;
         let children: Arc<dyn corduroy_core::Service> = Arc::new(SessionsService {
             sessions: Arc::clone(sessions),
+            gates: Arc::clone(gates),
         });
         services.insert(SESSIONS, children).map_err(duplicate)
     }
