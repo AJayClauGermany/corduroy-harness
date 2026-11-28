@@ -106,6 +106,11 @@ define a loop and sessions to be able to differ; neither is possible yet. How se
 differ is decided ([What an extension can reach](#what-an-extension-can-reach)), and how an
 add-on defines a loop is still in [Open questions](open-questions.md) (E12).
 
+**The pair is a proof, not the demonstration.** It shows that the surface is enough for the
+second use, and it is easy to test. It does not show the thesis, which is growth: that what
+the agent builds takes the place of model calls it used to make. What will show that is not
+chosen yet (P15 in [Open questions](open-questions.md)).
+
 **What is left out.** Nothing is refused for good. The test for anything proposed is whether
 it serves the agent adapting itself, for this use; what does not is neither built in nor
 promised. The command line is the front end, and enough. A page in a browser showing what
@@ -841,6 +846,19 @@ request's count and answer, and an estimate of what was added since), and that a
 `overflowed`: its last run ended because the request was more than the model holds. Such a
 session is due whatever the counts say, which is what lets it be used again.
 
+**Shaping a request is a step, and leaves the record alone (decided, not built).** What the
+model is sent is the session's projection, which only a `compaction` event changes. Other
+ways of keeping a context small or cheap (dropping old tool results, trimming images,
+marking where a provider may cache, adding a reminder) change what is *sent* and not what
+happened, so they are not written into the conversation, and they should not each need a
+loop of their own. They are steps an extension registers, as it registers an `Operation`:
+each is handed the request the loop is about to make and gives back the one to send. It
+is a part of the loop and not a ninth kind of thing a plugin contributes. `StandardLoop`
+runs them, and a loop an extension wrote may; the session in the log is the same whether
+any ran. What is recorded of a shaped request, so that a review can still say what the
+model was shown, is open with the rest of its form (G19 in
+[Open questions](open-questions.md)).
+
 ## What an extension can reach
 
 Five things are decided here: what a session is started with and held to, what something
@@ -1094,8 +1112,8 @@ together.
   and `edit` refuse a file that changed since the session last read it, with an error that
   says so. That catches another session, a command and the person's own editor alike,
   without knowing which it was; where a tool made the earlier write, the log shows it.
-- *In which order listeners hear the commits of sessions that run together* is still open
-  (C3).
+- *Listeners hear one session's commits in order, and nothing is promised between two
+  sessions'* ([Events, gates and hooks](#events-gates-and-hooks)).
 
 **A step reads everything, and writes through effects.** The rules ask whatever runs a tool
 to leave the call's trail through the journal, and the trail's methods are private to the
@@ -1136,6 +1154,14 @@ and it is to be the other way round.
 - *That sessions do run at once,* or in which order the driver takes them.
 - *Steering a run under way,* named agents in an agent file, a scheduler, and a protocol
   for front ends.
+
+**A grant can name one method of a service (decided, not built).** The `service`
+capability's resource is `service:method`. A bare service name means every method, as it
+does today, so agent files already written read as before. `sessions` is why: starting a
+child, starting a session from outside, raising a signal and sending a session a message
+are four things to allow, and an add-on that delegates is granted the first and no other.
+The grant is about what the add-on that calls may ask for, and says nothing of the
+sessions it starts, whose own grants are what they are started with.
 
 ## What is stable
 
@@ -1223,6 +1249,14 @@ Four things about the plugin world after 1.0 are decided here: what is promised 
 that is already built, how the capabilities grow, that the exports do not, and which
 versions a host accepts. The check of versions at load is built; the rest is *planned*, and
 [Order of work](#order-of-work) lists what changes.
+
+**The world is ours alone, at least until 1.0.** It is the boundary between this host and
+its add-ons, and not a specification for other hosts to implement: there is no second
+implementation to prove one, no home for it outside this repository, and nobody but us
+builds against it. Until 1.0 it changes as it needs to, without breaking for the sake of
+it. Whether it is offered to other hosts is taken up after 1.0, if there is someone who
+wants it; it is kept typed, versioned and one capability to an interface, so that it could
+be.
 
 **A built add-on loads on every 1.x host.** The promise is about the built thing, the
 `.wasm` file, and not only its source. An add-on built against the world of 1.0 loads on
@@ -1415,6 +1449,46 @@ recorded, and the loop is as it was.
 - Remembering an answer ("always allow this tool") is the gate plugin's business: it can
   subscribe to `gate/answer`.
 
+**What a person is asked, and what they answer (decided, not built).** Today only a tool
+call waits for a person, and the answer is yes or no, once.
+
+- *An ask at any declared point can wait for a person.* A tool call, a load and a session's
+  start are asked about in one way and answered in one way: the ask is recorded and waits
+  in the log, and one `gate/answer` names whichever it was. An ask at `plugin/load` is
+  then no longer a denial, which the fourth [guarantee](#what-is-safe-by-default) waits
+  on.
+- *An answer says how far it reaches.* Allow or deny, for this once or from now on, and
+  from now on either for exactly what was asked or within a pattern the person names. So
+  an answer may be wider than its question (asked about one host, the person allows any)
+  or narrower.
+- *The gate that asked remembers.* A lasting answer is recorded with its reach, and the
+  gate keeps it, as above; the loop keeps no list of its own. A remembered refusal is the
+  same thing pointing the other way, and it is the gate that says a question follows one.
+- *A yes carries no words; a no carries a reason.* Approval means the agent was right to
+  ask for this. Anything the person wants done differently is a denial with what to do
+  instead, which goes to the model, and the model asks again. That is the same answer as
+  to a gate rewriting a call, below.
+
+**How events are heard (decided).** Listeners subscribe by topic, and the stream calls each
+one when a matching event has been stored: publish and subscribe, with the log written
+first.
+
+- *A listener runs on the thread that committed, before the commit returns to its caller.*
+  There is no delivery queue between the stream and its listeners, so a slow listener
+  holds the run that committed: a listener does little, and hands on what takes long.
+- *One session's commits are heard in the order they were stored. Between two sessions
+  nothing is promised.* Sessions run side by side, each committing from its own thread,
+  and a listener that needs the order across them reads the log, where every event has
+  its place. Built for a run's own commits, since a session does one thing at a time; not
+  yet for a commit from outside the run (an answer, a message, a stop recorded at a front
+  end) that lands beside one of the run's.
+- *An add-on does not miss an event because it was busy.* Not built: an event that
+  arrives while the add-on is in a call is kept in a queue of the add-on's own and
+  delivered when the call returns, as the events it raises itself already are.
+- *A plugin hears from when it subscribes.* What was committed before is not played to it
+  again: it is in the log, which a plugin loaded late reads. Replaying to a late listener
+  could be added and is not planned.
+
 **Decided against, for now:** gates that rewrite a call's input and let it run, as Pi's hooks
 can. A rewrite saves a model round trip and guarantees the outcome, but the model then
 believes it ran something it did not, two gates can rewrite the same call differently (which
@@ -1442,8 +1516,20 @@ what it did, what it was refused and where it failed can be checked afterwards, 
 included. What follows is decided; which parts are built is said for each.
 
 **Everything that can be logged is logged.** That is the working assumption every other
-answer here is read against. What should be kept *out* (a private value in a prompt or a
-tool call) is not decided, and stays in [Open questions](open-questions.md) (C6).
+answer here is read against.
+
+**The core keeps nothing out; a store may.** There is no point in the core where a batch is
+filtered before it is stored. Something kept out of the log (a private value in a prompt or
+a tool call) is kept out by the store: a `Log` that wraps another and writes what it was
+given with the value taken out, which the trait allows as it stands. Three things follow,
+and are accepted. Listeners hear the event as it was committed, and the stream holds it so
+while the command runs, so the value is out of what is kept and not out of the run. What
+is read back after a restart is what the store kept, so a run picked up again, and the
+agent reading its own history, see the gap. And checkpoints of live output pass through
+the same store, so one wrapper covers them. No such store is shipped yet, and what one
+should take out is not settled: every value removed is one the agent and a reviewer can no
+longer read, so privacy is paid for in what the record can tell
+([Open questions](#open-questions)).
 
 **A payload is JSON.** An event's payload is text in the core, which has no parser, and
 by contract JSON for every topic the core and the loop define: an object that gains fields
@@ -1992,6 +2078,19 @@ credential is then in one of three states as far as a shell is concerned:
 - *A secret says which hosts it may go to.* `Secret` is the core's, so this is in the core
   before the freeze (B9). It also keeps a provider's key from following a `base_url` that
   an agent file pointed somewhere else.
+- *A secret that names no host goes nowhere.* The safe reading is the one that needs
+  nothing written: a value is written into a request only to a host its secret names, for
+  an add-on, a shell and a provider alike.
+- *A secret in the keychain has its hosts beside its value.* The person says them when
+  they put the value in (`corduroy secrets set`), and they are kept with it, where no
+  workspace's agent file can change them. An item is the person's and shared by every
+  agent file that names it, a file someone else wrote included, so the file is not where
+  its hosts can be said. A secret from the environment or a file is named in an agent
+  file the person wrote or accepted, and says its hosts there.
+- *Wanting a secret somewhere new is a question for the person.* An add-on or a provider
+  that would send one to a host it does not name is refused, and the person is offered
+  the host, with the reason given, as for any other [answer](#how-people-meet-it). The
+  command records the yes; the agent never gives itself one.
 - *The filter reads what it writes into.* It needs a certificate of its own that programs
   in the sandbox trust, and it should read only the traffic to hosts a masked secret names,
   passing the rest through unread.
@@ -2078,8 +2177,15 @@ model](explanation/security-model.md) becomes the list of them, with the test fo
 
 **A fix may break.** After 1.0, a flaw that breaks one of the six may be fixed by a change
 that breaks a frozen contract, announced as one. How it is announced and how long a release
-is supported are still open (A11), as is whether a review from outside is a condition of 1.0
-(P9).
+is supported are still open (A11).
+
+**The trusted base has a budget; a review from outside comes after 1.0.** That the core is
+small, fixed and still enforcing the same rules whatever the plugins become is the offer,
+so its size is kept to a budget and not left to chance: lines, dependencies, and the
+WebAssembly engine counted with them. The figures, and the check that holds them, are set
+with the rest of what enforces the freeze (A4). The six guarantees are tested by us. A
+review of them by someone else is wanted and is not a condition of 1.0: it is taken up
+afterwards, once it is clear what such a review should cover and who would make it.
 
 ## How people meet it
 
@@ -2318,8 +2424,8 @@ directory to read and write.
   nothing the person did not give.
 - *A stricter rule is a gate's.* `plugin/load` is still asked of the gates at every load,
   with the hash, so a policy that asks again whenever the code changes can be written.
-- *How wide an answer may be* (this host, or any) is part of what a person can answer to an
-  ask, which is still open (G6).
+- *How wide an answer may be* (this host, or any) is the person's to say: an answer names
+  how far it reaches ([Events, gates and hooks](#events-gates-and-hooks)).
 
 **Only the person's answer gives more than the loader holds.** A load through the `plugins`
 capability is granted within what its loader holds, as now. A package that wants more is
@@ -2593,8 +2699,13 @@ settled by 1.0 is there as well, and one that can wait is only here.
   gets ([How people meet it](#how-people-meet-it)).
 - **Scrubbing the log.** If the model does write a sensitive value into a tool call, the
   assistant message holding it is committed before any gate is asked, so neither a deny nor a
-  rewrite keeps it out of the log. If that matters it is a property of the log (a filter
-  applied to a batch before it is stored), not of gates.
+  rewrite keeps it out of the log. Decided: keeping it out is a store's work, a `Log` that
+  wraps another, and the core has no filter of its own
+  ([What the record promises](#what-the-record-promises)). Still open, and able to wait,
+  since a store is an extension: what a shipped wrapper takes out and how it is told;
+  and whether there are two views, the whole record kept where the agent's tools cannot
+  read it and a filtered one that they can, which would give `log-read` less than the
+  record without losing it.
 - **Session tree.** Sessions are linear for now, with a parent link. Pi's sessions are a tree
   of entries, so one session can branch from any earlier point, which gives rewinding and a
   common starting point for several attempts. Because every event names its session and a
@@ -2607,8 +2718,9 @@ settled by 1.0 is there as well, and one that can wait is only here.
   native step carries out; which is still open.
 - **Delivery order across threads.** Commits are stored in one order, and each is
   delivered by the thread that made it, so two threads committing at once may deliver out
-  of id order. Listeners that must not get order wrong read the log. A single delivery
-  queue would fix it at the cost of a commit returning before its listeners ran.
+  of id order. Decided: one session's commits are heard in order, nothing is promised
+  between two sessions', and there is no single delivery queue
+  ([Events, gates and hooks](#events-gates-and-hooks)).
 - **Progress from a running tool.** A tool can learn that its run is stopping, but cannot
   say how far it has got while it runs; its result comes when it returns. An event it
   emits is the way today. Decided, not built: output reported through the call scope goes
@@ -2622,12 +2734,14 @@ settled by 1.0 is there as well, and one that can wait is only here.
   of it shows in the agent file ([How people meet it](#how-people-meet-it)); when to replace
   it can wait.
 - **Scopes below a service.** The `service` capability is scoped by service name, so a
-  grant gives all of a service's methods. `service:method` resources would let a grant
-  name one.
+  grant gives all of a service's methods. Decided, not built: the resource is
+  `service:method`, and a bare service name still means every method
+  ([What an extension can reach](#what-an-extension-can-reach)).
 - **Listeners and re-entry.** An event a native tool emits while a WebAssembly plugin's
   call is in progress is delivered at once, and a listener in that same plugin is refused
   (it is running), so it misses the event. Events plugins raise themselves are queued and
-  unaffected. A per-plugin queue of undelivered events would close the gap.
+  unaffected. Decided, not built: a per-plugin queue of undelivered events closes the gap
+  ([Events, gates and hooks](#events-gates-and-hooks)).
 - **Exports every guest must write.** Each export of the world is mandatory: the
   JavaScript and Python toolchains refuse to build a plugin without `gate`, and Rust's
   bindings will not compile. For Rust, `corduroy-guest` supplies a default for every export
@@ -2636,12 +2750,15 @@ settled by 1.0 is there as well, and one that can wait is only here.
   missing export could come later without breaking a built add-on
   ([How the plugin world grows](#how-the-plugin-world-grows)).
 - **Blocking.** Tool calls run on blocking threads, but event listeners run inline on the
-  thread that emitted, including inside the async loop. Slow listeners would need a queue.
+  thread that emitted, including inside the async loop. Decided: it stays so, and a
+  listener with slow work hands it on ([Events, gates and hooks](#events-gates-and-hooks)).
 - **Durable loads.** Plugins loaded by a plugin are not reloaded after a restart unless their
   loader does it. Decided, not built: the host loads again each package the person approved,
   from their answers ([How people meet it](#how-people-meet-it)). A bare component loaded
   through `plugins` still lasts only as long as its loader.
-- **Approving a load.** `plugin/load` cannot ask a person yet; see Automations.
+- **Approving a load.** `plugin/load` cannot ask a person yet; see Automations. Decided,
+  not built: an ask at any declared point waits for a person
+  ([Events, gates and hooks](#events-gates-and-hooks)).
 - **Shipping precompiled plugins.** wasmtime's cache removes the cost of every load but the
   first on a machine. Removing that one too means distributing compiled code, which is read
   back with the `unsafe` `Component::deserialize`. Not needed now; if it ever is, that is the

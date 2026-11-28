@@ -111,22 +111,6 @@ it makes this a follower: always matching, a release behind, a list someone else
 *Direction.* Keep parity as the test of expressiveness. State separately what a person gets
 here that the baseline does not give them, and let 1.0 be judged on that.
 
-### P9. Is the fixed core itself the offer?
-
-"The core is meant to be fixed: compiled, small, and not something an agent or a plugin can
-change. … whatever the plugins become, the same core is underneath and still enforcing the
-same rules." That is an assurance argument: a small trusted base an organisation can read,
-audit and rely on while everything above it moves.
-
-What is promised is decided: one statement and six guarantees, each with a test
-([What is safe by default](design.md#what-is-safe-by-default)). Who checks them besides us
-is not.
-
-*Direction.* Decide whether assurance is the pitch. If it is, the size of the trusted base
-becomes a feature with a budget (lines, dependencies, the WebAssembly engine included), and
-a review of the six guarantees from outside is a condition of 1.0 rather than a
-nice-to-have.
-
 ### P10. Who writes add-ons: people or the agent?
 
 The design says the purpose of the plugin system is that the agent adapts the harness to its
@@ -142,17 +126,6 @@ component, with no registry and a version that decides nothing.
 *Direction.* What is left is the order of work: whether the script host and the package are
 finished before the SDKs' own packaging, and how much the tutorials turn towards reading
 and approving what an agent wrote.
-
-### P11. Is the plugin world ours alone, or meant for other hosts?
-
-A frozen, versioned, typed interface with capabilities as imports is close to a
-specification. If another host could implement it, an add-on would be portable between
-harnesses, which nothing offers today and which would be a contribution to the field rather
-than to one project. If it is ours alone, it is an internal boundary with good hygiene.
-
-*Direction.* Decide which. A specification needs a second implementation as proof and a
-home that is not one repository; an internal boundary needs neither, and should not carry
-the cost of pretending.
 
 ### P14. How does it reach people?
 
@@ -170,13 +143,27 @@ until there is someone other than its author to reach.
 ### P15. What will show that it is worth having?
 
 Nothing outside this repository depends on it yet. Before the core is frozen for good,
-something should show the purpose is real: a task done here that cannot be done, or cannot
-be done safely, elsewhere; an extension written by someone who is not us; a user who stayed.
+something should show the purpose is real.
 
-*Direction.* One demonstration that is the thesis made runnable, chosen before 1.0 and
-passed before it. The test-driven pair among the proofs
-[the freeze waits on](design.md#what-the-freeze-waits-on) is the candidate; decide whether it
-is the demonstration or only a proof that the surface is enough.
+One thing is decided ([What it is for](design.md#what-it-is-for)): the test-driven pair is
+a proof that the surface is enough, and not the demonstration. The demonstration has to
+show growth, which is the thesis: what the agent builds takes the place of model calls it
+used to make.
+
+The candidate, not yet chosen: a piece of work begun by a small model on this machine and
+carried to where the model is no longer needed. The agent builds the tools and automations
+the work takes until what is left runs as code, with no model call, or with none but a
+small one that decides between a few things. Like a developer hired once to build
+something that then runs without them. It would show that what was built stays and works
+when the model is taken away. It is still one case, and closer to the thesis than the
+pair.
+
+*Direction.* Choose the piece of work, before 1.0, and what is measured: model calls and
+tokens for the same task at the start and at the end, and whether the end state answers
+correctly with the model switched off. Say whether it is a condition of 1.0 or what 1.0 is
+shown with. It leans on what [I6](#i6-what-does-the-agent-extends-itself-need-at-10) lists
+as not built: what the agent made has to be there the next day, and something has to start
+it without a model asking.
 
 ### P16. Who keeps it going after 1.0?
 
@@ -204,7 +191,10 @@ a fixture and loaded by every later host
 `corduroy-harness`; a snapshot of `wit/corduroy.wit`'s exports, shared types and each
 interface's functions, so that a changed one fails and an added one is seen; a log file of
 every schema version from 1.0 on kept as a fixture and read back in a test. The same check
-can hold the list of places marked for growth, so that an addition anywhere else fails. For
+can hold the list of places marked for growth, so that an addition anywhere else fails. The
+trusted base is kept to a budget ([What is safe by default](design.md#what-is-safe-by-default)):
+set its figures (lines, dependencies, the WebAssembly engine counted with them) and say
+which check fails when one is passed. For
 the add-on fixtures, decide which guest languages are kept and where: a JavaScript or
 Python add-on is 12 to 19 MB, which is a lot to hold in the repository for every release.
 
@@ -215,6 +205,10 @@ Whether these move together decides what a guest SDK, a store and an extension e
 What a version of the world means is decided, and an add-on built against its 1.0 loads on
 every host whose world is 1.x
 ([How the plugin world grows](design.md#how-the-plugin-world-grows)).
+
+The world is ours alone at least until 1.0, and no other host implements it
+([How the plugin world grows](design.md#how-the-plugin-world-grows)), so nothing outside
+this repository has to follow its version yet.
 
 *Direction.* One version per contract, moving independently: the crates (semver), the WIT
 package, the log schema. Then say whether the world may reach a new major version while
@@ -337,21 +331,19 @@ add-on.
 `Secret` is `reveal()` and nothing else (`core/secret.rs:20`). A plugin granted a secret
 and a broad `http` scope can send that secret to any host its scope reaches.
 
-That a secret names the hosts it may go to is decided, and it is in the core before the
-freeze ([What is safe by default](design.md#what-is-safe-by-default)): a masked credential
-in a shell is written only into requests to those hosts, and a provider's key no longer
-follows a `base_url` pointed somewhere else.
+What it means is decided ([What is safe by default](design.md#what-is-safe-by-default)): a
+secret names the hosts it may go to, in the core before the freeze; one that names none
+goes nowhere; a secret in the keychain has its hosts beside its value, said by the person
+when they put it in, and one from the environment or a file says them in the agent file;
+and a host a secret does not name is offered to the person, never taken.
 
-The keychain makes the question sharper. A value kept there is the person's, shared by
-every agent file that names a secret alike, so a file someone else wrote can name it and a
-provider whose `base_url` is theirs.
-
-*Direction.* A defaulted `hosts()` on `Secret`, checked wherever a value is written into a
-request: the host for an add-on, a kernel's filter for a shell, a provider for its key.
-Decide what a secret that names no host means (it goes nowhere, or anywhere), and how the
-agent file states the hosts. For a secret in the keychain there is a second place to state
-them: beside the value, said by the person when they put it in, where no workspace's file
-can change them. Decide whether that is where they belong, at least for that kind.
+*Direction.* What is left is the form. A defaulted `hosts()` on `Secret`, checked wherever
+a value is written into a request: the host for an add-on, a kernel's filter for a shell, a
+provider for its key. Then how hosts are written: exact names only, or a
+[pattern](#b12-what-does-a-pattern-mean-for-good); the key by which a `[secrets.*]` entry
+lists them; how `corduroy secrets set` takes them and `corduroy secrets` shows them; and
+what becomes of an item put in before it had any, which now goes nowhere until the person
+says where.
 
 ### B10. In what order are prompt parts rendered?
 
@@ -382,7 +374,10 @@ added later as a new method.
 later (`**`, `?`, an escape) changes what an existing grant reaches.
 
 *Direction.* Declare the syntax final, or reserve the characters a later syntax would use
-by refusing them now.
+by refusing them now. A `service` grant is to be `service:method`
+([What an extension can reach](design.md#what-an-extension-can-reach)), so say with it what
+`:` means in a service's or a method's name (refused in both is the simplest), and that
+`sessions:*` and a bare `sessions` are the same grant.
 
 ### B13. Should two public types both be called `Scope`?
 
@@ -518,48 +513,6 @@ whether a person's identity is a field the front end puts in the payload of `mes
 
 ## C. Core: the event stream and the log
 
-### C3. In what order are commits from two threads delivered?
-
-Each is delivered by the thread that made it, so a listener may hear the later first
-([Design, open questions](design.md#open-questions)). One delivery queue would fix the
-order and change when a commit returns.
-
-It matters more than it did: sessions are to run side by side, each one thing at a time
-([What an extension can reach](design.md#what-an-extension-can-reach)), so two threads
-committing at once is the ordinary case.
-
-*Direction.* Decide which is the frozen behaviour. The least that fits the decision is
-that one session's commits are heard in order, and nothing is said about two sessions'.
-
-### C4. Do listeners run on the committing thread?
-
-Yes, inline, the async loop included; a slow listener holds the run.
-
-*Direction.* Decide with C3: a queue answers both.
-
-### C5. May a plugin miss an event because it was busy?
-
-An event a native tool emits while an add-on's call is in progress is not delivered to a
-listener in that same add-on. A per-plugin queue of undelivered events would close it.
-
-*Direction.* Decide whether delivery to add-ons is guaranteed, since automations depend on it.
-
-### C6. Can anything be kept out of the log?
-
-A sensitive value the model writes into a tool call is committed before any gate is asked.
-A filter on a batch before it is stored would be a property of the log.
-
-[What the record promises](design.md#what-the-record-promises) works from "everything that
-can be logged is logged" and leaves this open. Review is part of the purpose, so what is
-kept out is a product question: a private value in a prompt is also something the person
-may not want kept. Once in, a value leaves only with its whole session. A credential the
-person passed through to a shell is such a value as soon as the model prints it
-([What is safe by default](design.md#what-is-safe-by-default)).
-
-*Direction.* Decide whether the core offers a filter point, or whether a `Log` that wraps
-another is the answer (listeners would still see the value). Checkpoints of live output
-pass the same point, so one answer has to cover them.
-
 ### C8. Who may emit which topics?
 
 `events.emit` refuses `state/*` and nothing else. The session projection ignores events
@@ -625,16 +578,15 @@ came from has been removed.
 
 Not yet (design, "still to do"). Asks are answered per tool call (`Harness::answer`).
 
-One of the six guarantees waits on this: that a person approved what the agent loads
-([What is safe by default](design.md#what-is-safe-by-default)). The same section has two
-more things a person is offered while a call runs, a host the shell was refused and a
-credential the agent asked for. Neither holds the call: it fails, the person answers, and
-the model tries again.
+That it can is decided ([Events, gates and hooks](design.md#events-gates-and-hooks)): an
+ask at any declared point waits in the log for a person, and one `gate/answer` names a tool
+call, a load or a session's start. One of the six guarantees waits on its being built: that
+a person approved what the agent loads
+([What is safe by default](design.md#what-is-safe-by-default)).
 
-A third point is decided to ask a person: a session a gate asked about at `session/start`
-is recorded and waits, in the log, for the answer
-([What an extension can reach](design.md#what-an-extension-can-reach)). A session started
-from outside, which would run in the background, is the case.
+Two more things are offered to a person while a call runs, a host the shell was refused
+and a credential the agent asked for. Neither holds the call: it fails, the person answers,
+and the model tries again.
 
 What a yes at `plugin/load` attaches to is decided as well
 ([How people meet it](design.md#how-people-meet-it)): the grants and not the code, so the
@@ -642,10 +594,10 @@ person is asked about what a package newly wants and nothing else. A package tha
 more than its loader holds is asked of the person whatever the gates say, and the answer
 is kept at account level, where it also brings the package back after a restart.
 
-*Direction.* Decide whether an ask at any declared point can wait for a person, since that
-shapes `gate/answer`, which names a tool call today and has to name a session or a load as
-well; and whether a refusal the person may lift afterwards is an ask of that kind or an
-event of its own.
+*Direction.* What is left is the form: the fields by which `gate/answer` and
+`Harness::answer` name a load or a session, with old logs' answers, which name a tool call,
+still read; and whether a refusal the person may lift afterwards (the host, the credential)
+is an ask of that kind or an event of its own.
 
 ### C18. How many processes may use one log?
 
@@ -701,7 +653,9 @@ later changes what they promise.
 ### D1. Is a verdict allow, ask or deny, for good?
 
 `Verdict` is closed (`core/gate.rs:179`), and so is `verdict` in the world. Rewriting a
-call was decided against. "Allow, and remember" is left to the gate's own memory.
+call was decided against. Remembering is decided to be the gate's
+([Events, gates and hooks](design.md#events-gates-and-hooks)): a lasting answer is the
+person's, the gate that asked keeps it, and it needs no verdict of its own.
 
 *Direction.* Close it on purpose and say so, or leave room in both places.
 
@@ -739,18 +693,6 @@ point the gates are asked at; what it might break has not been thought through.
 Gates are asked in name order and the first to give the strictest kind is recorded.
 
 *Direction.* Confirm.
-
-### D5. Can a grant name one method of a service?
-
-The `service` capability is scoped by service name, so a grant gives every method.
-
-`sessions` is now the case for it. Starting a child, starting a session from outside,
-raising a signal and sending a session a message are four different things to allow, and
-one grant gives all four
-([What an extension can reach](design.md#what-an-extension-can-reach)).
-
-*Direction.* Decide whether the resource is `service` or `service:method` before grants are
-written against it.
 
 ### D10. What form does a tool's question to the person take?
 
@@ -885,10 +827,24 @@ to be a name in `Loops` that a session can be started with. It also draws the li
 from an add-on has to respect: only a loop acts, through the run's parts, and nobody
 outside the harness writes a tool call's trail.
 
+Where the choice stands (November 2026): undecided, leaning to the description. What speaks
+for it is that a person can read a loop before allowing it, that one can be put together
+while the agent runs, and that it is the form other workflow engines hold. What is not
+known is what it has to be able to say. The case to write it against is a loop that works
+until a set of tests passes, starting with a few of them and adding more as they pass:
+steps in a line, the line taken again until something is true, and perhaps a loop inside a
+loop. What every run keeps (its limits on turns, time and tokens, a stop) is the
+harness's whichever form is chosen, so neither form has to bound itself.
+
 *Direction.* Choose between the two forms left: a service the harness asks at each step, or
-a description of a loop that a native step carries out. Either way it is registered under a
-name by native code on the add-on's behalf. Models and kernels can still be "never"; one
-that does come is a service an extension registers in the core's registry.
+a description of a loop that a native step carries out. Write the test-driven pair
+([What the freeze waits on](design.md#what-the-freeze-waits-on)) as a description first,
+and see what it cannot say: every such thing is either a word the description gains, which
+is then frozen, or the reason to ask a service instead. A description may also be what a
+script returns, which keeps it readable and lets it be assembled. Either way it is
+registered under a name by native code on the add-on's behalf. Models and kernels can
+still be "never"; one that does come is a service an extension registers in the core's
+registry.
 
 ### E13. When is a value JSON text and when a typed record?
 
@@ -953,7 +909,9 @@ bare: the loop asks for `compaction`, the harness provides `sessions`, and an ad
 list any name in `provides`. `sessions` is about to grow: raising a signal, starting a
 session and sending one a message from anywhere
 ([What an extension can reach](design.md#what-an-extension-can-reach)), so its name and its
-methods' payloads are the first to settle.
+methods' payloads are the first to settle. Its methods' names are now written in grants: a
+`service` grant names `service:method`, and a bare name every method. Today `sessions` has
+one, `start`.
 
 *Direction.* Choose the prefix before 1.0, since the names in `provides` are inside built
 add-ons. Decide whether `compaction` and `sessions` move under it, what happens to an
@@ -1010,7 +968,11 @@ instance, and the restart limit, the queue of events and `activate` all assume i
 end, a while unused), since a JavaScript or Python instance holds 9 to 13 MB; which
 instance hears an event of a session nobody has called the add-on for yet; and whether
 restarts are counted for each instance or for the add-on
-([F3](#f3-does-the-restart-count-ever-reset)).
+([F3](#f3-does-the-restart-count-ever-reset)). An event that arrives while an add-on is in
+a call is to wait in a queue of the add-on's own
+([Events, gates and hooks](design.md#events-gates-and-hooks)): say whether that queue is
+each instance's, how many events it holds, and what becomes of them when the instance
+traps or the add-on is stopped.
 
 ## G. The loop and the extension tier
 
@@ -1033,24 +995,30 @@ program that embeds the harness. Make the ones that will grow growable: `Harness
 
 ### G6. What can a person answer to an ask?
 
-`Answer` is closed. "Always allow this tool" has no form.
+`Answer` is closed: allow, or deny with a reason. "Always allow this tool" has no form.
 
-A package's ask adds a case ([How people meet it](design.md#how-people-meet-it)): asked for
-one host, the person may want to allow that host or any, so an answer can be wider or
-narrower than what was asked.
+What an answer may be is decided
+([Events, gates and hooks](design.md#events-gates-and-hooks)): allow or deny, once or from
+now on, for exactly what was asked or within a pattern the person names, so wider or
+narrower than the question; a yes carries no words and a no carries a reason; and the gate
+that asked remembers a lasting answer.
 
 One thing waits on this. A small model refused a `write` by a person does the same thing
 with `bash`, and the second question shows a shell command with nothing to say that it
 follows a refusal ([what a small model does](local-model-findings.md)). That a question
-follows a refusal of the same target is to be said by the gate that asks, and not worked
-out by a front end, so that the terminal, the page and anything else show it alike. It is
-built together with the answers below, since a remembered refusal is the same mechanism as
-a remembered "always allow", pointing the other way.
+follows a refusal of the same target is said by the gate that asks, and not worked out by a
+front end, so that the terminal, the page and anything else show it alike. It is built
+together with the lasting answers, since a remembered refusal is the same mechanism as a
+remembered "always allow", pointing the other way.
 
-*Direction.* Decide with [D1](#d1-is-a-verdict-allow-ask-or-deny-for-good), and say whether
-an answer may change the scope that was asked for. Then the forms beyond allow and deny
-once ("always allow", "always deny", within a pattern), each kept by the gate's own memory,
-and with them the flag on a question that repeats what was refused.
+*Direction.* What is left is the form, built with
+[C15](#c15-can-a-person-answer-an-ask-at-pluginload): `Answer` made growable and given its
+cases; how `gate/answer` writes an answer's reach; what a pattern is matched against at
+each point (a tool's name, its input, a host, a path) and in which syntax
+([B12](#b12-what-does-a-pattern-mean-for-good)); where a gate keeps what it remembers (its
+`state`, which is the workspace's log, or with the person's other answers at account
+level), and how the person sees and takes back a lasting answer; and the field by which a
+gate flags a question that repeats what was refused.
 
 ### G7. Is `anyhow` part of the contract?
 
@@ -1149,13 +1117,25 @@ The loop sends the session's projection, which only a `compaction` event changes
 old tool results, trimming images, marking cache points and adding reminders are other ways
 to manage a context, and an extension can do none of them without writing to the log.
 
-What the model was shown can be read back: a request names its system prompt and its tool
-declarations by hash, and the log holds each once
-([What the record promises](design.md#what-the-record-promises)). That is the record of it,
-and says nothing on who may change it.
+That shaping the request is a step of its own is decided
+([Keeping within what the model holds](design.md#keeping-within-what-the-model-holds)):
+extensions register one as they register an `Operation`, it changes what is sent and not
+the record, and it is not a ninth kind of contribution.
 
-*Direction.* Decide whether shaping the request is a contribution of its own (a step
-between the projection and the provider) or always means a custom `Loop`.
+What the model was shown can be read back only in part: a request names its system prompt
+and its tool declarations by hash, and the log holds each once
+([What the record promises](design.md#what-the-record-promises)). The messages it carried
+are taken to be the projection, which stops being true once a step may change them.
+
+*Direction.* What is left is the form, before extensions write such steps: the registry
+and the trait, and what a step is handed (the core's `ModelRequest`, and what of the
+session); the order several run in, name order as for prompt parts and gates or an order
+they state ([B10](#b10-in-what-order-are-prompt-parts-rendered)); whether a step may change
+the system prompt and the tools or only the messages; what is recorded when a request was
+shaped (which steps ran, and a hash of what was sent, at the least), so that review does
+not take the projection for what the model saw; and whether an add-on can be one, through
+`handle-call` under a name the harness defines
+([E18](#e18-which-service-names-are-the-harnesss)), or only an extension.
 
 ### G20. What limits a run besides the number of turns?
 
@@ -1187,8 +1167,8 @@ hearing a log line is not what one layer of retries rests on.
 ### G22. Is the event stream the only way to observe a run?
 
 A front end, a metrics exporter and a tracer would all be listeners. Events carry a time
-and no duration, and a listener runs on the thread that committed
-([C4](#c4-do-listeners-run-on-the-committing-thread)).
+and no duration, and a listener runs on the thread that committed, which is decided to
+stay so ([Events, gates and hooks](design.md#events-gates-and-hooks)).
 
 *Direction.* Confirm it, and check that a trace exporter can be written as an extension
 from what events hold today.

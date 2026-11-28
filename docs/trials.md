@@ -86,8 +86,10 @@ corduroy secrets          # already there: the first workspace put it in
 *Look at:* whether sharing is what you want, or a surprise; what you would do for a second
 key (a work account): today that is a second name, `[secrets.work-anthropic]`. And the
 other side of sharing: any agent file that names `anthropic` gets the key, a file someone
-else wrote included, wherever its provider's `base_url` points. Would you rather say, when
-you put a key in, which hosts it may go to?
+else wrote included, wherever its provider's `base_url` points. That part is answered: the
+hosts a key may go to are said when it is put in, and kept beside it
+([What is safe by default](design.md#what-is-safe-by-default)); it is not built, so today
+the key still follows the file.
 
 > Found:
 
