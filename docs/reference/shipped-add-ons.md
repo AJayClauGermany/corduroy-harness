@@ -285,5 +285,5 @@ to look. Grants: `fs-read` on `dirs`, `plugins`, and whatever it should be able 
 | Where | What |
 | --- | --- |
 | [`examples/notes-js`](../../examples/notes-js/plugin.js), [`examples/notes-py`](../../examples/notes-py/notes.py) | the same notes plugin in JavaScript and Python (`note_add`, `note_list`, `note_remove`), built by `scripts/guests.sh` to `notes_js.wasm` and `notes_py.wasm`; grants `state`, `log`, `clock`, `random` |
-| [`sdk/js/script-host`](../../sdk/js/script-host) | one interpreter component that runs automations written as scripts, each with its own grants |
+| [`sdk/js/script-host`](../../sdk/js/script-host) | one interpreter component that runs automations written as scripts, each with its own grants; see [The script host](script-host.md) |
 | [`plugins/testbed`](../../plugins/testbed) | for the host's own tests only |
