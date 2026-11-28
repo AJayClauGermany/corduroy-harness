@@ -198,7 +198,11 @@ def check_srt(srt: str, path: str) -> None:
     """A successful shell must enter the sandbox, do trial I/O, and be refused a file
     outside the workspace, to read and to write. (What the tasks need there is tried
     afterwards, by `unusable`.)"""
-    with tempfile.TemporaryDirectory() as temporary:
+    # Not in the person's temporary directory, which is in the sandbox's reach: the file
+    # that must be refused would be allowed there.
+    runs = ROOT / ".bench-runs"
+    runs.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=runs, prefix="srt-check-") as temporary:
         root = Path(temporary).resolve()
         workspace = root / "workspace"
         workspace.mkdir()
