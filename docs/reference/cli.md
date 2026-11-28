@@ -15,7 +15,7 @@ corduroy [options] doctor          try the agent for real: its secrets, kernels 
 corduroy init [vendor] [--secrets keychain|env]
                                    write the default agent file to edit
 corduroy [options] secrets         list the agent's secrets and how each stands
-corduroy [options] secrets set [name]
+corduroy [options] secrets set [name] [--hosts a,b]
                                    put a secret's value in the keychain, typed without showing
 corduroy [options] secrets remove [name]
                                    take it out again
@@ -194,6 +194,15 @@ command prints. `name` may be left out where the file has one such secret. A sec
 another kind is refused, with where its value goes instead. The keychain is your own, not
 the workspace's: every agent of yours that names a secret alike reads the same item
 (service `corduroy`, account the secret's name).
+
+With `--hosts`, the hosts the value may be sent to are kept beside it, separated by commas,
+each a host name or a pattern over them (`--hosts api.anthropic.com`, `--hosts
+"*.example.org,api.example.com"`); `--hosts ""` names none. A provider, an MCP server or
+an add-on's request is then refused the secret for any other host, whatever the agent file
+that names it says, and `corduroy secrets` lists where it goes. A value put in without
+`--hosts` is sent as before. This is a
+[prototype](../prototypes.md#x1-a-secret-names-the-hosts-it-may-go-to) of a decision whose
+form is still open, and may change.
 
 **`secrets remove [name]`** Take that value out of the keychain, and say whether there was
 one.

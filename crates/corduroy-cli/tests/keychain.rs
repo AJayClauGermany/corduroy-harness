@@ -86,6 +86,68 @@ fn agent(address: SocketAddr, secret: &str) -> String {
 }
 
 #[test]
+fn a_key_put_in_with_its_hosts_is_sent_to_no_other_whatever_the_agent_file_says() {
+    let workspace = scratch("cli-keychain-hosts");
+    let (address, seen) = endpoint("Hello.").unwrap();
+    fs::write(
+        workspace.join("corduroy.toml"),
+        agent(address, "kind = \"keychain\""),
+    )
+    .unwrap();
+    let (standard, keychain) = with_keychain();
+    let set = |hosts: &str| {
+        corduroy(
+            &standard,
+            &workspace,
+            &["secrets", "set", "token", "--hosts", hosts],
+            "sk-typed\n",
+        )
+    };
+
+    // The person says where the key goes when they put it in: not where this file points.
+    let put = set("api.openai.com, *.example.org");
+    assert!(put.succeeded(), "{}", put.all());
+    assert_eq!(
+        put.said,
+        "kept `token` in a keychain in memory, to be sent only to api.openai.com, \
+         *.example.org\n"
+    );
+    assert_eq!(keychain.items(), ["token", "token.hosts"]);
+    let listed = corduroy(&standard, &workspace, &["secrets"], "");
+    assert_eq!(
+        listed.said,
+        "✓ token (keychain, for provider plan): in a keychain in memory, sent only to \
+         api.openai.com, *.example.org\n"
+    );
+    let ran = corduroy(&standard, &workspace, &["run", "say hello"], "");
+    assert!(!ran.succeeded(), "{}", ran.all());
+    assert!(
+        ran.all()
+            .contains("secret `token` does not name `127.0.0.1` among the hosts it may be sent to"),
+        "{}",
+        ran.all()
+    );
+    assert!(seen.lock().unwrap().is_empty());
+
+    // Said for this host, it is sent there.
+    assert!(set("127.0.0.1").succeeded());
+    let ran = corduroy(&standard, &workspace, &["run", "say hello"], "");
+    assert!(ran.succeeded(), "{}", ran.all());
+    assert_eq!(seen.lock().unwrap()[0].authorization, "Bearer sk-typed");
+
+    // What is no host is refused, and removing the value removes its hosts.
+    let bad = set("https://api.openai.com/v1");
+    assert!(
+        !bad.succeeded() && bad.all().contains("is no host"),
+        "{}",
+        bad.all()
+    );
+    let removed = corduroy(&standard, &workspace, &["secrets", "remove", "token"], "");
+    assert!(removed.succeeded(), "{}", removed.all());
+    assert_eq!(keychain.items(), Vec::<String>::new());
+}
+
+#[test]
 fn a_key_typed_into_the_keychain_is_what_the_provider_sends_and_is_shown_nowhere() {
     let workspace = scratch("cli-keychain-run");
     let (address, seen) = endpoint("Hello.").unwrap();
@@ -112,7 +174,8 @@ fn a_key_typed_into_the_keychain_is_what_the_provider_sends_and_is_shown_nowhere
     assert!(listed.succeeded(), "{}", listed.all());
     assert_eq!(
         listed.said,
-        "✓ token (keychain, for provider plan): in a keychain in memory\n"
+        "✓ token (keychain, for provider plan): in a keychain in memory, sent wherever an \
+         agent file sends it (no hosts were said with `--hosts`)\n"
     );
 
     // A run sends it, and reads the keychain once however many requests it makes.
@@ -123,7 +186,8 @@ fn a_key_typed_into_the_keychain_is_what_the_provider_sends_and_is_shown_nowhere
     let requests = seen.lock().unwrap().clone();
     assert_eq!(requests[0].authorization, "Bearer sk-typed");
     assert_eq!(requests[0].body["model"], "gpt-6-fake");
-    assert_eq!(keychain.reads(), before + 1);
+    // Once for the value, and once for the hosts it may go to, which are an item beside it.
+    assert_eq!(keychain.reads(), before + 2);
 
     // The value is in nothing the command printed, and not in the log.
     let log = corduroy(&standard, &workspace, &["log"], "");

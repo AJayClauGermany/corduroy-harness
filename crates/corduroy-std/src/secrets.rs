@@ -13,9 +13,9 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use corduroy_keychain::Keychain;
+use corduroy_keychain::{Keychain, hosts_item};
 
-use crate::extension::{Asked, chatgpt_in, env_variable, keychain_item};
+use crate::extension::{Asked, chatgpt_in, env_variable, host_pattern, keychain_item};
 
 /// How a person puts in, and takes out, the value of one kind of secret.
 pub trait Keep: Send + Sync {
@@ -33,6 +33,25 @@ pub trait Keep: Send + Sync {
     ///
     /// Says why it is still there.
     fn remove(&self, asked: &Asked<'_>) -> Result<bool, String>;
+
+    /// Keep `hosts` beside the value of the entry `asked`, as the hosts it may be sent to:
+    /// each a host name or a pattern over them, as an `http` grant's are. None at all means
+    /// the value goes nowhere.
+    ///
+    /// A prototype of where a secret's hosts are said when they are not in the agent file
+    /// (B9 in `docs/open-questions.md`). A kind that keeps none says so, which is the
+    /// default.
+    ///
+    /// # Errors
+    ///
+    /// Says why they are not kept.
+    fn bind(&self, asked: &Asked<'_>, hosts: &[String]) -> Result<(), String> {
+        Err(format!(
+            "`{}` is of a kind that keeps no hosts beside its value ({} named)",
+            asked.name,
+            hosts.len()
+        ))
+    }
 }
 
 /// Keeping the value of a `[secrets.<name>]` entry of the kind
@@ -65,7 +84,21 @@ impl Keep for InKeychain {
     }
 
     fn remove(&self, asked: &Asked<'_>) -> Result<bool, String> {
-        self.keychain.remove(keychain_item(asked)?)
+        let item = keychain_item(asked)?;
+        // The hosts go with the value they were said for.
+        self.keychain.remove(&hosts_item(item))?;
+        self.keychain.remove(item)
+    }
+
+    fn bind(&self, asked: &Asked<'_>, hosts: &[String]) -> Result<(), String> {
+        if let Some(bad) = hosts.iter().find(|host| !host_pattern(host)) {
+            return Err(format!(
+                "`{bad}` is no host: a host is a name such as api.example.com, without a \
+                 scheme, a port or a path"
+            ));
+        }
+        self.keychain
+            .set(&hosts_item(keychain_item(asked)?), &hosts.join("\n"))
     }
 }
 
@@ -98,12 +131,30 @@ pub fn env_state(asked: &Asked<'_>) -> State {
 pub fn keychain_state(asked: &Asked<'_>, keychain: &dyn Keychain) -> State {
     let item = keychain_item(asked)?;
     match keychain.get(item)? {
-        Some(_) => Ok(format!("in {}", keychain.name())),
+        Some(_) => Ok(format!(
+            "in {}, {}",
+            keychain.name(),
+            going(keychain.get(&hosts_item(item))?.as_deref())
+        )),
         None => Err(format!(
             "{} holds nothing as `{item}`: put the value there with `corduroy secrets set {}`",
             keychain.name(),
             asked.name
         )),
+    }
+}
+
+/// Where a value kept in a keychain may be sent, as the lines kept beside it say.
+fn going(hosts: Option<&str>) -> String {
+    let Some(hosts) = hosts else {
+        return "sent wherever an agent file sends it (no hosts were said with `--hosts`)"
+            .to_owned();
+    };
+    let hosts: Vec<&str> = hosts.lines().filter(|line| !line.is_empty()).collect();
+    if hosts.is_empty() {
+        "sent nowhere (it names no host)".to_owned()
+    } else {
+        format!("sent only to {}", hosts.join(", "))
     }
 }
 
@@ -180,6 +231,54 @@ mod tests {
     }
 
     #[test]
+    fn a_secret_from_the_environment_names_its_hosts_in_the_agent_file() {
+        use corduroy_harness::core::{App, SECRETS, Secrets};
+
+        use crate::extension::{ENV_SECRET, Extensions, hosts_said};
+
+        let places = Places::new("/work".into(), None);
+        let named = json!({"env": "CORDUROY_TEST_UNSET", "hosts": ["api.example.com", "*.eu"]});
+        let entry = asked("key", &named, &places);
+
+        let hosts = hosts_said(&entry).unwrap().unwrap();
+        assert!(hosts.permits("api.example.com") && hosts.permits("x.eu"));
+        assert!(!hosts.permits("example.com"));
+        // Saying nothing is not naming none, and what is no host is refused.
+        let unsaid = json!({"env": "X"});
+        assert_eq!(hosts_said(&asked("key", &unsaid, &places)), Ok(None));
+        let none = json!({"env": "X", "hosts": []});
+        assert!(
+            hosts_said(&asked("key", &none, &places))
+                .unwrap()
+                .unwrap()
+                .is_empty()
+        );
+        for bad in [
+            json!(["https://a.example"]),
+            json!(["a.example:443/x"]),
+            json!("a"),
+        ] {
+            let config = json!({"env": "X", "hosts": bad});
+            assert!(
+                hosts_said(&asked("key", &config, &places)).is_err(),
+                "{config}"
+            );
+        }
+
+        // The secret the kind builds is held to them.
+        let mut app = App::new();
+        let secrets = Arc::new(Secrets::new());
+        app.provide(SECRETS, Arc::clone(&secrets)).unwrap();
+        let built = Extensions::builtin()
+            .build(ENV_SECRET, &entry)
+            .unwrap()
+            .unwrap();
+        app.plugin(built);
+        assert!(secrets.may_go("key", "api.example.com").is_ok());
+        assert!(secrets.may_go("key", "elsewhere.example").is_err());
+    }
+
+    #[test]
     fn a_value_is_put_in_the_keychain_seen_there_and_taken_out() {
         let places = Places::new("/work".into(), None);
         let none = json!({});
@@ -197,8 +296,23 @@ mod tests {
         assert_eq!(keychain.items(), ["anthropic"]);
         assert_eq!(
             keychain_state(&entry, &*keychain).unwrap(),
-            "in a keychain in memory"
+            "in a keychain in memory, sent wherever an agent file sends it (no hosts were said \
+             with `--hosts`)"
         );
+        // The hosts it may go to are kept beside it, and go when it does.
+        keep.bind(&entry, &["api.anthropic.com".to_owned()])
+            .unwrap();
+        assert_eq!(keychain.items(), ["anthropic", "anthropic.hosts"]);
+        assert_eq!(
+            keychain_state(&entry, &*keychain).unwrap(),
+            "in a keychain in memory, sent only to api.anthropic.com"
+        );
+        keep.bind(&entry, &[]).unwrap();
+        assert_eq!(
+            keychain_state(&entry, &*keychain).unwrap(),
+            "in a keychain in memory, sent nowhere (it names no host)"
+        );
+        assert!(keep.bind(&entry, &["https://x".to_owned()]).is_err());
         assert!(keep.remove(&entry).unwrap());
         assert!(!keep.remove(&entry).unwrap());
 

@@ -1635,7 +1635,8 @@ mod tests {
         keychain.set("token", "t0ken").unwrap();
         let standard = Standard::new().with_keychain(Arc::<Memory>::clone(&keychain));
         let agent = assemble_from(&AgentFile::parse(&kept).unwrap(), &places, &standard).unwrap();
-        assert_eq!(keychain.reads(), 1);
+        // Read twice: the hosts it may go to, kept beside it, and then the value.
+        assert_eq!(keychain.reads(), 2);
         let [unstarted] = agent.failed.as_slice() else {
             panic!(
                 "only the server should not have started: {:?}",
