@@ -1240,6 +1240,33 @@ What has to be decided:
    embeds the harness and drives runs needs a C interface to `Harness`, which is a
    different surface from the one an extension is handed.
 
+A prototype exists to study it with: `crates/corduroy-cabi`, a header, an extension in C
+and tests that run it, covering tools, services, gates, prompt parts, secrets, listeners,
+effects and a model provider that answers through a completion, linked in or loaded from
+a shared library. It decides nothing, ships
+in nothing, and [what it found](c-extensions.md) adds to the list:
+
+6. *Who vouches for a loaded library.* The prototype does both: linked, the `unsafe`
+   declaration of the entry function is written by whoever builds the command; loaded,
+   it is found inside the one crate, but loading is still `unsafe` to call, since a wrong
+   file corrupts the process. A command that forbids `unsafe` can load an extension only
+   if the crate offers a safe function and so vouches for a file it has not seen. And a
+   loaded library is never unloaded, so unplugging it reverts what it registered and
+   leaves its code in the process.
+7. *Whether a call that blocks is enough.* The aim is systems languages and the
+   languages of a platform (C, C++, Zig, Swift, Go, C#), for code against a platform's
+   own interfaces, and not scripting languages, which stay add-ons. For those a blocking
+   call is enough. What is untried is a platform interface that must be called on one
+   thread or answers through its own callback, which may want tools answered through a
+   completion, as the prototype's provider is.
+8. *Which misuse the host refuses.* A context kept after `apply`, a handle after `drop`, a
+   completion completed twice: each is memory corruption today, and each can be made a
+   refusal for the price of a check.
+9. *Where the text forms live.* A model request and reply had to be given a JSON form for
+   the prototype, and a tool's content blocks and a session have none it could use.
+10. *How a typed service crosses.* What an extension provides to others is an `Arc<T>`
+    found by type, so only the registries the mirror has a function for can be reached.
+
 *Direction.* Study it before deciding, with the questions above as the brief. The
 recommendation to argue with: in the process, linked at build time, covering tools,
 services, gates, prompt parts, secrets and listeners first; the header generated from the
