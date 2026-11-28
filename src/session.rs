@@ -195,6 +195,50 @@ fn read_all(
 /// Topic of the event that stands a summary in for the messages before a point.
 pub const COMPACTION: &str = "compaction";
 
+/// How many sessions a branch may lead back through: a branch of a branch, and so on.
+const MAX_BRANCHES: usize = 16;
+
+/// Where the session whose events are `own` branched from another, if it did: the session
+/// and the event of it that the branch begins after, as its `session/start` says (`parent`
+/// and `from`).
+///
+/// A prototype (C14 in `docs/open-questions.md`; see `docs/prototypes.md`).
+fn branch_of(own: &[Event]) -> Option<(SessionId, EventId)> {
+    let start = own
+        .iter()
+        .find(|event| event.topic == SESSION_START && event.source == Source::Host)?;
+    let payload: Value = serde_json::from_str(&start.payload).ok()?;
+    let parent = payload.get("parent")?.as_str()?;
+    let from = payload.get("from")?.as_u64()?;
+    Some((SessionId::new(parent), EventId::new(from)))
+}
+
+/// Bring `state` to what `session` holds in `events`, up to and including the event `upto`
+/// if one is given. A session that branched from another begins as that one stood at the
+/// event it branched after, with nothing under way.
+fn project_session(
+    events: &EventStream,
+    session: &SessionId,
+    upto: Option<EventId>,
+    state: &mut State,
+    depth: usize,
+) -> Result<()> {
+    let within = |event: &Event| upto.is_none_or(|upto| event.id <= upto);
+    let own = read_all(events, Query::first(PAGE).session(session.clone()), within)?;
+    if let Some((from, at)) = branch_of(&own) {
+        anyhow::ensure!(
+            depth < MAX_BRANCHES,
+            "session `{session}` is a branch more than {MAX_BRANCHES} sessions deep"
+        );
+        project_session(events, &from, Some(at), state, depth.saturating_add(1))?;
+        state.begin_branch();
+    }
+    for event in &own {
+        state.project(event)?;
+    }
+    Ok(())
+}
+
 /// What the model is told about a summary that replaced the start of the conversation.
 const SUMMARY_INTRO: &str = "The start of this conversation was condensed to save space. This \
                              summary takes its place:";
@@ -584,6 +628,74 @@ impl Sessions {
             // Stored while the table is locked, so two callers cannot both start the same id.
             // A listener for `session/start` must therefore not come back to this table.
             self.events.emit(info.start())?;
+            let id = info.id.clone();
+            known.insert(
+                id.clone(),
+                Known {
+                    info,
+                    journal: None,
+                },
+            );
+            Ok(id)
+        })
+    }
+
+    /// Start a session called `id` as a branch of `from`: it begins with the conversation
+    /// `from` held once its event `at` was stored, and goes its own way from there. `from`
+    /// is recorded as its parent, and is not changed.
+    ///
+    /// A prototype (C14 in `docs/open-questions.md`; see `docs/prototypes.md`). A branch
+    /// begins only where the conversation is whole: after the model's answer, with no tool
+    /// call unanswered, or before anything was said.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HarnessError::DuplicateSession`] if `id` is taken,
+    /// [`HarnessError::UnknownSession`] if `from` does not exist, [`HarnessError::Run`] if
+    /// `at` is no event of `from` or the conversation is not whole there, or
+    /// [`HarnessError::Log`] if the start could not be stored.
+    pub fn branch(
+        &self,
+        id: SessionId,
+        from: &SessionId,
+        at: EventId,
+    ) -> Result<SessionId, HarnessError> {
+        let of_session = self
+            .events
+            .get(at)
+            .is_some_and(|event| event.session.as_ref() == Some(from));
+        if !of_session && self.known.with(|known| known.contains_key(from)) {
+            return Err(HarnessError::Run(format!(
+                "event {at} is not an event of session `{from}`"
+            )));
+        }
+        let mut state = State::new();
+        if of_session {
+            project_session(&self.events, from, Some(at), &mut state, 0)
+                .map_err(|error| HarnessError::Run(error.to_string()))?;
+        }
+        if let Some(open) = state.open_at_a_branch() {
+            return Err(HarnessError::Run(format!(
+                "session `{from}` cannot be branched after event {at}: {open}"
+            )));
+        }
+        let info = SessionInfo {
+            id,
+            parent: Some(from.clone()),
+            task: None,
+        };
+        self.known.with(|known| {
+            if known.contains_key(&info.id) {
+                return Err(HarnessError::DuplicateSession(info.id));
+            }
+            if !known.contains_key(from) {
+                return Err(HarnessError::UnknownSession(from.clone()));
+            }
+            let payload = json!({"parent": from.as_str(), "from": at.get()});
+            let start = Draft::new(Source::Host, SESSION_START)
+                .session(info.id.clone())
+                .payload(payload.to_string());
+            self.events.emit(start)?;
             let id = info.id.clone();
             known.insert(
                 id.clone(),
@@ -1492,9 +1604,7 @@ impl Journal {
     /// Fails if a `message` or tool-call event of the session cannot be decoded.
     pub fn new(id: SessionId, events: Arc<EventStream>) -> Result<Self> {
         let mut state = State::new();
-        for event in read_all(&events, Query::first(PAGE).session(id.clone()), |_| true)? {
-            state.project(&event)?;
-        }
+        project_session(&events, &id, None, &mut state, 0)?;
         Ok(Self {
             id,
             events,
@@ -2071,6 +2181,27 @@ impl Journal {
 }
 
 impl State {
+    /// Begin a branch from the session projected so far: its conversation is kept, and
+    /// nothing of a run of it is under way or counted.
+    fn begin_branch(&mut self) {
+        (self.unfinished, self.restarts, self.ended) = (false, 0, None);
+        (self.written, self.used, self.overflowed) = (0, Used::NONE, false);
+    }
+
+    /// Why a branch cannot begin from the session as it stands, if it cannot: a call is
+    /// unanswered or waits, or the conversation ends with something the model has not
+    /// answered.
+    fn open_at_a_branch(&self) -> Option<&'static str> {
+        if !self.calls.is_empty() {
+            return Some("a tool call has no result there yet");
+        }
+        let answered = self
+            .messages
+            .last()
+            .is_none_or(|last| last.role == Role::Assistant);
+        (!answered).then_some("the model has not answered what was said there yet")
+    }
+
     /// Bring the projection up to date with a batch committed as `ids`.
     fn catch_up(&mut self, ids: &[EventId], batch: Batch) {
         for (position, message) in batch.messages {

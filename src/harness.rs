@@ -18,9 +18,9 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use corduroy_core::call::Serve;
 use corduroy_core::sync::Lock;
 use corduroy_core::{
-    App, ContextError, EventStream, FiberId, GATES, Gates, HTTP, HttpClients, LogError, MODELS,
-    Message, ModelInfo, ModelRequest, Models, PROMPTS, Plugin, Prompts, Registry, Role, SECRETS,
-    SERVICES, Secrets, Services, SessionId, TOOLS, ToolCall, ToolResult, Tools,
+    App, ContextError, EventId, EventStream, FiberId, GATES, Gates, HTTP, HttpClients, LogError,
+    MODELS, Message, ModelInfo, ModelRequest, Models, PROMPTS, Plugin, Prompts, Registry, Role,
+    SECRETS, SERVICES, Secrets, Services, SessionId, TOOLS, ToolCall, ToolResult, Tools,
 };
 #[cfg(feature = "std")]
 use corduroy_core::{KERNELS, Kernels};
@@ -751,6 +751,21 @@ impl Harness {
         parent: Option<&SessionId>,
     ) -> Result<SessionId, HarnessError> {
         self.sessions.start(id.into(), parent)
+    }
+
+    /// Start a session called `id` as a branch of `from`, beginning with the conversation
+    /// `from` held once its event `at` was stored. A prototype: see [`Sessions::branch`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Sessions::branch`].
+    pub fn branch_session(
+        &self,
+        id: impl Into<SessionId>,
+        from: &SessionId,
+        at: EventId,
+    ) -> Result<SessionId, HarnessError> {
+        self.sessions.branch(id.into(), from, at)
     }
 
     /// Every session, in order of id.
