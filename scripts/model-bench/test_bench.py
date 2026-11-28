@@ -102,8 +102,13 @@ class Credentials(unittest.TestCase):
         self.assertIn("/private/var/select", files["allowRead"])
         self.assertIn("/Library/Developer/CommandLineTools", files["allowRead"])
         self.assertTrue(policy["network"]["allowLocalBinding"])
-        written = [entry["path"] for entry in files["allowWrite"]]
+        written = [entry["path"] for entry in files["allowWrite"] if isinstance(entry, dict)]
         self.assertEqual(written, [str(trial.ws), str(trial.scratch)])
+        # The links at the root are followed, and nothing behind them is opened by that.
+        for link in ("/va[r]", "/tm[p]", "/et[c]"):
+            self.assertIn(link, files["allowRead"])
+        for whole in ("/var", "/tmp", "/etc", "/private/var", "/private/etc", "/private/tmp"):
+            self.assertNotIn(whole, files["allowRead"])
         self.assertNotIn(str(trial.private), json.dumps(files["allowRead"]))
         self.assertEqual(kernel["prefix"][0], "/test/srt")
         for name in ("HOME", "CLAUDE_CODE_TMPDIR"):

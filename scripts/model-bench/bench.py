@@ -62,6 +62,8 @@ def tool_places() -> tuple[str, ...]:
         "/private/var/db/xcode_select_link",
         "/Library/Developer/CommandLineTools",
         "/private/etc/ssl",
+        # `git` stops at a system configuration it may not look for; there is none to find.
+        "/private/etc/gitconfig",
         "/private/etc/localtime",
         "/private/var/db/timezone",
     ]
@@ -109,6 +111,29 @@ def developer_dir() -> str:
         return ""
 
 
+# `/var`, `/tmp` and `/etc` are links into `/private`, and with everything denied a path
+# through one cannot even be followed (`/var/select`, `/etc/gitconfig`, `/var/folders/...`).
+# Each pattern matches the link alone, nothing beneath it: SRT turns a pattern into a rule
+# for exactly that path, where a plain entry would open the whole directory behind the link.
+LINKS = ["/va[r]", "/tm[p]", "/et[c]"]
+
+
+@functools.cache
+def own_temporary() -> str:
+    """The person's own temporary directory (`/var/folders/.../T`). `cc` and the stubs in
+    /usr/bin write there whatever `TMPDIR` says, so behind the wall it is in reach: what
+    other programs of the person's keep there can be read, and trials can leave each other
+    files in it. Nothing else of the person's is."""
+    try:
+        said = subprocess.run(
+            ["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"],
+            capture_output=True, text=True, timeout=10, check=False,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return os.path.realpath(said) if said.startswith("/") else ""
+
+
 def srt_env(scratch: Path) -> dict:
     """What `srt` is started with for a sandboxed shell: a home and a temporary directory
     of the trial's own, since the person's are behind the wall (`git` stops at a
@@ -152,14 +177,17 @@ def srt_prefix(
     runtime = ["/bin", "/usr/bin", "/usr/lib", "/usr/libexec", "/usr/share", "/System/Library",
                "/dev/null", "/dev/urandom", "/private/etc/passwd", "/private/etc/group"]
     written = [workspace, *([scratch] if scratch else [])]
+    shared = [own_temporary()] if own_temporary() else []
     settings.write_text(json.dumps({
         "network": {"allowedDomains": [], "deniedDomains": ["*"], "allowLocalBinding": True},
         "filesystem": {
             "denyRead": ["/", state],
             "allowRead": runtime
+            + LINKS
             + list(tool_places())
+            + shared
             + [literal(path) for path in (*written, *read_only)],
-            "allowWrite": [literal(path) for path in written],
+            "allowWrite": [literal(path) for path in written] + shared,
             "denyWrite": ["/tmp/claude", state],
         },
     }))
