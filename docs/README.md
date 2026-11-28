@@ -100,6 +100,8 @@ Working on corduroy itself:
 - [Open questions before 1.0](open-questions.md): every decision still to make before the
   core is frozen. Questions and directions only; a decided one moves to the page its answer
   belongs on.
+- [Extensions through C](c-extensions.md): what a prototype of a C interface for
+  extensions found. A record for one open question (G23), promised to nobody.
 - [Trials](trials.md): the open questions that can be tried both ways today, with the
   commands for each way and a line for what you found.
 - [What a small local model does in the harness](local-model-findings.md): the command

@@ -1240,6 +1240,25 @@ What has to be decided:
    embeds the harness and drives runs needs a C interface to `Harness`, which is a
    different surface from the one an extension is handed.
 
+A prototype exists to study it with: `crates/corduroy-cabi`, a header, an extension in C
+and tests that run it, covering tools, services, gates, prompt parts, secrets, listeners,
+effects and a model provider that answers through a completion. It decides nothing, ships
+in nothing, and [what it found](c-extensions.md) adds to the list:
+
+6. *Who finds the symbol.* Linked at build time, the `unsafe` declaration of an
+   extension's entry function is written by whoever builds the command, outside the one
+   crate. Loading, or generating the declaration, keeps it inside.
+7. *Whether a call that blocks is enough.* It is for C. A language whose interpreter has
+   one thread cannot be called from any thread, and would need every callback answered
+   through a completion, as the prototype's provider is.
+8. *Which misuse the host refuses.* A context kept after `apply`, a handle after `drop`, a
+   completion completed twice: each is memory corruption today, and each can be made a
+   refusal for the price of a check.
+9. *Where the text forms live.* A model request and reply had to be given a JSON form for
+   the prototype, and a tool's content blocks and a session have none it could use.
+10. *How a typed service crosses.* What an extension provides to others is an `Arc<T>`
+    found by type, so only the registries the mirror has a function for can be reached.
+
 *Direction.* Study it before deciding, with the questions above as the brief. The
 recommendation to argue with: in the process, linked at build time, covering tools,
 services, gates, prompt parts, secrets and listeners first; the header generated from the
