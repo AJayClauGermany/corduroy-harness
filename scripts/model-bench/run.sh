@@ -38,8 +38,12 @@ build() {
 {
   printf '\n==> %s: %s on %s %s\n' "$(date '+%Y-%m-%d %H:%M')" \
     "$(git rev-parse --short HEAD 2>/dev/null || echo '?')" "$(uname -s)" "$(uname -m)"
-  build cargo build --release -p corduroy-cli
-  build cargo plugins
+  # Where the command and its add-ons were built beforehand (the workflow does, as the
+  # runner's user, before it becomes root), CORDUROY_BENCH_BUILT says so.
+  if [ -z "${CORDUROY_BENCH_BUILT:-}" ]; then
+    build cargo build --release -p corduroy-cli
+    build cargo plugins
+  fi
   # A laptop left alone goes to sleep; `caffeinate` (macOS) keeps it awake while this runs.
   awake=()
   command -v caffeinate >/dev/null && awake=(caffeinate -i)
