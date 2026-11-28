@@ -39,11 +39,12 @@ The rules a prototype is held to:
 | [X6](#x6-a-calls-scope-carried-to-another-thread) | [B17](open-questions.md#b17-does-the-call-scope-follow-work-to-another-thread) | A handle that takes what a thread serves to another thread | `corduroy-core` (`call`) |
 | [X7](#x7-what-a-run-used-on-its-end) | [G17](open-questions.md#g17-where-is-usage-added-up), with [T8](trials.md#t8-who-adds-up-what-a-run-used) | A total of what a run's requests used, on its `turn/end` | `src/session.rs` |
 | [X8](#x8-a-session-that-branches-from-another) | [C14](open-questions.md#c14-can-a-session-branch-from-an-earlier-point) | A session that begins where another stood at an event | `src/session.rs` |
+| [X9](#x9-an-ask-that-reaches-a-person-anywhere) | [C15](open-questions.md#c15-can-a-person-answer-an-ask-at-pluginload), [E16](open-questions.md#e16-are-loads-by-a-plugin-durable) | An ask at `plugin/load` or `session/start` that is recorded, answered by a person, and found answered when the same is asked for again | `corduroy-core` (`gate`), `src/asks.rs`, `corduroy-wasm` |
 
 [Built from decisions](#built-from-decisions-and-what-that-left-open) lists three things
 that were decided and are now built, each of which made a choice an open question still has
-to confirm. [What waits on a decision](#what-waits-on-a-decision) lists the questions that
-could be tried next, and what has to be said before each can be.
+to confirm. [What waits on a decision](#what-waits-on-a-decision) says what has to be
+chosen before the next question can be tried.
 
 ---
 
@@ -261,11 +262,11 @@ scripts/trusted-base.sh
 
 | | Lines | | Crates from outside |
 | --- | --- | --- | --- |
-| The core | 3016 | The core | 0 |
-| The WebAssembly host | 2171 | The loop without add-ons | 19 |
-| The loop | 5011 | The loop with add-ons | 110 |
+| The core | 3040 | The core | 0 |
+| The WebAssembly host | 2188 | The loop without add-ons | 19 |
+| The loop | 5255 | The loop with add-ons | 110 |
 | The plugin world | 230 | | |
-| Together | 10 428 | | |
+| Together | 10 713 | | |
 
 **What it found.**
 
@@ -274,7 +275,7 @@ scripts/trusted-base.sh
    with each of its releases and is not ours to hold down.
 2. *The loop is the largest part,* at close to half the lines, and `src/session.rs` alone
    is a sixth of the whole. What this page describes added to it: the three decided
-   items and the prototypes came to some 550 lines of the trusted base, of 9871 before.
+   items and the prototypes came to some 840 lines of the trusted base, of 9871 before.
 3. *What counts has to be said before a figure means anything.* The measure leaves out the
    store (`corduroy-jsonl`), which keeps the record; the standard extensions, which hold
    the host's authority; and the provider library. Each is arguably trusted.
@@ -317,8 +318,9 @@ no orchestrators", which the decision names as a gate's to say.
    is started with one.
 2. *The starter is always a plugin.* The person's own session is there before any gate is
    loaded, and a session started from outside is not built, so `starter` has one form.
-3. *An ask has nowhere to wait.* It is a denial, with a reason that says so. It is the
-   same gap as at `plugin/load`, and the same decision closes both (below).
+3. *An ask had nowhere to wait.* It was a denial, with a reason that says so, as at
+   `plugin/load`. [X9](#x9-an-ask-that-reaches-a-person-anywhere) gives both points one
+   way to reach a person, where the host takes answers.
 4. *The decision is recorded without a call.* A `gate/decision` has named a tool call
    until now (`id`, `tool`). This one names a session, and readers that take `id` for
    granted (the report's "waited on" list, for an ask) have to learn the other shape.
@@ -461,6 +463,88 @@ each going its own way.
 own. Where a branch may begin. What a branch keeps of what its parent was started with.
 The command, if there is to be one.
 
+## X9. An ask that reaches a person, anywhere
+
+*For:* [C15](open-questions.md#c15-can-a-person-answer-an-ask-at-pluginload), with
+[E16](open-questions.md#e16-are-loads-by-a-plugin-durable) and
+[G6](open-questions.md#g6-what-can-a-person-answer-to-an-ask). Decided
+([Events, gates and hooks](design.md#events-gates-and-hooks)): an ask at any declared point
+is recorded and waits in the log for a person, and one `gate/answer` names whichever it
+was. Open: what the call that led to the ask does meanwhile.
+
+**Which form, and why this one first.** There are two: the call waits, as a tool call a
+gate asked about does, or it fails and is made again once the person has answered. This is
+the second. It was chosen to be tried first (28 November 2026) because it is the smaller,
+with the first still wanted if a revised design allows it: other harnesses wait here. So
+the question is not answered, and what follows is evidence for it.
+
+**The form tried.**
+
+- *In the core,* a trait, `Asks`, and two functions on `Gates`: a host says where asks are
+  put (`answered_through`), and whoever got an ask from the gates hands it over
+  (`settle`). The core records nothing itself.
+- *In the harness,* asks kept in the log (`src/asks.rs`). A gate's ask at `plugin/load` or
+  `session/start` is recorded as a `gate/decision` with the verdict `ask` and an `ask` id,
+  and what was asked about is refused, with a reason that names the id and says a person
+  was asked. `Harness::open_asks` lists the asks that wait, and `Harness::answer_ask`
+  records the person's answer as a `gate/answer` naming the id.
+- *Asked for again,* the same request finds its answer: allowed, it goes through; refused,
+  it fails with the person's reason. Either way a `gate/decision` records that the answer
+  was used. An answer is for one asking.
+- *An ask's id* is a hash of the point and the request, so "the same" is the same request
+  to the letter.
+- *Only a host that says so takes answers* (`Harness::answers_asks`). The `corduroy`
+  command does not, so for it an ask at these points is still a denial.
+- *A tool call of the model's is untouched:* an ask about one still makes the run wait.
+
+**Try it.** `tests/asks.rs`: a gate that asks about every session a sub-agent would start,
+and one that asks about every load.
+
+**What building it answered.**
+
+- One mechanism serves both points, and would serve a third. The WebAssembly host and the
+  `sessions` service each added a few lines.
+- It is all in the log: another process finds the ask, and an answer given there reaches
+  the model in this one.
+- Only what the host recorded counts. An add-on that raises a `gate/answer` of its own has
+  answered nothing, which a test shows.
+- The fourth guarantee's missing half, a person approving what the agent loads, can be
+  met in this form.
+
+**What it found.**
+
+1. *Allowing something does nothing.* After the person says yes, nothing happens until the
+   model asks again, and if its run has ended in the meantime a person has to prompt it
+   to. In the tests a second run is needed each time. This is the weight on the other
+   side: a call that waits goes on by itself the moment the answer comes.
+2. *The retry has to be the same to the letter.* The id is made from the whole request. A
+   model that words its task differently the second time is asked again, and so is one
+   that starts another child in between, since the request names the child's id. For a
+   load the request holds the component's hash, so an add-on rebuilt while the ask waited
+   is a new ask; that is the opposite of "the yes is for the grants and not the code",
+   which is decided for packages. What an ask's identity is made of has to be said for
+   each point.
+3. *Nothing stops a model asking again at once.* Each try gets the same refusal, and no
+   new record. The refusal tells it to go on with something else; whether a small model
+   does has not been tried against one.
+4. *`gate/answer` has two shapes now:* `{"id", "tool", …}` for a tool call and
+   `{"point", "ask", …}` for the rest. Old logs read as before. What reads answers by a
+   call's id (the session's projection, the terminal, the report's "waited on" list) skips
+   the new kind, and the report has not been taught to pair an ask with its answer.
+5. *The two forms now live side by side.* A tool call the model made waits; a load or a
+   session's start fails and is asked for again. A person sees two behaviours for what
+   looks like one thing.
+6. *The core had to grow for it.* The WebAssembly host and the loop do not know each
+   other, and the core reads no JSON, so the meeting point is a trait in `gate`, with the
+   log's side in the harness.
+7. *Every ask reads every gate event in the log.* Fine for a prototype; an index, or the
+   harness keeping the standing asks as it keeps sessions, is what a real one needs.
+
+**Still to decide.** Whether the call waits after all. What an ask's identity is made of.
+Whether an answer can be for more than once, and where it is kept (G6). The fields of the
+two events. How a person meets an ask: no command, terminal line or page shows one yet,
+and their names are H7's.
+
 ---
 
 ## Built from decisions, and what that left open
@@ -511,42 +595,28 @@ for what one instance has seen.
 
 ## What waits on a decision
 
-Two questions were to be tried next. Each stops at a choice that shapes everything built
-on it, so it is a person's to make first.
-
-**An ask that waits for a person, anywhere but a tool call**
-([C15](open-questions.md#c15-can-a-person-answer-an-ask-at-pluginload),
-[G6](open-questions.md#g6-what-can-a-person-answer-to-an-ask),
-[E16](open-questions.md#e16-are-loads-by-a-plugin-durable)). The fourth guarantee waits on
-it, and X5 found the same gap at `session/start`. What is decided: the ask is recorded and
-waits in the log, and one `gate/answer` names whichever it was. What has to be chosen
-before any of it is built is what the call that led to the ask does meanwhile:
-
-| | The call waits | The call fails, and is made again |
-| --- | --- | --- |
-| What happens | The run stops and waits in the log, as it does for a tool call a gate asked about. The answer brings the call its result, and the host does the load. | The call returns a refusal that says a person was asked. The answer is kept; the next call for the same thing goes through. |
-| What it needs | The host to make an add-on's call wait, which is E6 without its interface; and the load carried out by the host on the answer. | The answer matched to a later call: by name and grants, since the yes is for the grants. |
-| What it costs | `Harness::answer`, `Ask` and every front end learn a second kind of thing that waits. | A model round trip, and a model that has to try again. Design uses this form already for a refused host and a credential. |
-
-Either way an ask needs an id of its own, since it has no tool call's, and `gate/answer`
-a way to say which ask it answers that old logs do not have.
-
 **A loop written as a description**
-([E12](open-questions.md#e12-can-an-add-on-ever-contribute-a-loop-step-a-model-or-a-kernel)).
-Its direction is to write the test-driven loop as a description and see what it cannot
-say. The first thing such a loop does that the standard one does not is run a check and
-tell the model what came of it, and neither half has a form:
+([E12](open-questions.md#e12-can-an-add-on-ever-contribute-a-loop-step-a-model-or-a-kernel))
+was to be tried next, and stops before its first step. Its direction is to write the
+test-driven loop as a description and see what it cannot say. The standard loop asks the
+model, runs the tools it asked for, and ends when it answers. The test-driven one does one
+thing more: when the model says it is done, the loop itself runs the tests, and if they
+fail it tells the model so and goes round again. Neither half of that has a form:
 
-- *A message nobody typed.* The check's result goes into the conversation as something
-  said to the model, by the loop. How a message says who sent it is
-  [B28](open-questions.md#b28-is-there-one-person): a field on `message`, or a source of
-  its own.
-- *A tool call the model did not make.* Running the check with its trail is "a single
-  tool call on `Run`", decided and not built; and a result with no call before it is not
-  a conversation a provider accepts, so the loop cannot record it as a tool's.
+- *Telling the model.* The test output has to go into the conversation as something said
+  to the model. Today the only one who says things to the model is the person. A message
+  from the loop needs to say it is the loop's, so that a review does not take it for the
+  person's: that is [B28](open-questions.md#b28-is-there-one-person), which offers a field
+  on the message or an event source of its own.
+- *Running the tests.* The loop would call a tool the model did not ask for. A loop can
+  only run the calls in the model's message today; running one of its own, with the
+  record every call leaves, is decided ("a single tool call on `Run`") and not built. And
+  its result cannot be recorded as a tool's answer, because a provider refuses an answer
+  to a call that was never made.
 
-The pair itself needs two sessions that differ in loop, tools and view, which waits on a
-session being started with them.
+Both are small to build once chosen. Until then a description has nothing to describe
+beyond the standard loop. The pair itself, two agents that differ in loop, tools and view,
+also waits on a session being started with those.
 
 **[E1](open-questions.md#e1-what-can-a-host-call-fail-with)** needs no prototype: it is a
 decision, and its cost is known (every guest rebuilt, in three languages).

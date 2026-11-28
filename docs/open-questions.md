@@ -203,7 +203,7 @@ the add-on fixtures, decide which guest languages are kept and where: a JavaScri
 Python add-on is 12 to 19 MB, which is a lot to hold in the repository for every release.
 
 *Prototype.* [X4](prototypes.md#x4-the-trusted-base-measured): a script that measures the
-trusted base (10 428 lines; 19 crates from outside without the WebAssembly engine and 110
+trusted base (10 713 lines; 19 crates from outside without the WebAssembly engine and 110
 with it) and compares it with a budget file. It only measures: the file holds the day's
 figures, and nothing fails on it.
 
@@ -638,10 +638,17 @@ is kept at account level, where it also brings the package back after a restart.
 still read; and whether a refusal the person may lift afterwards (the host, the credential)
 is an ask of that kind or an event of its own.
 
-One choice comes before any of it can be built, and is laid out in
-[Prototypes](prototypes.md#what-waits-on-a-decision): whether the call that led to an ask
-waits, as a tool call a gate asked about does, or fails and is made again once the person
-has answered. `session/start` meets the same choice.
+One choice runs through all of it: whether the call that led to an ask waits, as a tool
+call a gate asked about does, or fails and is made again once the person has answered.
+The leaning (28 November 2026) is to try the second first, as the smaller, and to go to
+waiting if a revised design allows it, which is what other harnesses do here. It is not
+decided.
+
+*Prototype.* [X9](prototypes.md#x9-an-ask-that-reaches-a-person-anywhere): the second form,
+for `plugin/load` and `session/start`, where the host says it takes answers. An ask is a
+`gate/decision` with an `ask` id, an answer a `gate/answer` naming it, and the same request
+asked for again finds its answer. It found that allowing something does nothing until the
+model asks again, and that "the same request" has to be defined for each point.
 
 ### C18. How many processes may use one log?
 
@@ -735,8 +742,9 @@ point the gates are asked at; what it might break has not been thought through.
 *Prototype.* [X5](prototypes.md#x5-the-decision-point-before-a-session-starts): the harness
 declares `session/start` and asks before the `sessions` service starts a child, with
 `{"session", "parent", "starter", "task"}`. That is all there is to put in the request
-until a session is started with a model, a loop, grants and limits. An ask there is a
-denial, for want of somewhere to wait.
+until a session is started with a model, a loop, grants and limits. An ask there reaches
+a person in the form [X9](prototypes.md#x9-an-ask-that-reaches-a-person-anywhere) tries,
+where the host takes answers, and is a denial otherwise.
 
 ### D4. Is name order, first strictest, the final rule?
 
@@ -896,11 +904,11 @@ registered under a name by native code on the add-on's behalf. Models and kernel
 still be "never"; one that does come is a service an extension registers in the core's
 registry.
 
-Writing the description was not started: the first thing such a loop does beyond the
-standard one, running a check and telling the model what came of it, has no form yet
-([Prototypes](prototypes.md#what-waits-on-a-decision)). It waits on how a message says who
-sent it ([B28](#b28-is-there-one-person)) and on a tool call a loop can make with its
-trail.
+Writing the description was not started, and is left open for now: the first thing such a
+loop does beyond the standard one, running a check and telling the model what came of it,
+has no form yet ([Prototypes](prototypes.md#what-waits-on-a-decision) says it in full). It
+waits on how a message says who sent it ([B28](#b28-is-there-one-person)) and on a tool
+call a loop can make with its trail.
 
 ### E13. When is a value JSON text and when a typed record?
 

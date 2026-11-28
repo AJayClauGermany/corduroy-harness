@@ -1467,7 +1467,9 @@ call waits for a person, and the answer is yes or no, once.
   start are asked about in one way and answered in one way: the ask is recorded and waits
   in the log, and one `gate/answer` names whichever it was. An ask at `plugin/load` is
   then no longer a denial, which the fourth [guarantee](#what-is-safe-by-default) waits
-  on.
+  on. What the call that led to an ask does meanwhile is open: it waits, or it fails and
+  is made again. The second is built to be tried, for a host that takes answers
+  ([Prototypes](prototypes.md#x9-an-ask-that-reaches-a-person-anywhere)).
 - *An answer says how far it reaches.* Allow or deny, for this once or from now on, and
   from now on either for exactly what was asked or within a pattern the person names. So
   an answer may be wider than its question (asked about one host, the person allows any)

@@ -90,7 +90,9 @@ extension may declare more (`corduroy check` lists them under `points`).
 | `session/start` | before the `sessions` service starts a child session | `{"session", "parent", "starter", "task"}`: the id the session would have, the session whose tool call starts it, who asks (`plugin:<name>`) and what it is for. A [prototype](../prototypes.md#x5-the-decision-point-before-a-session-starts): the request gains what a session is started with as that is built |
 
 An ask from a plugin's own tool call, at `plugin/load` or at `session/start` is a denial:
-nobody is there to answer it.
+nobody is there to answer it. A host that embeds the harness can take a person's answers
+at the last two ([a prototype](../prototypes.md#x9-an-ask-that-reaches-a-person-anywhere));
+the `corduroy` command does not yet.
 
 ## Versioning
 
