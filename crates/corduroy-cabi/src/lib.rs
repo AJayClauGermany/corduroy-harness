@@ -17,7 +17,7 @@
 //!
 //! # Where the `unsafe` is
 //!
-//! In [`mod@raw`]'s private half and nowhere else. [`abi`] only declares shapes. The
+//! In the private module `raw` and nowhere else. [`abi`] only declares shapes. The
 //! workspace forbids `unsafe`; this crate carries its own copy of the lint table to deny it
 //! instead, and lifts that for the one module.
 //!
