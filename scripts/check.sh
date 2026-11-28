@@ -42,6 +42,11 @@ else
   step "guest-language plugins: skipped (needs node and python3; their tests will skip)"
 fi
 
+# The extension written in C, if a C compiler is here; its tests are left out otherwise.
+if command -v cc >/dev/null; then
+  export CORDUROY_REQUIRE_C=1
+fi
+
 step "tests (nextest)"
 cargo nextest run --all-features
 

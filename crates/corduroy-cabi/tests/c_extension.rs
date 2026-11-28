@@ -1,8 +1,8 @@
-//! An extension written in C (`examples/c/notes.c`), compiled by the build script and linked
-//! in, doing what a Rust extension does: through the harness's public API, with no network
+//! An extension written in C (`examples/c/notes.c`), compiled by the build script where
+//! there is a C compiler, linked in and (on Unix) also loaded from a shared library, doing what a Rust extension does: through the harness's public API, with no network
 //! and no model but the one the C code is.
 
-#![cfg(all(feature = "c-example", feature = "harness"))]
+#![cfg(all(c_example, feature = "harness"))]
 #![expect(
     unsafe_code,
     reason = "naming a foreign symbol is unsafe wherever it is done: see docs/c-extensions.md"
@@ -135,4 +135,35 @@ fn a_registration_that_fails_fails_apply_even_if_the_extension_did_not_look() {
     };
     assert!(why.contains("gates"), "{why}");
     assert_eq!(harness.gates().names(), Vec::<String>::new());
+}
+
+#[cfg(all(unix, feature = "load"))]
+#[test]
+fn an_extension_is_taken_from_a_shared_library_when_the_program_runs() {
+    use std::path::Path;
+
+    let library = Path::new(env!("CORDUROY_NOTES_LIBRARY"));
+    let harness = harness().unwrap();
+    // SAFETY: the library is `notes.c`, built by this crate's build script.
+    let loaded = unsafe { CExtension::open(library, "corduroy_extension_notes") }.unwrap();
+    let id = harness.plugin(loaded);
+
+    assert_eq!(
+        harness
+            .tools()
+            .call("note", r#"{"text":"loaded"}"#)
+            .unwrap()
+            .to_text(),
+        "noted (1)"
+    );
+    // Its code stays where it is; what it registered does not.
+    harness.with_app(|app| app.dispose(id)).unwrap();
+    assert!(harness.tools().get("note").is_none());
+
+    // SAFETY: nothing is loaded from a file that is not there, or a name that is not.
+    let missing = unsafe { CExtension::open(Path::new("/nowhere/notes.so"), "x") };
+    assert!(missing.is_err());
+    // SAFETY: as above.
+    let unnamed = unsafe { CExtension::open(library, "corduroy_extension_absent") };
+    assert!(unnamed.is_err());
 }

@@ -56,6 +56,8 @@ jobs:
         env:
           CORDUROY_REQUIRE_GUESTS: "1"
           CORDUROY_REQUIRE_POWERSHELL: "1"
+          # The extension written in C (`crates/corduroy-cabi`): fail without a C compiler.
+          CORDUROY_REQUIRE_C: "1"
       # The keychain against a real Secret Service: a D-Bus session and a keyring of its own,
       # unlocked. Fail rather than pass without one.
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gnome-keyring

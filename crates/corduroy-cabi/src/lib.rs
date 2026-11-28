@@ -11,6 +11,10 @@
 //! those goes through the plugin's own [`Context`], so unloading the extension takes all of
 //! it back, as for any plugin. The core is not changed and does not know.
 //!
+//! With the `load` feature an extension is also taken from a shared library when the program
+//! runs ([`CExtension::open`]), where otherwise it is linked in when the program is built
+//! ([`CExtension::load`]).
+//!
 //! With the `harness` feature the table also takes a model provider, which is the one
 //! asynchronous thing tried: the extension is handed a request and a completion, returns,
 //! and completes whenever and from whichever thread it likes.

@@ -22,6 +22,11 @@ use crate::abi::{self, Str};
 #[cfg(feature = "harness")]
 mod provider;
 
+/// The libraries extensions were taken from. Never unloaded: a function of one may still be
+/// running, or still be held, after its extension has gone.
+#[cfg(feature = "load")]
+static LOADED: Mutex<Vec<libloading::Library>> = Mutex::new(Vec::new());
+
 /// An extension's own pointer, handed back to it untouched.
 #[derive(Clone, Copy)]
 struct User(*mut c_void);
@@ -589,6 +594,41 @@ impl CExtension {
             apply,
             drop: described.drop,
         })
+    }
+}
+
+#[cfg(feature = "load")]
+impl CExtension {
+    /// Load the shared library at `library` and ask its function `entry` for its extension.
+    ///
+    /// The library stays loaded for as long as the program runs. Unloading the extension
+    /// takes back what it registered, as for any plugin, and leaves its code where it is.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`LoadError`] if the library cannot be loaded or has no such function, or
+    /// as [`load`](Self::load) does.
+    ///
+    /// # Safety
+    ///
+    /// As [`load`](Self::load), and of the whole library: loading it runs whatever it does
+    /// when loaded, and `entry` must name a function of the type the header gives. The
+    /// symbol is found here, so the caller declares nothing foreign; what the caller still
+    /// asserts is that this file is to be trusted with the host's authority.
+    pub unsafe fn open(library: &std::path::Path, entry: &str) -> Result<Self, LoadError> {
+        let failed = |error: libloading::Error| LoadError(error.to_string());
+        // SAFETY: the caller's promise about the library.
+        let library = unsafe { libloading::Library::new(library) }.map_err(failed)?;
+        // SAFETY: the caller's promise that `entry` names an entry function.
+        let found = unsafe { library.get::<abi::Entry>(entry.as_bytes()) }.map_err(failed)?;
+        let entry = *found;
+        LOADED
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(library);
+        // SAFETY: the caller's promise; the library is never unloaded, so `entry` and
+        // every function it hands over stay callable.
+        unsafe { Self::load(entry) }
     }
 }
 

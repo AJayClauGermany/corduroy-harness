@@ -1242,15 +1242,23 @@ What has to be decided:
 
 A prototype exists to study it with: `crates/corduroy-cabi`, a header, an extension in C
 and tests that run it, covering tools, services, gates, prompt parts, secrets, listeners,
-effects and a model provider that answers through a completion. It decides nothing, ships
+effects and a model provider that answers through a completion, linked in or loaded from
+a shared library. It decides nothing, ships
 in nothing, and [what it found](c-extensions.md) adds to the list:
 
-6. *Who finds the symbol.* Linked at build time, the `unsafe` declaration of an
-   extension's entry function is written by whoever builds the command, outside the one
-   crate. Loading, or generating the declaration, keeps it inside.
-7. *Whether a call that blocks is enough.* It is for C. A language whose interpreter has
-   one thread cannot be called from any thread, and would need every callback answered
-   through a completion, as the prototype's provider is.
+6. *Who vouches for a loaded library.* The prototype does both: linked, the `unsafe`
+   declaration of the entry function is written by whoever builds the command; loaded,
+   it is found inside the one crate, but loading is still `unsafe` to call, since a wrong
+   file corrupts the process. A command that forbids `unsafe` can load an extension only
+   if the crate offers a safe function and so vouches for a file it has not seen. And a
+   loaded library is never unloaded, so unplugging it reverts what it registered and
+   leaves its code in the process.
+7. *Whether a call that blocks is enough.* The aim is systems languages and the
+   languages of a platform (C, C++, Zig, Swift, Go, C#), for code against a platform's
+   own interfaces, and not scripting languages, which stay add-ons. For those a blocking
+   call is enough. What is untried is a platform interface that must be called on one
+   thread or answers through its own callback, which may want tools answered through a
+   completion, as the prototype's provider is.
 8. *Which misuse the host refuses.* A context kept after `apply`, a handle after `drop`, a
    completion completed twice: each is memory corruption today, and each can be made a
    refusal for the price of a check.

@@ -16,18 +16,20 @@ build = "build.rs"
 default = []
 # The loop's side of the interface: a model provider that answers through a completion.
 harness = ["dep:corduroy-harness", "dep:async-trait", "dep:serde_json"]
-# Compile the extension in `examples/c/` and link it in, for this crate's tests. Needs a C
-# compiler, which nothing else in the workspace does.
-c-example = ["dep:cc"]
+# Take an extension from a shared library when the program runs, as well as from one linked
+# in when it is built.
+load = ["dep:libloading"]
 
 [dependencies]
 corduroy-core = { workspace = true, features = ["std"] }
 corduroy-harness = { workspace = true, features = ["std", "tokio"], optional = true }
 async-trait = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
+libloading = { version = "0.8", optional = true }
 
 [build-dependencies]
-cc = { version = "1", optional = true }
+# The C extension in `examples/c/`, for the tests, where there is a C compiler.
+cc = "1"
 
 [dev-dependencies]
 tokio = { workspace = true }

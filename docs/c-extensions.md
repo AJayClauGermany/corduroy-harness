@@ -8,11 +8,17 @@ page is the record of a prototype built to find out what the question is made of
 promised, shipped in the command or reachable from an agent file.** When G23 is decided, this
 page is deleted and what holds is written where it belongs.
 
-To run it (needs a C compiler):
+To run it (needs a C compiler; without one the tests are left out, and with
+`CORDUROY_REQUIRE_C` set that is an error):
 
 ```bash
-cargo nextest run -p corduroy-cabi --all-features
+CORDUROY_REQUIRE_C=1 cargo nextest run -p corduroy-cabi --all-features
 ```
+
+**Who it is for.** Systems languages and the languages of a platform (C, C++, Zig, Swift,
+Go, C#): a way to write an extension against a platform's own interfaces without writing
+Rust. Not scripting languages, which stay add-ons. That is the aim the prototype is read
+against below; it is an aim, not yet a decision of G23.
 
 ## What was built
 
@@ -32,6 +38,11 @@ through the plugin's own `Context`, so it is an effect and unloading takes it ba
 
 The C extension contributes one of each, the loop runs a whole turn against a model
 written in C that answers from a thread of its own, and unloading leaves nothing behind.
+
+It gets in both ways G23 names. Linked when the program is built, `CExtension::load` is
+given the entry function. Loaded when the program runs (the `load` feature, tried on Unix),
+`CExtension::open` is given a path and the function's name. The same library, built from
+the same source against the same header, serves both.
 
 Six rules make the boundary, and they are at the top of the header. The two that shaped
 everything: **nothing is freed across it** (text is borrowed for one call; whoever produces
@@ -61,12 +72,19 @@ decides G23.
 
 **The crossing**
 
-1. *Naming the symbol is `unsafe` in the caller's crate, not in this one.* Linked at build
-   time, whoever assembles the command writes `unsafe extern "C" { fn
-   corduroy_extension_notes(..); }`, and the workspace forbids that. "`unsafe` stays in the
-   one crate" holds only if this crate also finds the symbol: by loading the library, or by
-   generating the declaration from a build script. That ties the `unsafe` question to
-   G23's second decision (loaded or linked).
+1. *Loading moves the `unsafe` declaration inside, and leaves the trust outside.* Linked
+   at build time, whoever assembles the command writes `unsafe extern "C" { fn
+   corduroy_extension_notes(..); }`, and the workspace forbids that. Loaded, this crate
+   finds the symbol and the caller declares nothing. But `open` is still an `unsafe fn`,
+   and rightly: a wrong file corrupts the process. So a command that forbids `unsafe` can
+   use neither as they are. For it to load an extension, this crate would have to offer a
+   safe function, which is this crate vouching for a file it has never seen. Whether that
+   is acceptable, on the grounds that naming the file in the right place is the person's
+   act of trust, is the real form of G23's second decision.
+   *A library is never unloaded.* A function of it may still be running or held when its
+   extension goes, so the prototype keeps every library for the life of the program.
+   Unloading an extension takes back what it registered and leaves its code mapped: for an
+   extension that was loaded, "unplugged again" means less than it does for an add-on.
 2. *`forbid` cannot be lifted for one crate.* Cargo cannot inherit the workspace's lint
    table and change one entry, so the prototype carries a copy of the whole table with
    `unsafe_code = "deny"`. The copy will drift.
@@ -79,12 +97,14 @@ decides G23.
    Here a segfault, a `longjmp` or a C++ exception through a callback ends the command,
    and nothing can be caught. A panic on the Rust side aborts.
 5. *Every callback may arrive on any thread.* That is what `Send + Sync` means once only a
-   promise is left. For C it is a rule to keep. For Python or JavaScript it is the main
-   difficulty: an interpreter with one thread cannot be called from tokio's blocking pool.
-   Such a language would need *every* callback in the completion form, tools and gates
-   included, with the host blocking its own thread until completed. Whether a blocking call
-   is enough for the languages anyone would use is the question that decides the interface's
-   shape, and it is open.
+   promise is left. For the languages this is for, a call that blocks is enough, and the
+   prototype's shape stands; an interpreter with one thread could not be called this way,
+   which is one more reason scripting languages stay add-ons. What the aim does bring is
+   the platform's own threading: much of a platform's interface must be called on one
+   particular thread (the main thread, for most of macOS's and Windows's), or answers
+   through a callback of its own. A tool written in Swift that must hop to the main thread
+   and wait is the case to try next, and it may want the completion form for tools as
+   well as for providers.
 
 **What does not cross yet, and why**
 
