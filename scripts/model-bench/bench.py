@@ -1218,8 +1218,16 @@ def main() -> int:
     args.srt_path = args.srt_path_env = None
     if args.srt_check or (args.srt and not (args.summary or args.compare or args.list)):
         srt, node = shutil.which("srt"), shutil.which("node")
-        if not MACOS or not srt or not node or not all(Path(p).is_absolute() for p in (srt, node)):
-            parser.error("SRT mode needs macOS and absolute PATH entries for srt (0.0.81+) and node")
+        if not MACOS:
+            parser.error("SRT mode needs macOS")
+        missing = [name for name, found in (("srt", srt), ("node", node)) if not found]
+        if missing:
+            parser.error(
+                f"SRT mode needs srt (0.0.81+) and node on PATH; not found: {', '.join(missing)}"
+                f" (PATH is {os.environ.get('PATH', '')})"
+            )
+        if not all(Path(p).is_absolute() for p in (srt, node)):
+            parser.error(f"SRT mode needs absolute PATH entries for srt and node, not {srt} and {node}")
         try:
             # Resolve version-manager shims in the trusted launcher, before dropping its env.
             executable = subprocess.run(
