@@ -26,6 +26,7 @@ takes hours. Standard library only.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import platform
@@ -36,6 +37,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 import urllib.error
@@ -47,6 +49,194 @@ ROOT = HERE.parent.parent
 DEFAULT_URL = "http://127.0.0.1:8080/v1/chat/completions"
 LOCAL_MODEL = ROOT / "scripts/local-model.sh"
 MACOS = platform.system() == "Darwin"
+
+
+@functools.cache
+def tool_places() -> tuple[str, ...]:
+    """Where macOS keeps what `/usr/bin/python3`, `cc`, `make` and `git` really are. Those
+    four are stubs: each reads the link in `/var/select` and runs the program of that name in
+    the developer directory, and one that cannot read either only prints `xcode-select`
+    errors. `/bin/sh` reads `/var/select` too, and `curl` its configuration in `/etc/ssl`."""
+    places = [
+        "/private/var/select",
+        "/private/var/db/xcode_select_link",
+        "/Library/Developer/CommandLineTools",
+        "/private/etc/ssl",
+        # `git` stops at a system configuration it may not look for; there is none to find.
+        "/private/etc/gitconfig",
+        "/private/etc/localtime",
+        "/private/var/db/timezone",
+    ]
+    try:
+        chosen = subprocess.run(
+            ["/usr/bin/xcode-select", "-p"], capture_output=True, text=True, timeout=10, check=False
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        chosen = ""
+    # Xcode in place of the command line tools: the whole application, which the tools in
+    # its developer directory reach back into.
+    application = re.match(r"(/.+?\.app)(/|$)", chosen)
+    if application:
+        places.append(application.group(1))
+    elif chosen.startswith("/") and chosen not in places:
+        places.append(chosen)
+    # The sandbox judges a path by where it really is, so each place is named by that as
+    # well, and so is whatever the links in /var/select point at.
+    select = Path("/private/var/select")
+    try:
+        links = [str(entry) for entry in select.iterdir()]
+    except OSError:
+        links = []
+    for place in ["/var/select", *links, *places[:]]:
+        real = os.path.realpath(place)
+        for spelling in (place, real):
+            if spelling not in places and spelling != "/":
+                places.append(spelling)
+    return tuple(places)
+
+
+@functools.cache
+def developer_dir() -> str:
+    """The developer directory the sandboxed tools are told to use: the command line tools
+    where they are installed (they ask for nothing outside their own directory), or else
+    what `xcode-select` has chosen."""
+    tools = "/Library/Developer/CommandLineTools"
+    if os.path.exists(f"{tools}/usr/bin/python3"):
+        return tools
+    try:
+        return subprocess.run(
+            ["/usr/bin/xcode-select", "-p"], capture_output=True, text=True, timeout=10, check=False
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+# `/var`, `/tmp` and `/etc` are links into `/private`, and with everything denied a path
+# through one cannot even be followed (`/var/select`, `/etc/gitconfig`, `/var/folders/...`).
+# Each pattern matches the link alone, nothing beneath it: SRT turns a pattern into a rule
+# for exactly that path, where a plain entry would open the whole directory behind the link.
+LINKS = ["/va[r]", "/tm[p]", "/et[c]"]
+
+
+@functools.cache
+def own_temporary() -> str:
+    """The person's own temporary directory (`/var/folders/.../T`). `cc` and the stubs in
+    /usr/bin write there whatever `TMPDIR` says, so behind the wall it is in reach: what
+    other programs of the person's keep there can be read, and trials can leave each other
+    files in it. Nothing else of the person's is."""
+    try:
+        said = subprocess.run(
+            ["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"],
+            capture_output=True, text=True, timeout=10, check=False,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return os.path.realpath(said) if said.startswith("/") else ""
+
+
+# SRT forbids, in the directory it is started in, what could later run outside the sandbox
+# with the person's rights: a repository's hooks and configuration, and so `.git` itself,
+# which then cannot be made (`git init` fails). A trial's workspace is thrown away and
+# nothing outside the wall runs in it, so SRT is started in an empty directory of its own
+# and what it runs goes back to where it was asked from.
+LAUNCH = """launch=$1 srt=$2 settings=$3; shift 3; here=$PWD
+cd "$launch" || exit 126
+exec "$srt" --settings "$settings" -- /bin/sh -c 'cd "$0" && exec "$@"' "$here" "$@"
+"""
+
+
+def srt_env(scratch: Path) -> dict:
+    """What `srt` is started with for a sandboxed shell: a home and a temporary directory
+    of the trial's own, since the person's are behind the wall (`git` stops at a
+    `~/.gitconfig` it may not read, a compiler at a temporary file it may not write).
+
+    The temporary directory is named as `CLAUDE_CODE_TMPDIR`, which SRT hands to what it
+    runs as `TMPDIR`. `TMPDIR` itself is left alone: SRT keeps a socket of its own there,
+    outside the wall, and a socket's path has 104 bytes, which a trial's directory is past."""
+    home, temporary = scratch / "home", scratch / "tmp"
+    for made in (home, temporary):
+        made.mkdir(parents=True, exist_ok=True)
+    # `CLAUDE_TMPDIR` is what earlier versions of SRT read.
+    told = {
+        "HOME": str(home),
+        "CLAUDE_CODE_TMPDIR": str(temporary),
+        "CLAUDE_TMPDIR": str(temporary),
+    }
+    # The stubs in /usr/bin look for the developer directory through `/var/select`, and
+    # `/var` is a link the sandbox does not let them follow, whatever is allowed beyond it.
+    # Told where it is, they do not look.
+    developer = developer_dir()
+    if developer:
+        told["DEVELOPER_DIR"] = developer
+    return told
+
+
+def srt_prefix(
+    srt: str, settings: Path, workspace: Path, *read_only: Path, scratch: Path | None = None
+) -> list[str]:
+    """Constrain tool processes, leaving model connections in the trusted CLI.
+
+    The wall is for the exam: nothing of the person's files, the checks or another trial is
+    read. What the tasks have the agent use stays in reach: the system's tools and macOS's
+    developer tools to read, the workspace and `scratch` to write, and loopback, which a
+    task that starts a server and fetches from it needs (so a service of the person's on
+    loopback can be reached too; nothing further out can)."""
+    def literal(path: Path) -> dict:
+        return {"path": str(path), "literal": True}
+
+    state = literal(workspace / ".corduroy")
+    runtime = ["/bin", "/usr/bin", "/usr/lib", "/usr/libexec", "/usr/share", "/System/Library",
+               "/dev/null", "/dev/urandom", "/private/etc/passwd", "/private/etc/group"]
+    written = [workspace, *([scratch] if scratch else [])]
+    launch = scratch / "launch" if scratch else settings.with_suffix(".cwd")
+    launch.mkdir(parents=True, exist_ok=True)
+    shared = [own_temporary()] if own_temporary() else []
+    settings.write_text(json.dumps({
+        "network": {"allowedDomains": [], "deniedDomains": ["*"], "allowLocalBinding": True},
+        "filesystem": {
+            "denyRead": ["/", state],
+            "allowRead": runtime
+            + LINKS
+            + list(tool_places())
+            + shared
+            + [literal(path) for path in (*written, *read_only, launch)],
+            "allowWrite": [literal(path) for path in written] + shared,
+            "denyWrite": ["/tmp/claude", state],
+        },
+    }))
+    return ["/bin/sh", "-c", LAUNCH, "srt-launch", str(launch), srt, str(settings)]
+
+
+def check_srt(srt: str, path: str) -> None:
+    """A successful shell must enter the sandbox, do trial I/O, and be refused a file
+    outside the workspace, to read and to write. (What the tasks need there is tried
+    afterwards, by `unusable`.)"""
+    # Not in the person's temporary directory, which is in the sandbox's reach: the file
+    # that must be refused would be allowed there.
+    runs = ROOT / ".bench-runs"
+    runs.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=runs, prefix="srt-check-") as temporary:
+        root = Path(temporary).resolve()
+        workspace = root / "workspace"
+        workspace.mkdir()
+        (workspace / "inside").write_text("inside\n")
+        outside = root / "outside"
+        outside.write_text("outside\n")
+        prefix = srt_prefix(srt, root / "settings.json", workspace)
+        probe = '''
+            IFS= read -r line < inside && test "$line" = inside || exit 10
+            printf 'ok\\n' > new && /bin/rm new || exit 11
+            if (IFS= read -r line < "$1"); then exit 12; fi
+            if (printf 'bad\\n' >> "$1"); then exit 13; fi
+            printf 'srt-check-ok\\n'
+        '''
+        result = subprocess.run(
+            [*prefix, "/bin/sh", "-c", probe, "probe", str(outside)],
+            cwd=workspace, env={"PATH": path, "HOME": str(Path.home())},
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        if result.returncode or "srt-check-ok" not in result.stdout.splitlines():
+            raise RuntimeError(f"SRT probe failed (exit {result.returncode}): {result.stderr.strip()}")
 
 # What the default agent has beyond the local-model example: searching without a shell, and
 # the date. `corduroy init` writes both.
@@ -80,13 +270,18 @@ class Config:
         # A hosted model in the local one's place: the provider's kind and the model's name.
         self.provider: str | None = args.provider
         self.model_id: str | None = args.model_id
-        self.key_env: str | None = args.api_key_env or (
+        self.keychain_secret: str | None = args.keychain_secret
+        self.key_env: str | None = None if self.keychain_secret else args.api_key_env or (
             {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}.get(args.provider or "")
         )
         self.platform = f"{platform.system()} {platform.machine()}"
+        self.srt = args.srt_path
+        self.srt_path_env = args.srt_path_env
+        if self.srt and not self.out.is_relative_to(ROOT / ".bench-runs"):
+            raise SystemExit("--srt needs an output directory under .bench-runs in this checkout")
         # macOS: no user to drop to without an administrator's tools, but a sandbox profile
         # that denies the same places, for which nobody has to be root.
-        self.sandbox = MACOS and shutil.which("sandbox-exec") is not None
+        self.sandbox = MACOS and not self.srt and shutil.which("sandbox-exec") is not None
         if os.geteuid() == 0 and not MACOS:
             try:
                 entry = pwd.getpwnam(args.user)
@@ -119,7 +314,7 @@ class Config:
 
     @property
     def isolated(self) -> bool:
-        return bool(self.user) or self.sandbox
+        return bool(self.user) or self.sandbox or bool(self.srt)
 
     def wall(self, *hidden: Path) -> list[str]:
         """What goes before a command on macOS so that it cannot read the checks, the results
@@ -138,6 +333,8 @@ class Config:
         if not self.provider:
             return text
         key = f'\napi_key_env = "{self.key_env}"' if self.key_env else ""
+        if self.keychain_secret:
+            key = f'\nsecret = "{self.keychain_secret}"'
         text = text.replace(
             f'kind = "openai-compatible"\nbase_url = "{DEFAULT_URL}"',
             f'kind = "{self.provider}"{key}',
@@ -152,17 +349,17 @@ class Config:
             return {}
         return {"user": self.uid, "group": self.gid, "extra_groups": []}
 
-    def env(self, extra: dict | None = None) -> dict:
+    def env(self, extra: dict | None = None, *, provider_key: bool = True) -> dict:
         env = {
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "PATH": self.srt_path_env or os.environ.get("PATH", "/usr/bin:/bin"),
             "HOME": self.home or os.environ.get("HOME", "/"),
             "USER": self.user or os.environ.get("USER", ""),
             "LANG": "C.UTF-8",
             "CORDUROY_PLUGIN_PATH": str(self.plugins),
         }
-        # The command reads a hosted model's key from its environment; a kernel starts from
-        # an empty one, so the agent's shell never has it (`environment_kept` checks).
-        if self.provider and self.key_env and self.key_env in os.environ:
+        # Keychain values are read only by the command, never by this runner. Forward an
+        # environment key only when that credential source was selected.
+        if provider_key and self.provider and self.key_env and self.key_env in os.environ:
             env[self.key_env] = os.environ[self.key_env]
         env.update(extra or {})
         return env
@@ -196,6 +393,24 @@ class Trial:
         self.agent = self.dir / "corduroy.toml"
         base = (ROOT / "examples/local-model/corduroy.toml").read_text()
         self.agent_text = config.hosted(base).replace(DEFAULT_URL, config.url) + EXTRA_PLUGINS
+        if config.keychain_secret:
+            self.agent_text += f'\n[secrets.{config.keychain_secret}]\nkind = "keychain"\n'
+        if config.srt:
+            fixtures = [config.vault] if task == "mcp" else []
+            self.scratch = self.dir / "scratch"
+            prefix = srt_prefix(
+                config.srt, self.private / "srt.json", self.ws, *fixtures, scratch=self.scratch
+            )
+            told = ", ".join(
+                f"{name} = {json.dumps(value, ensure_ascii=False)}"
+                for name, value in srt_env(self.scratch).items()
+            )
+            self.agent_text = self.agent_text.replace(
+                '[kernels.shell]\nkind = "shell"\n',
+                f'[kernels.shell]\nkind = "shell"\nprefix = {json.dumps(prefix, ensure_ascii=False)}\n'
+                f"env = {{ {told} }}\n",
+                1,
+            )
         self.failures: list[str] = []
         self.notes: list[str] = []
         self.commands: list[dict] = []
@@ -261,7 +476,15 @@ class Trial:
     ) -> Ran:
         """A command in the workspace, as the agent's user (for setting up, and for running
         what the model wrote: never as root)."""
-        return self._spawn(["sh", "-c", command], cwd or self.ws, None, timeout, {}, private)
+        directory = cwd or self.ws
+        argv = ["sh", "-c", command]
+        env = {}
+        if self.config.srt:
+            argv = srt_prefix(
+                self.config.srt, self.private / "srt-check.json", directory, scratch=self.scratch
+            ) + argv
+            env = srt_env(self.scratch)
+        return self._spawn(argv, directory, None, timeout, env, private, provider_key=not self.config.srt)
 
     def walled(self, argv: list[str], private: bool = False) -> list[str]:
         """`argv` behind the macOS wall; the trial's own private directory is behind it too
@@ -270,7 +493,7 @@ class Trial:
 
     # -- driving ------------------------------------------------------------------------
 
-    def _spawn(self, argv, cwd, stdin, timeout, env, private=False) -> Ran:
+    def _spawn(self, argv, cwd, stdin, timeout, env, private=False, *, provider_key=True) -> Ran:
         started = time.monotonic()
         process = subprocess.Popen(
             self.walled(argv, private),
@@ -278,7 +501,7 @@ class Trial:
             stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env=self.config.env(env),
+            env=self.config.env(env, provider_key=provider_key),
             text=True,
             start_new_session=True,
             **self.config.demote(),
@@ -685,6 +908,133 @@ def healthy(url: str) -> bool:
         return False
 
 
+# What the tasks have the agent, and their own checks, do: each must work where the agent
+# does. A wall that hides the checks may hide these too (a sandbox that denies macOS's
+# developer directory leaves `python3`, `cc`, `make` and `git` as stubs that only fail), and
+# then an hour's trials measure the wall and not the model. Each is a small real use, not a
+# `--version`: a compiler that starts may still have nowhere to write.
+NEEDED = {
+    "python3": "python3 -c 'import json, sqlite3, http.server, unittest'",
+    # Not a bare `mktemp`: macOS's goes to the person's own temporary directory whatever
+    # `TMPDIR` says, and that is behind the wall on purpose (trials would meet there).
+    "a temporary file": 'f=$(mktemp "${TMPDIR:-/tmp}/probe.XXXXXX") && rm -f "$f" &&'
+    " python3 -c 'import tempfile; tempfile.TemporaryFile().close()'",
+    "cc": "printf 'int main(void) { return 0; }\\n' > probe.c && cc -o probe probe.c && ./probe",
+    "make": "printf 'all:\\n\\t@true\\n' > Makefile && make",
+    "git": "git init -q . && git -c user.name=bench -c user.email=bench@example.invalid"
+    " commit -q --allow-empty -m probe",
+    "curl": "curl --version",
+    "a server on loopback": """port=$(python3 -c 'import socket; s = socket.socket(); \
+s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])') || exit 1
+python3 -m http.server $port --bind 127.0.0.1 >/dev/null 2>&1 & server=$!
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  curl -sf http://127.0.0.1:$port/ >/dev/null && fetched=yes && break; sleep 1
+done
+kill $server; test "$fetched" = yes""",
+}
+
+
+# What is looked at behind a wall that broke something, for whoever has to mend it.
+LOOK = """echo "TMPDIR=$TMPDIR HOME=$HOME PATH=$PATH DEVELOPER_DIR=$DEVELOPER_DIR"
+ls -la /private/var/select 2>&1
+echo "xcode-select -p: $(xcode-select -p 2>&1)"
+ls -la /var/select 2>&1
+ls -d /Library/Developer/CommandLineTools/usr/bin/python3 /Applications/Xcode*.app 2>&1"""
+
+
+def denials(seconds: float) -> list[str]:
+    """What macOS's sandbox refused in the last `seconds`, each kind once: the operation
+    and the path, which is what the wall has to let through."""
+    try:
+        said = subprocess.run(
+            ["/usr/bin/log", "show", "--last", f"{int(seconds) + 5}s", "--style", "compact",
+             "--predicate", 'eventMessage CONTAINS "deny("'],
+            capture_output=True, text=True, timeout=120, check=False,
+        ).stdout
+    except (OSError, subprocess.SubprocessError) as error:
+        return [f"(the system log could not be read: {error})"]
+    found = re.findall(r"Sandbox: (\S+?)\(\d+\) deny\(\d+\) ([^\n]+)", said)
+    return list(dict.fromkeys(f"{program}: {what.strip()}" for program, what in found))[:80]
+
+
+def outside(wall: list[str], env: dict, workspace: Path) -> str:
+    """What the places the developer tools start from are, seen without the wall, and what
+    SRT made of them."""
+    def said(argv: list[str], extra: dict | None = None) -> str:
+        try:
+            ran = subprocess.run(
+                argv, capture_output=True, text=True, timeout=60, check=False, cwd=workspace,
+                env={**env, **(extra or {})}, stdin=subprocess.DEVNULL,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            return str(error)
+        return (ran.stdout + ran.stderr).strip()
+
+    listed = said(["/bin/ls", "-lad", "/var", "/var/select", "/private/var/select"])
+    inside = said(["/bin/ls", "-la", "/private/var/select/"])
+    version = said([shutil.which("srt", path=env.get("PATH")) or "srt", "--version"]).splitlines()[:1]
+    rules = [
+        line.strip()
+        for line in said([*wall, "true"], {"SRT_DEBUG": "1", "DEBUG": "1"}).replace("\\n", "\n").splitlines()
+        if "select" in line or "CommandLineTools" in line
+    ]
+    places = ", ".join(tool_places())
+    return "\n    ".join(
+        [f"srt {' '.join(version)}", f"asked to read: {places}", *listed.splitlines(), *inside.splitlines(),
+         "SRT's rules that name them:", *(rules[:20] or ["(none shown)"])]
+    )
+
+
+def unusable(config: Config) -> list[tuple[str, str]]:
+    """Each of `NEEDED` that fails behind the wall, with what it said; and where anything
+    failed, what the wall looks like from inside and (macOS) what its sandbox refused."""
+    started = time.time()
+    directory = config.out / "preflight"
+    shutil.rmtree(directory, ignore_errors=True)
+    workspace = directory / "workspace"
+    workspace.mkdir(parents=True)
+    wall, env = config.wall(), config.env(provider_key=False)
+    if config.user:
+        os.chown(workspace, config.uid, config.gid)
+    if config.srt:
+        scratch = directory / "scratch"
+        wall = srt_prefix(config.srt, directory / "srt.json", workspace, scratch=scratch)
+        env.update(srt_env(scratch))
+
+    def behind(command: str) -> tuple[bool, str]:
+        try:
+            ran = subprocess.run(
+                [*wall, "sh", "-c", command],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=60,
+                cwd=workspace,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                **config.demote(),
+            )
+        except subprocess.TimeoutExpired:
+            return False, "no answer in 60s"
+        said = (ran.stderr.strip() + "\n" + ran.stdout.strip()).strip() or f"exit {ran.returncode}"
+        return ran.returncode == 0, "\n    ".join(said.splitlines()[:12])
+
+    broken = []
+    for name, command in NEEDED.items():
+        worked, said = behind(command)
+        if not worked:
+            broken.append((name, said))
+    if broken:
+        broken.append(("(seen from behind the wall)", behind(LOOK)[1]))
+        if MACOS:
+            refused = denials(time.time() - started) or ["(none in the system log)"]
+            broken.append(("(refused by the sandbox)", "\n    ".join(refused)))
+        if config.srt:
+            broken.append(("(seen from outside it)", outside(wall, env, workspace)))
+    shutil.rmtree(directory, ignore_errors=True)
+    return broken
+
+
 def run_model(args, chosen: list[dict], tasks, model: str | None) -> Path:
     """Every chosen task, `--trials` times, against one model; returns the results file.
     With `model`, the bench serves it itself and results go under `<out>/<model>`."""
@@ -705,7 +1055,7 @@ def run_model(args, chosen: list[dict], tasks, model: str | None) -> Path:
     results.parent.mkdir(parents=True, exist_ok=True)
     if config.user and not args.results:
         os.chmod(results.parent, 0o700)
-    if config.isolated:
+    if config.isolated and not config.srt:
         probe = subprocess.run(
             [*config.wall(), "ls", str(HERE)], capture_output=True, check=False, **config.demote()
         )
@@ -716,6 +1066,15 @@ def run_model(args, chosen: list[dict], tasks, model: str | None) -> Path:
             config.sandbox = False
     if not config.isolated:
         sys.stderr.write("no wall: the agent runs as you and could read the checks\n")
+    broken = unusable(config)
+    if broken:
+        raise SystemExit(
+            "behind the wall the agent runs in, these do not work, and the tasks need them:\n"
+            + "\n".join(f"  {name}: {why}" for name, why in broken)
+            + "\nNothing was run. Let the wall reach them (on macOS: /private/var/select and"
+            " the developer tools' directory to read, the temporary directory to write,"
+            " loopback to connect to; with --srt, `srt_prefix` is where), then run this again."
+        )
     if args.fresh and results.exists():
         results.unlink()
     if config.user:
@@ -765,11 +1124,13 @@ def run_model(args, chosen: list[dict], tasks, model: str | None) -> Path:
             crashed = traceback.format_exc(limit=4)
         record = trial.record(task, number, time.monotonic() - started, crashed)
         record["isolated"] = config.isolated
+        if config.srt:
+            record["sandbox_backend"] = "srt-tools"
         if config.user:
             # A later trial must not find this one's attempt.
             os.chown(trial.dir, 0, 0)
             os.chmod(trial.dir, 0o700)
-        elif config.sandbox:
+        elif config.sandbox or config.srt:
             kept = config.out / "private" / "trials" / task["name"] / str(number)
             shutil.rmtree(kept, ignore_errors=True)
             kept.parent.mkdir(parents=True, exist_ok=True)
@@ -817,7 +1178,12 @@ def main() -> int:
         "`openai`), with --model-id; results go under <out>/<label>",
     )
     parser.add_argument("--model-id", help="the hosted model's name, as its provider knows it")
-    parser.add_argument("--api-key-env", help="the variable holding the key (the kind's own by default)")
+    credentials = parser.add_mutually_exclusive_group()
+    credentials.add_argument("--api-key-env", help="the variable holding the key (the kind's own by default)")
+    credentials.add_argument(
+        "--keychain-secret", metavar="NAME",
+        help="read the named Corduroy keychain secret instead of an environment variable",
+    )
     parser.add_argument(
         "--climb",
         type=float,
@@ -826,6 +1192,8 @@ def main() -> int:
         "this share of trials passed (0.25, say): the tiers above are not tried",
     )
     parser.add_argument("--quiet", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--srt", action="store_true", help="sandbox trial tools using SRT on macOS")
+    parser.add_argument("--srt-check", action="store_true", help="check SRT isolation without running a model")
     parser.add_argument("--fresh", action="store_true", help="forget earlier results instead of going on from them")
     parser.add_argument("--url", default=os.environ.get("CORDUROY_LOCAL_MODEL_URL", DEFAULT_URL))
     parser.add_argument("--out", default="/var/tmp/corduroy-bench")
@@ -842,6 +1210,44 @@ def main() -> int:
         "--plugins", default=str(ROOT / "plugins/target/wasm32-unknown-unknown/release")
     )
     args = parser.parse_args()
+    if args.keychain_secret is not None:
+        if not args.provider or not args.model_id:
+            parser.error("--keychain-secret needs --provider and --model-id")
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", args.keychain_secret):
+            parser.error("--keychain-secret must contain only letters, digits, '-' and '_'")
+    args.srt_path = args.srt_path_env = None
+    if args.srt_check or (args.srt and not (args.summary or args.compare or args.list)):
+        srt, node = shutil.which("srt"), shutil.which("node")
+        if not MACOS:
+            parser.error("SRT mode needs macOS")
+        missing = [name for name, found in (("srt", srt), ("node", node)) if not found]
+        if missing:
+            parser.error(
+                f"SRT mode needs srt (0.0.81+) and node on PATH; not found: {', '.join(missing)}"
+                f" (PATH is {os.environ.get('PATH', '')})"
+            )
+        if not all(Path(p).is_absolute() for p in (srt, node)):
+            parser.error(f"SRT mode needs absolute PATH entries for srt and node, not {srt} and {node}")
+        try:
+            # Resolve version-manager shims in the trusted launcher, before dropping its env.
+            executable = subprocess.run(
+                [node, "-p", "process.execPath"], check=True, capture_output=True, text=True, timeout=10,
+            ).stdout.strip()
+            node_path = Path(executable)
+            if not node_path.is_absolute() or node_path.name != "node" or not os.access(node_path, os.X_OK):
+                raise RuntimeError("node did not resolve to an absolute executable named node")
+            args.srt_path = srt
+            args.srt_path_env = f"{node_path.parent}:/usr/bin:/bin:/usr/sbin:/sbin"
+            check_srt(srt, args.srt_path_env)
+        except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+            parser.exit(1, f"SRT isolation not verified; no trials started. {error}\n")
+        if args.srt_check:
+            sys.stdout.write("SRT trial sandbox check passed.\n")
+            return 0
+        if not Path(args.out).resolve().is_relative_to(ROOT / ".bench-runs"):
+            parser.error("--srt needs --out .bench-runs/<run>")
+        if Path(args.workspace_name).name != args.workspace_name or args.workspace_name in {"", ".", "..", "private"}:
+            parser.error("--srt needs a single, non-reserved trial workspace directory name")
     if args.summary:
         sys.stdout.write(summarize(Path(args.summary)) + "\n")
         return 0
@@ -857,7 +1263,7 @@ def main() -> int:
     key = args.api_key_env or {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}.get(
         args.provider or ""
     )
-    if args.provider and key and not os.environ.get(key) and not args.list:
+    if args.provider and not args.keychain_secret and key and not os.environ.get(key) and not args.list:
         parser.error(f"{key} is not set: a hosted model needs its key in the environment")
     if args.provider and args.models:
         parser.error("--provider is one hosted model; run it beside --models, as a command of its own")

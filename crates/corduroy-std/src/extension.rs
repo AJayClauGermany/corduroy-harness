@@ -153,16 +153,14 @@ impl Asked<'_> {
 /// the variables it sets (`env`) and those of the command's own environment it hands through
 /// (`pass`). It starts from an empty environment otherwise.
 fn shell_kernel_in(asked: &Asked<'_>, shell: ShellKernel) -> Built {
-    asked.only(&["dir", "program", "env", "pass"])?;
+    asked.only(&["dir", "program", "env", "pass", "prefix"])?;
     let dir = asked
         .text("dir")
         .map_or_else(|| asked.places.workspace.clone(), PathBuf::from);
-    let shell = asked
-        .table("env")?
-        .into_iter()
-        .fold(shell.in_dir(dir), |shell, (name, value)| {
-            shell.with_env(name, value)
-        });
+    let shell = asked.table("env")?.into_iter().fold(
+        shell.in_dir(dir).with_prefix(asked.texts("prefix")?),
+        |shell, (name, value)| shell.with_env(name, value),
+    );
     let shell = asked
         .texts("pass")?
         .into_iter()
@@ -422,8 +420,8 @@ impl Extensions {
     ///
     /// | Kind | Configuration | What it adds |
     /// | --- | --- | --- |
-    /// | `shell-kernel` | `dir` (default `{workspace}`), `program` (default `sh`; any POSIX shell, such as `bash`, Git for Windows' included), `env` (variables to set), `pass` (variables of the command's own environment to hand through) | a persistent shell as the kernel named like the entry, starting from an empty environment; what `[kernels.<name>]` with `kind = "shell"` builds |
-    /// | `powershell-kernel` | `dir` (default `{workspace}`), `program` (default `powershell` on Windows, `pwsh` elsewhere), `env`, `pass` | a persistent PowerShell as the kernel named like the entry; what `[kernels.<name>]` with `kind = "powershell"` builds |
+    /// | `shell-kernel` | `dir` (default `{workspace}`), `program` (default `sh`; any POSIX shell, such as `bash`, Git for Windows' included), `prefix` (a launcher argv), `env` (variables to set), `pass` (variables of the command's own environment to hand through) | a persistent shell as the kernel named like the entry, starting from an empty environment; what `[kernels.<name>]` with `kind = "shell"` builds |
+    /// | `powershell-kernel` | `dir` (default `{workspace}`), `program` (default `powershell` on Windows, `pwsh` elsewhere), `prefix`, `env`, `pass` | a persistent PowerShell as the kernel named like the entry; what `[kernels.<name>]` with `kind = "powershell"` builds |
     /// | `http-client` | none | the client the `http` capability sends through, for `http` and `https` |
     /// | `page` | `port` (any free one by default) | the agent's page in a browser, served on `127.0.0.1` at an address the command says when it is about to run the agent: the record as it grows, a gate's question answered there, a prompt typed and a run stopped |
     /// | `mcp` | `command` (with `args`, `env` and `kernel`, `shell` by default) or `url` (with `secret` or `bearer_token_env`), and `timeout_seconds` | the tools of one MCP server, as `<name>__<tool>`; what `[mcp.<name>]` builds |

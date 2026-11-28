@@ -33,7 +33,58 @@ is written to `<out>/summary.md`.
 
 The macOS side (the build with Metal, `sandbox-exec`, `caffeinate`) was written on Linux
 and has not been run on a Mac yet: the first run there is its test. The bench checks its own
-wall before it starts and says so if the sandbox does not hold.
+wall before it starts and says so if the sandbox does not hold. It also checks what the wall
+leaves working: the tasks have the agent, and their own checks, run `python3`, `cc`, `make`,
+`git` and `curl`, write a temporary file and listen on loopback, and a bench whose wall
+breaks one of these stops before the first trial and names it. (A sandbox that denies
+`/private/var/select` or the developer tools' directory turns macOS's `python3`, `cc`,
+`make` and `git` into stubs that only print `xcode-select` errors.)
+
+### On a Mac, behind the sandbox runtime
+
+```bash
+scripts/model-bench/run.sh --srt --provider anthropic --model-id claude-haiku-5-5 \
+  --out .bench-runs/haiku
+scripts/model-bench/bench.py --srt-check        # the wall alone, no model
+```
+
+`--srt` puts the agent's shell, and the checks that run what it wrote, under
+[`srt`](https://github.com/anthropic-experimental/sandbox-runtime) (0.0.81 or later, with
+`node`, both on `PATH`) through the shell kernel's `prefix`; the command itself, which talks
+to the model, stays outside. `--out` has to be under `.bench-runs/` in this checkout. Behind
+that wall nothing is read but the system's tools, macOS's developer tools (what
+`/usr/bin/python3`, `cc`, `make` and `git` hand over to), the trial's workspace and a
+scratch directory beside it, which holds the shell's `HOME` and `TMPDIR`; only those two are
+written, and your own temporary directory (`/var/folders/.../T`), which `cc` and the
+developer tools write to whatever `TMPDIR` says: what other programs of yours keep there is
+in the agent's reach. Loopback is open, since a task starts a server and fetches from it, so a service of
+your own on loopback is in reach too; nothing further out is. `--keychain-secret NAME` has
+the command read the key from the keychain (`corduroy secrets set NAME`) and not from the
+environment.
+
+### Started by something else
+
+```bash
+scripts/model-bench/local.sh run lfm3-1.7b,qwen3-0.6b first-try trials=1 tier=1,4
+scripts/model-bench/local.sh models       # tasks, check (macOS: the sandbox alone), stop
+```
+
+`local.sh` is the bench for local models with nothing to steer it but its arguments, each
+checked before anything runs: models `scripts/local-model.sh` knows, a name for the run
+(results in `.bench-runs/<name>`, nowhere else), and `trials=`, `tier=`, `only=`, `climb=`
+and `fresh`. It passes on no other option (`--binary`, `--out`, `--provider`), drops every
+`CORDUROY_*` variable and any `PATH` entry inside this checkout, and uses `--srt` on macOS.
+It is for an agent whose own sandbox lets this one command out: allow
+`scripts/model-bench/local.sh` there, and not `run.sh`.
+
+Where the agent cannot be let out at all and may only write under `.bench-runs/`, leave
+`scripts/model-bench/local.sh watch` running in a terminal of your own. The agent asks by
+writing one line, `run MODELS NAME [settings]` or `stop`, to
+`.bench-runs/requests/<id>.request`, and reads `<id>.status` (`running`, then `exit N`) and
+`<id>.log` beside it. Each request is checked exactly as the same words on the command line
+are, they are done one at a time, and a link planted under `.bench-runs/` in a log's or a
+run's place is refused, not written through. Anything that can write there can start a run,
+and one that rearranges a run's directory while it is going is not guarded against.
 
 ### Several at once
 

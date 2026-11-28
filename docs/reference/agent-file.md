@@ -96,6 +96,7 @@ name is what a `kernel` grant and a plugin's configuration refer to.
 | `kind` | string | `shell` (a persistent POSIX shell) or `powershell`, or a kernel kind a command of your own adds. `<kind>` builds the extension kind `<kind>-kernel`. |
 | `dir` | string | Where it starts. Default `{workspace}`. |
 | `program` | string | The shell to run. `shell`: `sh` by default, any POSIX shell such as `bash`. `powershell`: `powershell` on Windows, `pwsh` elsewhere. |
+| `prefix` | list of strings | Optional trusted executable and arguments prepended to the shell and to every subprocess started through the kernel (including stdio MCP). The original program and its arguments follow as separate arguments. An empty list uses no launcher. |
 | `env` | table | Environment variables to set for the shell and for what the kernel starts, such as `env = { CARGO_TERM_COLOR = "never" }`. |
 | `pass` | list of strings | Variables of your own environment to hand through by name, such as `pass = ["CARGO_HOME", "HTTPS_PROXY"]`. One that is not set is left out. |
 
@@ -107,8 +108,9 @@ as you have it, and beyond those only what `env` sets and `pass` names. Whatever
 this way is in the open: a command can print it, and what it prints is in the log. So
 `pass` a credential only when a command needs the value itself.
 
-A kernel is not a sandbox: a shell kernel can do whatever the user running `corduroy` can.
-Which kernel an add-on may use is the security decision. See
+A shell kernel without a sandbox launcher can do whatever the user running `corduroy` can.
+`prefix` can put its processes under an OS sandbox; it does not constrain the host or its
+provider clients. See
 [Security model](../explanation/security-model.md).
 
 ## `[secrets.<name>]`
@@ -190,8 +192,8 @@ know.
 
 | Kind (shipped) | Configuration | Adds |
 | --- | --- | --- |
-| `shell-kernel` | `dir`, `program` | a shell kernel named like the entry (what `[kernels.*]` with `kind = "shell"` builds) |
-| `powershell-kernel` | `dir`, `program` | a PowerShell kernel named like the entry |
+| `shell-kernel` | `dir`, `program`, `prefix`, `env`, `pass` | a shell kernel named like the entry (what `[kernels.*]` with `kind = "shell"` builds) |
+| `powershell-kernel` | `dir`, `program`, `prefix`, `env`, `pass` | a PowerShell kernel named like the entry |
 | `mcp` | as `[mcp.*]` | one MCP server's tools |
 | `env-secret` | `env` | one secret |
 | `http-client` | none | the client the `http` capability sends through; every agent gets it already |

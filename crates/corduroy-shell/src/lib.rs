@@ -94,7 +94,7 @@ pub fn shell_kernel(name: impl Into<String>, dir: impl Into<PathBuf>) -> impl Pl
 pub fn shell_kernel_of(name: impl Into<String>, shell: ShellKernel) -> impl Plugin + 'static {
     let name = name.into();
     let (program, dir, dialect) = (shell.program, shell.dir, shell.dialect);
-    let (env, passed) = (shell.env, shell.passed);
+    let (env, passed, prefix) = (shell.env, shell.passed, shell.prefix);
     plugin_fn(format!("kernel-{name}"), &[KERNELS], move |ctx| {
         let kernels = ctx.service::<Kernels>(KERNELS)?;
         let mut fresh = ShellKernel::program(program.clone());
@@ -102,6 +102,7 @@ pub fn shell_kernel_of(name: impl Into<String>, shell: ShellKernel) -> impl Plug
         fresh.dialect = dialect;
         fresh.env.clone_from(&env);
         fresh.passed.clone_from(&passed);
+        fresh.prefix.clone_from(&prefix);
         let kernel: Arc<Mutex<dyn Kernel>> = Arc::new(Mutex::new(fresh));
         kernels.register(ctx, name.clone(), kernel)?;
         Ok(())
@@ -117,6 +118,7 @@ pub struct ShellKernel {
     program: String,
     dialect: Dialect,
     dir: Option<PathBuf>,
+    prefix: Vec<String>,
     /// Variables set for the shell and for what the kernel starts, beyond the plain ones.
     env: Vec<(String, String)>,
     /// Variables of the program's own environment handed through, by name.
@@ -152,6 +154,7 @@ impl ShellKernel {
             program: program.into(),
             dialect: Dialect::Posix,
             dir: None,
+            prefix: Vec::new(),
             env: Vec::new(),
             passed: Vec::new(),
             session: None,
@@ -190,6 +193,26 @@ impl ShellKernel {
         self
     }
 
+    /// Prefix both the persistent shell and kernel-spawned processes with a trusted command
+    /// and arguments, for example a sandbox launcher. The prefix is not interpreted as shell code.
+    #[must_use]
+    pub fn with_prefix(mut self, prefix: Vec<String>) -> Self {
+        self.prefix = prefix;
+        self
+    }
+
+    fn command(&self, program: &str) -> Command {
+        let mut command = if let Some((executable, args)) = self.prefix.split_first() {
+            let mut wrapper = Command::new(executable);
+            wrapper.args(args).arg(program);
+            wrapper
+        } else {
+            Command::new(program)
+        };
+        self.environment(&mut command);
+        command
+    }
+
     /// Set the environment variable `name` to `value` for the shell and for every process
     /// the kernel starts. The value is in the open: whatever runs there can print it.
     #[must_use]
@@ -226,8 +249,7 @@ impl ShellKernel {
 
     fn start(&self) -> Result<Session, KernelError> {
         let unavailable = |error: std::io::Error| KernelError::Unavailable(error.to_string());
-        let mut command = Command::new(&self.program);
-        self.environment(&mut command);
+        let mut command = self.command(&self.program);
         if self.dialect == Dialect::PowerShell {
             // Commands from standard input, one line at a time, with nothing asked of a person.
             // A terminal of no capabilities, or .NET on Unix writes the codes that set one up
@@ -300,8 +322,7 @@ impl Kernel for ShellKernel {
     /// environment is the kernel's with the variables `spawn` names: nothing of the
     /// program's own beyond that.
     fn spawn(&mut self, spawn: &Spawn) -> Result<Box<dyn Process>, KernelError> {
-        let mut command = Command::new(&spawn.program);
-        self.environment(&mut command);
+        let mut command = self.command(&spawn.program);
         command
             .args(&spawn.args)
             .envs(spawn.env.iter().map(|(name, value)| (name, value)))
@@ -636,6 +657,37 @@ mod tests {
         assert!(process.running());
         process.kill();
         assert!(!process.running());
+    }
+
+    #[test]
+    fn the_prefix_wraps_shell_cells_and_spawned_programs() {
+        let mut kernel = ShellKernel::new().with_prefix(vec![
+            "sh".into(),
+            "-c".into(),
+            "export PREFIXED=yes; exec \"$@\"".into(),
+            "wrapper".into(),
+        ]);
+        let cell = kernel
+            .exec("printf '%s' \"$PREFIXED\"", Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(cell.output, "yes");
+
+        let spawn = Spawn {
+            program: "sh".into(),
+            args: vec![
+                "-c".into(),
+                "echo \"$PREFIXED $1\"".into(),
+                "sh".into(),
+                "one argument".into(),
+            ],
+            ..Spawn::default()
+        };
+        let mut process = kernel.spawn(&spawn).unwrap();
+        let mut line = String::new();
+        BufReader::new(process.stdout().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert_eq!(line, "yes one argument\n");
     }
 
     #[test]

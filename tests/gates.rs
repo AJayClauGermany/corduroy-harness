@@ -452,7 +452,7 @@ async fn a_declined_ask_goes_back_to_the_model_with_the_reason() {
     assert_eq!(runs.load(Ordering::SeqCst), 0);
     assert_eq!(
         payloads(&harness, "tool/result")[0]["output"],
-        "a person declined this call: not today"
+        "the person you are working for declined this call: not today"
     );
 }
 
