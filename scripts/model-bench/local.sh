@@ -93,7 +93,17 @@ case $action in
     ;;
   stop)
     [ $# -eq 0 ] || refuse "stop takes no arguments"
-    exec scripts/local-model.sh stop
+    # A run stops its own server when it ends, so there is often none left: for whoever
+    # tidies up afterwards that is the state asked for, not a failure.
+    said=$(scripts/local-model.sh stop 2>&1) && code=0 || code=$?
+    case $said in
+      *"no server started"*) echo "no model server is running" ;;
+      *)
+        [ -z "$said" ] || printf '%s\n' "$said"
+        exit "$code"
+        ;;
+    esac
+    exit 0
     ;;
   tasks)
     [ $# -eq 0 ] || refuse "tasks takes no arguments"
