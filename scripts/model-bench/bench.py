@@ -685,6 +685,46 @@ def healthy(url: str) -> bool:
         return False
 
 
+# What the tasks have the agent, and their own checks, run: each must work where the agent
+# does. A wall that hides the checks may hide these too (a sandbox that denies macOS's
+# developer directory leaves `python3`, `cc`, `make` and `git` as stubs that only fail), and
+# then an hour's trials measure the wall and not the model.
+NEEDED = {
+    "python3": "python3 -c pass",
+    "cc": "cc --version",
+    "make": "make --version",
+    "git": "git --version",
+    "curl": "curl --version",
+    "a temporary file": 'f=$(mktemp) && rm -f "$f"',
+    "loopback": "python3 -c 'import socket; socket.socket().bind((\"127.0.0.1\", 0))'",
+}
+
+
+def unusable(config: Config) -> list[tuple[str, str]]:
+    """Each of `NEEDED` that fails behind the wall, with the last thing it said."""
+    broken = []
+    for name, command in NEEDED.items():
+        try:
+            ran = subprocess.run(
+                [*config.wall(), "sh", "-c", command],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=60,
+                cwd=config.out,
+                env=config.env(),
+                stdin=subprocess.DEVNULL,
+                **config.demote(),
+            )
+        except subprocess.TimeoutExpired:
+            broken.append((name, "no answer in 60s"))
+            continue
+        if ran.returncode != 0:
+            said = (ran.stderr.strip() or ran.stdout.strip() or f"exit {ran.returncode}").splitlines()
+            broken.append((name, said[-1][:200]))
+    return broken
+
+
 def run_model(args, chosen: list[dict], tasks, model: str | None) -> Path:
     """Every chosen task, `--trials` times, against one model; returns the results file.
     With `model`, the bench serves it itself and results go under `<out>/<model>`."""
@@ -716,6 +756,15 @@ def run_model(args, chosen: list[dict], tasks, model: str | None) -> Path:
             config.sandbox = False
     if not config.isolated:
         sys.stderr.write("no wall: the agent runs as you and could read the checks\n")
+    broken = unusable(config)
+    if broken:
+        raise SystemExit(
+            "behind the wall the agent runs in, these do not work, and the tasks need them:\n"
+            + "\n".join(f"  {name}: {why}" for name, why in broken)
+            + "\nNothing was run. Let the wall reach them (on macOS: /private/var/select and"
+            " the developer tools' directory to read, the temporary directory to write,"
+            " loopback to connect to), then run this again."
+        )
     if args.fresh and results.exists():
         results.unlink()
     if config.user:

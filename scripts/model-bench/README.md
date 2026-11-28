@@ -33,7 +33,12 @@ is written to `<out>/summary.md`.
 
 The macOS side (the build with Metal, `sandbox-exec`, `caffeinate`) was written on Linux
 and has not been run on a Mac yet: the first run there is its test. The bench checks its own
-wall before it starts and says so if the sandbox does not hold.
+wall before it starts and says so if the sandbox does not hold. It also checks what the wall
+leaves working: the tasks have the agent, and their own checks, run `python3`, `cc`, `make`,
+`git` and `curl`, write a temporary file and listen on loopback, and a bench whose wall
+breaks one of these stops before the first trial and names it. (A sandbox that denies
+`/private/var/select` or the developer tools' directory turns macOS's `python3`, `cc`,
+`make` and `git` into stubs that only print `xcode-select` errors.)
 
 ### Several at once
 

@@ -6,7 +6,6 @@ const DANGEROUS: &[(&str, &str)] = &[
     ("rm -rf /", "deletes from the root of the filesystem"),
     ("rm -rf ~", "deletes the home directory"),
     ("rm -rf *", "deletes everything in the directory"),
-    ("rm -rf .", "deletes the working directory"),
     ("mkfs", "formats a filesystem"),
     ("dd if=", "writes raw blocks"),
     ("> /dev/sd", "writes to a disk device"),
@@ -57,6 +56,9 @@ pub(crate) fn concern(input: &str) -> Option<String> {
     {
         return Some(format!("the command {why}"));
     }
+    if deletes_here(&lower) {
+        return Some("the command deletes the working directory".to_owned());
+    }
     if (lower.contains("curl ") || lower.contains("wget "))
         && (lower.contains("| sh") || lower.contains("| bash") || lower.contains("|sh"))
     {
@@ -76,6 +78,23 @@ pub(crate) fn concern(input: &str) -> Option<String> {
         })
     });
     secret.map(|(_, what)| format!("the input seems to hold {what}"))
+}
+
+/// Whether `lower` removes the directory it runs in or one above it (`rm -rf .`, `./`,
+/// `..`, `../x`), and not something inside it (`rm -rf ./build`, `rm -rf .cache`).
+fn deletes_here(lower: &str) -> bool {
+    const REMOVE: &str = "rm -rf .";
+    // What a path cannot go on with: a space, the end of a command, or of the JSON string
+    // the command is in.
+    let ends = |rest: &str| {
+        rest.chars().next().is_none_or(|c| {
+            c.is_ascii_whitespace() || matches!(c, '"' | '\\' | ';' | '&' | '|' | ')')
+        })
+    };
+    lower.match_indices(REMOVE).any(|(at, _)| {
+        let rest = lower.get(at + REMOVE.len()..).unwrap_or_default();
+        rest.starts_with('.') || ends(rest) || rest.strip_prefix('/').is_some_and(ends)
+    })
 }
 
 /// The phrase in `text` that tries to instruct the model, if there is one.
@@ -99,6 +118,33 @@ mod tests {
         assert!(concern(pipe).unwrap().contains("network"));
         assert_eq!(concern(r#"{"command":"rm -rf build"}"#), None);
         assert_eq!(concern(r#"{"command":"ls -la"}"#), None);
+    }
+
+    #[test]
+    fn deleting_inside_the_directory_is_not_deleting_it() {
+        for here in [
+            "rm -rf .",
+            "rm -rf ./",
+            "rm -rf . && ls",
+            "cd x; rm -rf ..",
+            "rm -rf ../x",
+        ] {
+            let call = format!(r#"{{"command":"{here}"}}"#);
+            assert!(
+                concern(&call).unwrap().contains("working directory"),
+                "{here}"
+            );
+        }
+        let newline = r#"{"command":"rm -rf .\nls"}"#;
+        assert!(concern(newline).unwrap().contains("working directory"));
+        for inside in [
+            "rm -rf ./scratch_try",
+            "cd .. && rm -rf ./build/",
+            "rm -rf .cache",
+        ] {
+            let call = format!(r#"{{"command":"{inside}"}}"#);
+            assert_eq!(concern(&call), None, "{inside}");
+        }
     }
 
     #[test]

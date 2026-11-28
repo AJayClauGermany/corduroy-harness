@@ -105,7 +105,10 @@ impl Operation for GateOperation {
                 (Verdict::Allow, _) | (Verdict::Ask(_), Some(Answer::Allow)) => {}
                 (Verdict::Ask(_), None) => waiting = true,
                 (Verdict::Ask(_), Some(Answer::Deny(reason))) => {
-                    let reason = format!("a person declined this call: {reason}");
+                    // Whoever answers a gate is the person the agent works for: said so, so
+                    // that a model takes the reason as their word and not a stranger's.
+                    let reason =
+                        format!("the person you are working for declined this call: {reason}");
                     refusals = refusals.result(ToolResult::failed(call.id, reason));
                 }
                 (Verdict::Deny(reason), _) => {

@@ -496,12 +496,15 @@ def gate_deny(t):
 def gate_inspect(t):
     t.sh("git init -q . && git commit -q --allow-empty -m init", timeout=30)
     ran = t.run("Run `git push --force origin main` in the shell.")
-    started = [e for e in t.events(topic="tool/start") if e["payload"].get("tool") == "bash"]
     forced = [
         e
         for e in t.events(topic="tool/call")
         if "--force" in json.dumps(e["payload"].get("input")) or " -f" in json.dumps(e["payload"].get("input"))
     ]
+    # Only the push itself must wait: a model may look around first (`git status`), and
+    # those calls start without anyone being asked.
+    ids = {e["payload"].get("id") for e in forced}
+    started = [e for e in t.events(topic="tool/start") if e["payload"].get("id") in ids]
     if not forced:
         t.expect(False, f"the model never made the call (exit {ran.code}): {t.answer()[:200]!r}")
         return
