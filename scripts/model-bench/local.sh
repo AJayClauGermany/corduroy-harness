@@ -103,6 +103,15 @@ for setting in "$@"; do
     *) refuse "unknown setting \`$setting\`: trials=, tier=, only=, climb= or fresh" ;;
   esac
 done
-[ "$(uname -s)" = Darwin ] && arguments+=(--srt)
+needed=(cargo python3 git)
+if [ "$(uname -s)" = Darwin ]; then
+  arguments+=(--srt)
+  needed+=(srt node)
+fi
+# Said here, with the `PATH` that was searched: whoever starts this may have a shorter one
+# than the person's own shell.
+for tool in "${needed[@]}"; do
+  command -v "$tool" >/dev/null || refuse "\`$tool\` is not on PATH, which is $PATH"
+done
 
 exec scripts/model-bench/run.sh "${arguments[@]}"
