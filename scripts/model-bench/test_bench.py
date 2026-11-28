@@ -106,8 +106,10 @@ class Credentials(unittest.TestCase):
         self.assertEqual(written, [str(trial.ws), str(trial.scratch)])
         self.assertNotIn(str(trial.private), json.dumps(files["allowRead"]))
         self.assertEqual(kernel["prefix"][0], "/test/srt")
-        for name in ("HOME", "TMPDIR", "CLAUDE_CODE_TMPDIR"):
+        for name in ("HOME", "CLAUDE_CODE_TMPDIR"):
             self.assertTrue(kernel["env"][name].startswith(str(trial.scratch)), name)
+        # SRT's own socket goes in TMPDIR, and a trial's directory is too long a path for one.
+        self.assertNotIn("TMPDIR", kernel["env"])
 
     def test_environment_source_remains_supported(self):
         for name in (None, "WORK_API_KEY"):

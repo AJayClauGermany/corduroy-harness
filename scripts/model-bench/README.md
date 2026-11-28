@@ -54,7 +54,7 @@ scripts/model-bench/bench.py --srt-check        # the wall alone, no model
 to the model, stays outside. `--out` has to be under `.bench-runs/` in this checkout. Behind
 that wall nothing is read but the system's tools, macOS's developer tools (what
 `/usr/bin/python3`, `cc`, `make` and `git` hand over to), the trial's workspace and a
-scratch directory beside it, which is the shell's `HOME` and `TMPDIR`; only those two are
+scratch directory beside it, which holds the shell's `HOME` and `TMPDIR`; only those two are
 written. Loopback is open, since a task starts a server and fetches from it, so a service of
 your own on loopback is in reach too; nothing further out is. `--keychain-secret NAME` has
 the command read the key from the keychain (`corduroy secrets set NAME`) and not from the

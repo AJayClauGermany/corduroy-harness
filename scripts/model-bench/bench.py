@@ -81,14 +81,17 @@ def tool_places() -> tuple[str, ...]:
 
 
 def srt_env(scratch: Path) -> dict:
-    """What a sandboxed shell is told: a home and a temporary directory of the trial's own,
-    since the person's are behind the wall (`git` stops at a `~/.gitconfig` it may not read,
-    a compiler at a temporary file it may not write). SRT sets `TMPDIR` itself, from
-    `CLAUDE_CODE_TMPDIR`, so that is said too."""
+    """What `srt` is started with for a sandboxed shell: a home and a temporary directory
+    of the trial's own, since the person's are behind the wall (`git` stops at a
+    `~/.gitconfig` it may not read, a compiler at a temporary file it may not write).
+
+    The temporary directory is named as `CLAUDE_CODE_TMPDIR`, which SRT hands to what it
+    runs as `TMPDIR`. `TMPDIR` itself is left alone: SRT keeps a socket of its own there,
+    outside the wall, and a socket's path has 104 bytes, which a trial's directory is past."""
     home, temporary = scratch / "home", scratch / "tmp"
     for made in (home, temporary):
         made.mkdir(parents=True, exist_ok=True)
-    return {"HOME": str(home), "TMPDIR": str(temporary), "CLAUDE_CODE_TMPDIR": str(temporary)}
+    return {"HOME": str(home), "CLAUDE_CODE_TMPDIR": str(temporary)}
 
 
 def srt_prefix(
