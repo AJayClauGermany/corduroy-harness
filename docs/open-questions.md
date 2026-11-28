@@ -1193,6 +1193,63 @@ and no duration, and a listener runs on the thread that committed
 *Direction.* Confirm it, and check that a trace exporter can be written as an extension
 from what events hold today.
 
+### G23. Can an extension be written in a language other than Rust?
+
+An extension is Rust compiled into the command. Other languages reach the agent as add-ons
+(JavaScript and Python, sandboxed) or as MCP servers (tools only), and neither is given what
+an extension is: a kernel, a decision point, a step of the loop, the host's authority. A C
+interface for extensions would open that tier to anything that can call or be called
+through C. Nothing is built, and nothing has been tried; this is to be studied on its own
+before any of it is decided.
+
+Where the code stands. The core's types cannot be given a C layout as they are: `String`,
+`Vec`, `Result`, `Arc<dyn Tool>` and a borrowed `Context` have none. So the interface would
+be a mirror of its own (opaque handles, strings as a pointer and a length, tables of
+function pointers) in a crate outside the core, an extension like any other, which
+implements `Plugin` and hands the foreign code a handle to its `Context`, so that every
+registration is still an effect and unloading reverts it. The core gains no dependency and
+stays `no_std`. Most of what an extension contributes already crosses as text: `Tool::call`
+takes JSON, `Service::call` a caller, a method and a payload, and gates, prompt parts,
+secrets and listeners have the same shape. Three things do not: `Provider`, `Operation` and
+`Loop` return futures, which over C become calls that block; `Kernel` and `Process` hold
+pipes and state that lasts; and the traits are `Send + Sync`, which a C author can only
+promise. The workspace forbids `unsafe`, so the crate would be its one documented
+exception, as `corduroy-guest`'s bindings are among the add-ons.
+
+What has to be decided:
+
+1. *Whether it is wanted in the process at all.* A protocol to an extension in a process
+   of its own, as MCP is for tools, needs no `unsafe` and outlives the extension's crash,
+   and costs speed and a wire format to design and keep. In the process, a fault in foreign
+   code takes the command down, where a trap in an add-on ends one instance, and a panic
+   has to be caught at the boundary in both directions.
+2. *Loaded when the command runs, or linked when it is built.* A library named in the
+   agent file is the more extendable, and ends the rule that an extension needs the command
+   rebuilt ([Three tiers](design.md#three-tiers-core-extensions-add-ons)): a path would
+   carry the host's whole authority, so a workspace's agent file must never be able to name
+   one, which waits on a guarantee that is decided and not built
+   ([What is safe by default](design.md#what-is-safe-by-default), the fifth). A static
+   library and a header keep the rule and need no loader, and each author builds a command
+   of their own.
+3. *Whether the interface freezes with 1.0.* It would be a fourth contract beside the
+   world, the core's traits and the log ([What is stable](design.md#what-is-stable)), and
+   one that cannot change by adding unless it was laid out for it from the start.
+4. *How much of the tier it covers.* The contributions that cross as text only, or the
+   async traits and kernels as well, and in which order.
+5. *Whether the other direction is the same work.* A program in another language that
+   embeds the harness and drives runs needs a C interface to `Harness`, which is a
+   different surface from the one an extension is handed.
+
+*Direction.* Study it before deciding, with the questions above as the brief. The
+recommendation to argue with: in the process, linked at build time, covering tools,
+services, gates, prompt parts, secrets and listeners first; the header generated from the
+crate and not written by hand; one small extension in C in the tests as the proof that the
+mirror types hold; every table carrying a version and its own size, so that it grows by
+adding; and the whole of it outside the 1.0 promise until it has been used. That commits
+to nothing on loading or on freezing. Whichever way it goes, three things hold: the core
+does not change for it, `unsafe` stays in the one crate, and foreign code reaches the
+harness only through a `Context`.
+
 ## H. The standard set, the command and the agent file
 
 ### H3. What of the harness can the agent file set?
