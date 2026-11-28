@@ -110,3 +110,6 @@ Working on corduroy itself:
 - [What a small local model does in the harness](local-model-findings.md): the command
   driven from outside through 75 tasks against the local model, several times each: what
   works, what fails and how often, and what the log does not record.
+- [A trial run of every local model](local-model-trial-2026-11-28.md): the four quick evals
+  against each of the seven models the script serves, one trial each, and what each failure
+  was.
