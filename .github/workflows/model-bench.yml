@@ -1,0 +1,129 @@
+name: Model bench
+
+# The long list of tasks against small models served on the runner
+# (scripts/model-bench/README.md). It takes hours of a runner, so it is kept within what a
+# free service can be asked for:
+#
+# - It runs only when a person starts it (Actions > Model bench > Run workflow): never on a
+#   push, a pull request or a schedule.
+# - One run at a time; a second waits. Within a run, two models at a time.
+# - Every job has a clock (`minutes`, at most 300) under GitHub's six hours a job, and the
+#   bench is stopped by it, with what it found kept.
+# - The model server's build and each model's file are cached, so Hugging Face and PyPI
+#   are asked once a model, not once a run.
+# - The defaults are the smallest useful run: one model, tier 1, one trial.
+#
+# What a job found is its artifact, `model-bench-<model>`: the model's results file, the
+# comparison and the log. To keep it, put `<model>.jsonl` into scripts/model-bench/results/
+# and commit; a later run (here or on any machine) goes on from what is there.
+
+on:
+  workflow_dispatch:
+    inputs:
+      models:
+        description: Models, separated by commas (names from scripts/local-model.sh models)
+        default: lfm3-1.7b
+      tier:
+        description: Tiers, separated by commas (0 to 6)
+        default: "1"
+      trials:
+        description: How often each task is tried
+        default: "1"
+      minutes:
+        description: Minutes of bench a model (at most 300)
+        default: "120"
+      climb:
+        description: Stop going up the ladder under this share of passes (empty for no climbing)
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: model-bench
+  cancel-in-progress: false
+
+jobs:
+  models:
+    runs-on: ubuntu-latest
+    outputs:
+      list: ${{ steps.list.outputs.list }}
+    steps:
+      - uses: actions/checkout@v4
+      # Only names the script knows, and at most seven of them, become jobs.
+      - id: list
+        env:
+          MODELS: ${{ inputs.models }}
+        run: |
+          known=$(scripts/local-model.sh models | awk '{print $1}')
+          list=$(printf '%s' "$MODELS" | tr ',' '\n' | sed 's/ //g' | grep -Fx -f <(echo "$known") | sort -u | head -n 7 | jq -R . | jq -sc .)
+          [ "$list" != "[]" ] || { echo "no known model in: $MODELS" >&2; exit 1; }
+          echo "list=$list" >> "$GITHUB_OUTPUT"
+
+  bench:
+    needs: models
+    runs-on: ubuntu-latest
+    timeout-minutes: 345
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        model: ${{ fromJSON(needs.models.outputs.list) }}
+    env:
+      CORDUROY_LOCAL_MODEL: ${{ matrix.model }}
+      CORDUROY_LOCAL_MODEL_DIR: /home/runner/local-model
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: model-bench
+          workspaces: |
+            .
+            plugins
+      - uses: actions/cache@v4
+        with:
+          path: /home/runner/local-model/llama_cpp_python-*
+          key: llama-server-${{ runner.os }}-${{ hashFiles('scripts/local-model.sh') }}
+      - uses: actions/cache@v4
+        with:
+          path: /home/runner/local-model/models
+          key: model-${{ matrix.model }}-${{ hashFiles('scripts/local-model.sh') }}
+      - run: cargo build --release -p corduroy-cli
+      - run: cargo plugins
+      - run: scripts/local-model.sh setup
+      # As root, so that the agent runs as a user who cannot read the checks. The inputs
+      # are passed through the environment, never written into the script.
+      - name: Bench
+        env:
+          TIER: ${{ inputs.tier }}
+          TRIALS: ${{ inputs.trials }}
+          MINUTES: ${{ inputs.minutes }}
+          CLIMB: ${{ inputs.climb }}
+        run: |
+          case $MINUTES in '' | *[!0-9]*) echo "minutes: a number" >&2; exit 1 ;; esac
+          [ "$MINUTES" -le 300 ] || MINUTES=300
+          set -- --models "$CORDUROY_LOCAL_MODEL" --tier "$TIER" --trials "$TRIALS"
+          [ -z "$CLIMB" ] || set -- "$@" --climb "$CLIMB"
+          sudo env "PATH=$PATH" CORDUROY_BENCH_BUILT=1 \
+            "CORDUROY_LOCAL_MODEL_DIR=$CORDUROY_LOCAL_MODEL_DIR" \
+            scripts/model-bench/piece.sh "$MINUTES" "$@"
+      - name: Summary
+        if: always()
+        run: |
+          sudo cp /var/tmp/corduroy-bench/bench.log scripts/model-bench/results/bench.log || true
+          sudo chmod -R a+rX scripts/model-bench/results
+          cat scripts/model-bench/results/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: model-bench-${{ matrix.model }}
+          path: |
+            scripts/model-bench/results/${{ matrix.model }}.jsonl
+            scripts/model-bench/results/summary.md
+            scripts/model-bench/results/collected.jsonl
+            scripts/model-bench/results/bench.log
+          retention-days: 30
