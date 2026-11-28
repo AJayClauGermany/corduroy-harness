@@ -89,6 +89,26 @@ class Credentials(unittest.TestCase):
         self.assertEqual(policies[1]["network"]["allowedDomains"], [])
         self.assertEqual(policies[1]["network"]["deniedDomains"], ["*"])
 
+    def test_srt_leaves_the_tools_and_a_scratch_directory_in_reach(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = self.config(srt_path="/test/srt")
+            config.out = Path(directory)
+            trial = bench.Trial(config, "read", 1)
+            policy = json.loads((trial.private / "srt.json").read_text())
+            kernel = tomllib.loads(trial.agent_text)["kernels"]["shell"]
+            self.assertTrue((trial.scratch / "tmp").is_dir())
+        files = policy["filesystem"]
+        # The stubs in /usr/bin read these before they run anything.
+        self.assertIn("/private/var/select", files["allowRead"])
+        self.assertIn("/Library/Developer/CommandLineTools", files["allowRead"])
+        self.assertTrue(policy["network"]["allowLocalBinding"])
+        written = [entry["path"] for entry in files["allowWrite"]]
+        self.assertEqual(written, [str(trial.ws), str(trial.scratch)])
+        self.assertNotIn(str(trial.private), json.dumps(files["allowRead"]))
+        self.assertEqual(kernel["prefix"][0], "/test/srt")
+        for name in ("HOME", "TMPDIR", "CLAUDE_CODE_TMPDIR"):
+            self.assertTrue(kernel["env"][name].startswith(str(trial.scratch)), name)
+
     def test_environment_source_remains_supported(self):
         for name in (None, "WORK_API_KEY"):
             with self.subTest(name=name):

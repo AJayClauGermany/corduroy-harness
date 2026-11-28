@@ -26,6 +26,7 @@ takes hours. Standard library only.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import platform
@@ -34,7 +35,6 @@ import re
 import secrets
 import shutil
 import signal
-import socket
 import subprocess
 import sys
 import tempfile
@@ -51,20 +51,71 @@ LOCAL_MODEL = ROOT / "scripts/local-model.sh"
 MACOS = platform.system() == "Darwin"
 
 
-def srt_prefix(srt: str, settings: Path, workspace: Path, *read_only: Path) -> list[str]:
-    """Constrain tool processes, leaving model connections in the trusted CLI."""
+@functools.cache
+def tool_places() -> tuple[str, ...]:
+    """Where macOS keeps what `/usr/bin/python3`, `cc`, `make` and `git` really are. Those
+    four are stubs: each reads the link in `/var/select` and runs the program of that name in
+    the developer directory, and one that cannot read either only prints `xcode-select`
+    errors. `/bin/sh` reads `/var/select` too, and `curl` its configuration in `/etc/ssl`."""
+    places = [
+        "/private/var/select",
+        "/Library/Developer/CommandLineTools",
+        "/private/etc/ssl",
+        "/private/etc/localtime",
+        "/private/var/db/timezone",
+    ]
+    try:
+        chosen = subprocess.run(
+            ["/usr/bin/xcode-select", "-p"], capture_output=True, text=True, timeout=10, check=False
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        chosen = ""
+    # Xcode in place of the command line tools: the whole application, which the tools in
+    # its developer directory reach back into.
+    application = re.match(r"(/.+?\.app)(/|$)", chosen)
+    if application:
+        places.append(application.group(1))
+    elif chosen.startswith("/") and chosen not in places:
+        places.append(chosen)
+    return tuple(places)
+
+
+def srt_env(scratch: Path) -> dict:
+    """What a sandboxed shell is told: a home and a temporary directory of the trial's own,
+    since the person's are behind the wall (`git` stops at a `~/.gitconfig` it may not read,
+    a compiler at a temporary file it may not write). SRT sets `TMPDIR` itself, from
+    `CLAUDE_CODE_TMPDIR`, so that is said too."""
+    home, temporary = scratch / "home", scratch / "tmp"
+    for made in (home, temporary):
+        made.mkdir(parents=True, exist_ok=True)
+    return {"HOME": str(home), "TMPDIR": str(temporary), "CLAUDE_CODE_TMPDIR": str(temporary)}
+
+
+def srt_prefix(
+    srt: str, settings: Path, workspace: Path, *read_only: Path, scratch: Path | None = None
+) -> list[str]:
+    """Constrain tool processes, leaving model connections in the trusted CLI.
+
+    The wall is for the exam: nothing of the person's files, the checks or another trial is
+    read. What the tasks have the agent use stays in reach: the system's tools and macOS's
+    developer tools to read, the workspace and `scratch` to write, and loopback, which a
+    task that starts a server and fetches from it needs (so a service of the person's on
+    loopback can be reached too; nothing further out can)."""
     def literal(path: Path) -> dict:
         return {"path": str(path), "literal": True}
 
     state = literal(workspace / ".corduroy")
     runtime = ["/bin", "/usr/bin", "/usr/lib", "/usr/libexec", "/usr/share", "/System/Library",
                "/dev/null", "/dev/urandom", "/private/etc/passwd", "/private/etc/group"]
+    written = [workspace, *([scratch] if scratch else [])]
     settings.write_text(json.dumps({
-        "network": {"allowedDomains": [], "deniedDomains": ["*"], "allowLocalBinding": False},
+        "network": {"allowedDomains": [], "deniedDomains": ["*"], "allowLocalBinding": True},
         "filesystem": {
             "denyRead": ["/", state],
-            "allowRead": runtime + [literal(path) for path in (workspace, *read_only)],
-            "allowWrite": [literal(workspace)],
+            "allowRead": runtime
+            + list(tool_places())
+            + [literal(path) for path in (*written, *read_only)],
+            "allowWrite": [literal(path) for path in written],
             "denyWrite": ["/tmp/claude", state],
         },
     }))
@@ -72,31 +123,26 @@ def srt_prefix(srt: str, settings: Path, workspace: Path, *read_only: Path) -> l
 
 
 def check_srt(srt: str, path: str) -> None:
-    """A successful shell must enter the sandbox, do trial I/O, and hit both denials."""
-    with tempfile.TemporaryDirectory() as temporary, socket.socket() as listener:
+    """A successful shell must enter the sandbox, do trial I/O, and be refused a file
+    outside the workspace, to read and to write. (What the tasks need there is tried
+    afterwards, by `unusable`.)"""
+    with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary).resolve()
         workspace = root / "workspace"
         workspace.mkdir()
         (workspace / "inside").write_text("inside\n")
         outside = root / "outside"
         outside.write_text("outside\n")
-        listener.bind(("127.0.0.1", 0))
-        listener.listen()
-        port = str(listener.getsockname()[1])
-        nc = ["/usr/bin/nc", "-z", "-w", "1", "127.0.0.1", port]
-        subprocess.run(nc, check=True, capture_output=True, timeout=5)
         prefix = srt_prefix(srt, root / "settings.json", workspace)
         probe = '''
             IFS= read -r line < inside && test "$line" = inside || exit 10
             printf 'ok\\n' > new && /bin/rm new || exit 11
             if (IFS= read -r line < "$1"); then exit 12; fi
             if (printf 'bad\\n' >> "$1"); then exit 13; fi
-            test -x /usr/bin/nc || exit 14
-            if /usr/bin/nc -z -w 1 127.0.0.1 "$2"; then exit 15; fi
             printf 'srt-check-ok\\n'
         '''
         result = subprocess.run(
-            [*prefix, "/bin/sh", "-c", probe, "probe", str(outside), port],
+            [*prefix, "/bin/sh", "-c", probe, "probe", str(outside)],
             cwd=workspace, env={"PATH": path, "HOME": str(Path.home())},
             capture_output=True, text=True, timeout=30, check=False,
         )
@@ -262,10 +308,18 @@ class Trial:
             self.agent_text += f'\n[secrets.{config.keychain_secret}]\nkind = "keychain"\n'
         if config.srt:
             fixtures = [config.vault] if task == "mcp" else []
-            prefix = srt_prefix(config.srt, self.private / "srt.json", self.ws, *fixtures)
+            self.scratch = self.dir / "scratch"
+            prefix = srt_prefix(
+                config.srt, self.private / "srt.json", self.ws, *fixtures, scratch=self.scratch
+            )
+            told = ", ".join(
+                f"{name} = {json.dumps(value, ensure_ascii=False)}"
+                for name, value in srt_env(self.scratch).items()
+            )
             self.agent_text = self.agent_text.replace(
                 '[kernels.shell]\nkind = "shell"\n',
-                f'[kernels.shell]\nkind = "shell"\nprefix = {json.dumps(prefix, ensure_ascii=False)}\n',
+                f'[kernels.shell]\nkind = "shell"\nprefix = {json.dumps(prefix, ensure_ascii=False)}\n'
+                f"env = {{ {told} }}\n",
                 1,
             )
         self.failures: list[str] = []
@@ -335,9 +389,13 @@ class Trial:
         what the model wrote: never as root)."""
         directory = cwd or self.ws
         argv = ["sh", "-c", command]
+        env = {}
         if self.config.srt:
-            argv = srt_prefix(self.config.srt, self.private / "srt-check.json", directory) + argv
-        return self._spawn(argv, directory, None, timeout, {}, private, provider_key=not self.config.srt)
+            argv = srt_prefix(
+                self.config.srt, self.private / "srt-check.json", directory, scratch=self.scratch
+            ) + argv
+            env = srt_env(self.scratch)
+        return self._spawn(argv, directory, None, timeout, env, private, provider_key=not self.config.srt)
 
     def walled(self, argv: list[str], private: bool = False) -> list[str]:
         """`argv` behind the macOS wall; the trial's own private directory is behind it too
@@ -761,34 +819,53 @@ def healthy(url: str) -> bool:
         return False
 
 
-# What the tasks have the agent, and their own checks, run: each must work where the agent
+# What the tasks have the agent, and their own checks, do: each must work where the agent
 # does. A wall that hides the checks may hide these too (a sandbox that denies macOS's
 # developer directory leaves `python3`, `cc`, `make` and `git` as stubs that only fail), and
-# then an hour's trials measure the wall and not the model.
+# then an hour's trials measure the wall and not the model. Each is a small real use, not a
+# `--version`: a compiler that starts may still have nowhere to write.
 NEEDED = {
-    "python3": "python3 -c pass",
-    "cc": "cc --version",
-    "make": "make --version",
-    "git": "git --version",
-    "curl": "curl --version",
+    "python3": "python3 -c 'import json, sqlite3, http.server, unittest'",
     "a temporary file": 'f=$(mktemp) && rm -f "$f"',
-    "loopback": "python3 -c 'import socket; socket.socket().bind((\"127.0.0.1\", 0))'",
+    "cc": "printf 'int main(void) { return 0; }\\n' > probe.c && cc -o probe probe.c && ./probe",
+    "make": "printf 'all:\\n\\t@true\\n' > Makefile && make",
+    "git": "git init -q . && git -c user.name=bench -c user.email=bench@example.invalid"
+    " commit -q --allow-empty -m probe",
+    "curl": "curl --version",
+    "a server on loopback": """port=$(python3 -c 'import socket; s = socket.socket(); \
+s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])') || exit 1
+python3 -m http.server $port --bind 127.0.0.1 >/dev/null 2>&1 & server=$!
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  curl -sf http://127.0.0.1:$port/ >/dev/null && fetched=yes && break; sleep 1
+done
+kill $server; test "$fetched" = yes""",
 }
 
 
 def unusable(config: Config) -> list[tuple[str, str]]:
     """Each of `NEEDED` that fails behind the wall, with the last thing it said."""
+    directory = config.out / "preflight"
+    shutil.rmtree(directory, ignore_errors=True)
+    workspace = directory / "workspace"
+    workspace.mkdir(parents=True)
+    wall, env = config.wall(), config.env(provider_key=False)
+    if config.user:
+        os.chown(workspace, config.uid, config.gid)
+    if config.srt:
+        scratch = directory / "scratch"
+        wall = srt_prefix(config.srt, directory / "srt.json", workspace, scratch=scratch)
+        env.update(srt_env(scratch))
     broken = []
     for name, command in NEEDED.items():
         try:
             ran = subprocess.run(
-                [*config.wall(), "sh", "-c", command],
+                [*wall, "sh", "-c", command],
                 capture_output=True,
                 text=True,
                 check=False,
                 timeout=60,
-                cwd=config.out,
-                env=config.env(),
+                cwd=workspace,
+                env=env,
                 stdin=subprocess.DEVNULL,
                 **config.demote(),
             )
@@ -798,6 +875,7 @@ def unusable(config: Config) -> list[tuple[str, str]]:
         if ran.returncode != 0:
             said = (ran.stderr.strip() or ran.stdout.strip() or f"exit {ran.returncode}").splitlines()
             broken.append((name, said[-1][:200]))
+    shutil.rmtree(directory, ignore_errors=True)
     return broken
 
 
@@ -839,7 +917,7 @@ def run_model(args, chosen: list[dict], tasks, model: str | None) -> Path:
             + "\n".join(f"  {name}: {why}" for name, why in broken)
             + "\nNothing was run. Let the wall reach them (on macOS: /private/var/select and"
             " the developer tools' directory to read, the temporary directory to write,"
-            " loopback to connect to), then run this again."
+            " loopback to connect to; with --srt, `srt_prefix` is where), then run this again."
         )
     if args.fresh and results.exists():
         results.unlink()

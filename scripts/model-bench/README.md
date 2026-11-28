@@ -40,6 +40,26 @@ breaks one of these stops before the first trial and names it. (A sandbox that d
 `/private/var/select` or the developer tools' directory turns macOS's `python3`, `cc`,
 `make` and `git` into stubs that only print `xcode-select` errors.)
 
+### On a Mac, behind the sandbox runtime
+
+```bash
+scripts/model-bench/run.sh --srt --provider anthropic --model-id claude-haiku-5-5 \
+  --out .bench-runs/haiku
+scripts/model-bench/bench.py --srt-check        # the wall alone, no model
+```
+
+`--srt` puts the agent's shell, and the checks that run what it wrote, under
+[`srt`](https://github.com/anthropic-experimental/sandbox-runtime) (0.0.81 or later, with
+`node`, both on `PATH`) through the shell kernel's `prefix`; the command itself, which talks
+to the model, stays outside. `--out` has to be under `.bench-runs/` in this checkout. Behind
+that wall nothing is read but the system's tools, macOS's developer tools (what
+`/usr/bin/python3`, `cc`, `make` and `git` hand over to), the trial's workspace and a
+scratch directory beside it, which is the shell's `HOME` and `TMPDIR`; only those two are
+written. Loopback is open, since a task starts a server and fetches from it, so a service of
+your own on loopback is in reach too; nothing further out is. `--keychain-secret NAME` has
+the command read the key from the keychain (`corduroy secrets set NAME`) and not from the
+environment.
+
 ### Several at once
 
 ```bash
