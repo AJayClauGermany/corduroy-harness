@@ -62,6 +62,21 @@ your own on loopback is in reach too; nothing further out is. `--keychain-secret
 the command read the key from the keychain (`corduroy secrets set NAME`) and not from the
 environment.
 
+### Started by something else
+
+```bash
+scripts/model-bench/local.sh run lfm3-1.7b,qwen3-0.6b first-try trials=1 tier=1,4
+scripts/model-bench/local.sh models       # tasks, check (macOS: the sandbox alone), stop
+```
+
+`local.sh` is the bench for local models with nothing to steer it but its arguments, each
+checked before anything runs: models `scripts/local-model.sh` knows, a name for the run
+(results in `.bench-runs/<name>`, nowhere else), and `trials=`, `tier=`, `only=`, `climb=`
+and `fresh`. It passes on no other option (`--binary`, `--out`, `--provider`), drops every
+`CORDUROY_*` variable and any `PATH` entry inside this checkout, and uses `--srt` on macOS.
+It is for an agent whose own sandbox lets this one command out: allow
+`scripts/model-bench/local.sh` there, and not `run.sh`.
+
 ### Several at once
 
 ```bash
