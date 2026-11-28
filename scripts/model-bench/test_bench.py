@@ -110,7 +110,9 @@ class Credentials(unittest.TestCase):
         for whole in ("/var", "/tmp", "/etc", "/private/var", "/private/etc", "/private/tmp"):
             self.assertNotIn(whole, files["allowRead"])
         self.assertNotIn(str(trial.private), json.dumps(files["allowRead"]))
-        self.assertEqual(kernel["prefix"][0], "/test/srt")
+        # SRT is started in an empty directory, not the workspace, where it would forbid `.git`.
+        self.assertEqual(kernel["prefix"][:2], ["/bin/sh", "-c"])
+        self.assertEqual(kernel["prefix"][-3:], [str(trial.scratch / "launch"), "/test/srt", str(trial.private / "srt.json")])
         for name in ("HOME", "CLAUDE_CODE_TMPDIR"):
             self.assertTrue(kernel["env"][name].startswith(str(trial.scratch)), name)
         # SRT's own socket goes in TMPDIR, and a trial's directory is too long a path for one.

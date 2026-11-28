@@ -134,6 +134,17 @@ def own_temporary() -> str:
     return os.path.realpath(said) if said.startswith("/") else ""
 
 
+# SRT forbids, in the directory it is started in, what could later run outside the sandbox
+# with the person's rights: a repository's hooks and configuration, and so `.git` itself,
+# which then cannot be made (`git init` fails). A trial's workspace is thrown away and
+# nothing outside the wall runs in it, so SRT is started in an empty directory of its own
+# and what it runs goes back to where it was asked from.
+LAUNCH = """launch=$1 srt=$2 settings=$3; shift 3; here=$PWD
+cd "$launch" || exit 126
+exec "$srt" --settings "$settings" -- /bin/sh -c 'cd "$0" && exec "$@"' "$here" "$@"
+"""
+
+
 def srt_env(scratch: Path) -> dict:
     """What `srt` is started with for a sandboxed shell: a home and a temporary directory
     of the trial's own, since the person's are behind the wall (`git` stops at a
@@ -177,6 +188,8 @@ def srt_prefix(
     runtime = ["/bin", "/usr/bin", "/usr/lib", "/usr/libexec", "/usr/share", "/System/Library",
                "/dev/null", "/dev/urandom", "/private/etc/passwd", "/private/etc/group"]
     written = [workspace, *([scratch] if scratch else [])]
+    launch = scratch / "launch" if scratch else settings.with_suffix(".cwd")
+    launch.mkdir(parents=True, exist_ok=True)
     shared = [own_temporary()] if own_temporary() else []
     settings.write_text(json.dumps({
         "network": {"allowedDomains": [], "deniedDomains": ["*"], "allowLocalBinding": True},
@@ -186,12 +199,12 @@ def srt_prefix(
             + LINKS
             + list(tool_places())
             + shared
-            + [literal(path) for path in (*written, *read_only)],
+            + [literal(path) for path in (*written, *read_only, launch)],
             "allowWrite": [literal(path) for path in written] + shared,
             "denyWrite": ["/tmp/claude", state],
         },
     }))
-    return [srt, "--settings", str(settings), "--"]
+    return ["/bin/sh", "-c", LAUNCH, "srt-launch", str(launch), srt, str(settings)]
 
 
 def check_srt(srt: str, path: str) -> None:
@@ -959,7 +972,7 @@ def outside(wall: list[str], env: dict, workspace: Path) -> str:
 
     listed = said(["/bin/ls", "-lad", "/var", "/var/select", "/private/var/select"])
     inside = said(["/bin/ls", "-la", "/private/var/select/"])
-    version = (said([wall[0], "--version"]) if wall else "").splitlines()[:1]
+    version = said([shutil.which("srt", path=env.get("PATH")) or "srt", "--version"]).splitlines()[:1]
     rules = [
         line.strip()
         for line in said([*wall, "true"], {"SRT_DEBUG": "1", "DEBUG": "1"}).replace("\\n", "\n").splitlines()
