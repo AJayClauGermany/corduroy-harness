@@ -134,6 +134,55 @@ fn granted_tools_work_within_their_scope() {
 }
 
 #[test]
+fn write_and_edit_refuse_a_file_that_changed_since_it_was_last_read() {
+    let dir = scratch("stale");
+    let mut host = host(&dir).unwrap();
+    let workspace = Scope::subtree(&dir.to_string_lossy());
+    host.app.plugin(
+        load("pi-tools", &dir)
+            .unwrap()
+            .grant("fs-read", workspace.clone())
+            .grant("fs-write", workspace)
+            .grant("kernel", Scope::none()),
+    );
+    let call = |tool: &str, input: &str| host.tools.call(tool, input);
+    let stale = |what: &str| {
+        Err::<corduroy_core::ToolOutput, _>(ToolError::Failed(format!(
+            "{what} has changed since it was last read: something else wrote to it. Read it \
+             again, then make the change against what it holds now."
+        )))
+    };
+    let edit = r#"{"path":"a.txt","edits":[{"oldText":"one","newText":"1"}]}"#;
+
+    // A file these tools wrote and nobody else touched is theirs to change.
+    call("write", r#"{"path":"a.txt","content":"one two"}"#).unwrap();
+    call("edit", edit).unwrap();
+    // Something else writes to it: the person's editor, a command.
+    fs::write(dir.join("a.txt"), "one by another").unwrap();
+    let edited = call("edit", edit);
+    let written = call("write", r#"{"path":"./a.txt","content":"mine"}"#);
+    assert_eq!(edited, stale("a.txt"));
+    assert_eq!(written, stale("./a.txt"));
+    assert_eq!(
+        fs::read_to_string(dir.join("a.txt")).unwrap(),
+        "one by another"
+    );
+    // Reading it again is what lifts the refusal.
+    call("read", r#"{"path":"a.txt"}"#).unwrap();
+    call("edit", edit).unwrap();
+    assert_eq!(
+        fs::read_to_string(dir.join("a.txt")).unwrap(),
+        "1 by another"
+    );
+    // A file never read here is written as before, and so is one that has gone.
+    fs::write(dir.join("b.txt"), "theirs").unwrap();
+    call("write", r#"{"path":"b.txt","content":"mine"}"#).unwrap();
+    fs::remove_file(dir.join("b.txt")).unwrap();
+    call("write", r#"{"path":"b.txt","content":"again"}"#).unwrap();
+    assert_eq!(fs::read_to_string(dir.join("b.txt")).unwrap(), "again");
+}
+
+#[test]
 fn bash_runs_in_a_kernel_that_keeps_its_state() {
     let dir = scratch("kernel");
     let mut host = host(&dir).unwrap();
