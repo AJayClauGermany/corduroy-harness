@@ -78,6 +78,18 @@ def tool_places() -> tuple[str, ...]:
         places.append(application.group(1))
     elif chosen.startswith("/") and chosen not in places:
         places.append(chosen)
+    # The sandbox judges a path by where it really is, so each place is named by that as
+    # well, and so is whatever the links in /var/select point at.
+    select = Path("/private/var/select")
+    try:
+        links = [str(entry) for entry in select.iterdir()]
+    except OSError:
+        links = []
+    for place in ["/var/select", *links, *places[:]]:
+        real = os.path.realpath(place)
+        for spelling in (place, real):
+            if spelling not in places and spelling != "/":
+                places.append(spelling)
     return tuple(places)
 
 
@@ -835,7 +847,10 @@ def healthy(url: str) -> bool:
 # `--version`: a compiler that starts may still have nowhere to write.
 NEEDED = {
     "python3": "python3 -c 'import json, sqlite3, http.server, unittest'",
-    "a temporary file": 'f=$(mktemp) && rm -f "$f"',
+    # Not a bare `mktemp`: macOS's goes to the person's own temporary directory whatever
+    # `TMPDIR` says, and that is behind the wall on purpose (trials would meet there).
+    "a temporary file": 'f=$(mktemp "${TMPDIR:-/tmp}/probe.XXXXXX") && rm -f "$f" &&'
+    " python3 -c 'import tempfile; tempfile.TemporaryFile().close()'",
     "cc": "printf 'int main(void) { return 0; }\\n' > probe.c && cc -o probe probe.c && ./probe",
     "make": "printf 'all:\\n\\t@true\\n' > Makefile && make",
     "git": "git init -q . && git -c user.name=bench -c user.email=bench@example.invalid"
@@ -864,13 +879,41 @@ def denials(seconds: float) -> list[str]:
     try:
         said = subprocess.run(
             ["/usr/bin/log", "show", "--last", f"{int(seconds) + 5}s", "--style", "compact",
-             "--predicate", 'sender == "Sandbox" AND eventMessage CONTAINS "deny"'],
+             "--predicate", 'eventMessage CONTAINS "deny("'],
             capture_output=True, text=True, timeout=120, check=False,
         ).stdout
     except (OSError, subprocess.SubprocessError) as error:
         return [f"(the system log could not be read: {error})"]
     found = re.findall(r"Sandbox: (\S+?)\(\d+\) deny\(\d+\) ([^\n]+)", said)
     return list(dict.fromkeys(f"{program}: {what.strip()}" for program, what in found))[:80]
+
+
+def outside(wall: list[str], env: dict, workspace: Path) -> str:
+    """What the places the developer tools start from are, seen without the wall, and what
+    SRT made of them."""
+    def said(argv: list[str], extra: dict | None = None) -> str:
+        try:
+            ran = subprocess.run(
+                argv, capture_output=True, text=True, timeout=60, check=False, cwd=workspace,
+                env={**env, **(extra or {})}, stdin=subprocess.DEVNULL,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            return str(error)
+        return (ran.stdout + ran.stderr).strip()
+
+    listed = said(["/bin/ls", "-lad", "/var", "/var/select", "/private/var/select"])
+    inside = said(["/bin/ls", "-la", "/private/var/select/"])
+    version = (said([wall[0], "--version"]) if wall else "").splitlines()[:1]
+    rules = [
+        line.strip()
+        for line in said([*wall, "true"], {"SRT_DEBUG": "1", "DEBUG": "1"}).replace("\\n", "\n").splitlines()
+        if "select" in line or "CommandLineTools" in line
+    ]
+    places = ", ".join(tool_places())
+    return "\n    ".join(
+        [f"srt {' '.join(version)}", f"asked to read: {places}", *listed.splitlines(), *inside.splitlines(),
+         "SRT's rules that name them:", *(rules[:20] or ["(none shown)"])]
+    )
 
 
 def unusable(config: Config) -> list[tuple[str, str]]:
@@ -917,6 +960,8 @@ def unusable(config: Config) -> list[tuple[str, str]]:
         if MACOS:
             refused = denials(time.time() - started) or ["(none in the system log)"]
             broken.append(("(refused by the sandbox)", "\n    ".join(refused)))
+        if config.srt:
+            broken.append(("(seen from outside it)", outside(wall, env, workspace)))
     shutil.rmtree(directory, ignore_errors=True)
     return broken
 
