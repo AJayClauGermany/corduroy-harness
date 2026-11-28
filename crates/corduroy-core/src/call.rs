@@ -25,6 +25,13 @@
 //! With the `std` feature each thread has a scope of its own. Without it there is one for the
 //! whole program, which is right for a single-threaded executor and wrong for anything that
 //! serves two sessions at once.
+//!
+//! **Work handed to another thread takes the scope with it.** A thread a tool starts has no
+//! scope, so what it does there is done for no session: no stop reaches it, and what it
+//! calls is attributed to nobody. [`carry`] takes what this thread serves, and
+//! [`Carried::enter`] serves it on another. That such a handle belongs here is a direction
+//! and not a decision (B17 in `docs/open-questions.md`); this is a prototype of it, and
+//! `docs/prototypes.md` says what it found.
 
 use alloc::borrow::ToOwned;
 use alloc::string::String;
@@ -155,6 +162,91 @@ impl Serve {
         });
         drop(guard);
         (result, waits.unwrap_or_default())
+    }
+}
+
+/// What a thread was serving when [`carry`] was called, to serve it on another thread.
+///
+/// A prototype: see [the module](self).
+///
+/// ```
+/// use corduroy_core::SessionId;
+/// use corduroy_core::call::{carry, current, within};
+///
+/// let session = SessionId::new("main");
+/// let (seen, _waits) = within(session.clone(), "call-1".into(), || {
+///     let carried = carry().expect("a call is being served");
+///     // The thread starts with no scope of its own, and serves the call inside `enter`.
+///     std::thread::spawn(move || carried.enter(current).0).join().ok().flatten()
+/// });
+/// assert_eq!(seen.map(|scope| scope.session), Some(session));
+/// ```
+#[derive(Debug, Clone)]
+pub struct Carried {
+    /// The scopes that were being served, outermost first.
+    serving: Vec<Serve>,
+}
+
+/// What this thread is serving, to hand to another thread: the session, the tool call, what
+/// stops the run and what bounds the call's result. `None` if it serves nothing.
+///
+/// The waits are not taken along: see [`Carried::enter`].
+#[must_use]
+pub fn carry() -> Option<Carried> {
+    let carried = serving(|serving| {
+        serving
+            .iter()
+            .map(|served| Serve {
+                scope: served.scope.clone(),
+                stop: served.stop.clone(),
+                budget: served.budget,
+            })
+            .collect::<Vec<_>>()
+    });
+    (!carried.is_empty()).then_some(Carried { serving: carried })
+}
+
+impl Carried {
+    /// Run `work` on this thread as what was [carried](carry) here: it serves the same
+    /// session and call, and learns of the same stop. Returns what `work` returned, and the
+    /// signals anything it called said the call waits for.
+    ///
+    /// Those waits belong to the call and reached only this thread. Whoever handed the
+    /// work over says them again where the call is served ([`wait_for`], on the thread the
+    /// tool was called on), or the run does not wait for them.
+    pub fn enter<R>(&self, work: impl FnOnce() -> R) -> (R, Vec<String>) {
+        let depth = self.serving.len();
+        serving(|serving| {
+            serving.extend(self.serving.iter().cloned().map(|serve| Serving {
+                scope: serve.scope,
+                waits: Vec::new(),
+                stop: serve.stop,
+                budget: serve.budget,
+            }));
+        });
+        // Popped even if `work` panics, as a scope served here is.
+        let guard = PopAll(depth);
+        let result = work();
+        let waits = serving(|serving| {
+            serving
+                .last_mut()
+                .map(|served| mem::take(&mut served.waits))
+        });
+        drop(guard);
+        (result, waits.unwrap_or_default())
+    }
+}
+
+/// Pops as many scopes as it holds on drop: when [`Carried::enter`] returns, or its work
+/// panics.
+struct PopAll(usize);
+
+impl Drop for PopAll {
+    fn drop(&mut self) {
+        serving(|serving| {
+            let kept = serving.len().saturating_sub(self.0);
+            serving.truncate(kept);
+        });
     }
 }
 
@@ -308,6 +400,66 @@ mod tests {
 
         assert_eq!((before, after, nested), (false, true, true));
         assert!(!stopping());
+    }
+
+    /// What a thread sees of the scope: what it serves, whether to stop, the result's bound.
+    type Seen = (Option<Scope>, bool, Option<u32>);
+
+    fn seen() -> Seen {
+        (current(), stopping(), budget())
+    }
+
+    /// On a thread of its own: what it sees bare, what it sees inside `carried` (where it
+    /// also says the call waits for `ci/done`), and the waits `enter` hands back.
+    fn elsewhere(carried: Carried) -> (Seen, Seen, Vec<String>) {
+        let work = move || {
+            let bare = seen();
+            let (inside, waits) = carried.enter(|| (wait_for("ci/done"), seen()).1);
+            assert_eq!(current(), None);
+            (bare, inside, waits)
+        };
+        std::thread::spawn(work).join().unwrap()
+    }
+
+    #[test]
+    fn work_on_another_thread_serves_what_was_carried_to_it() {
+        assert!(carry().is_none());
+        let flag = Arc::new(AtomicBool::new(false));
+        let serve = Serve::session(SessionId::new("main"))
+            .call("1")
+            .budget(64)
+            .stopped_by(Arc::clone(&flag));
+
+        let ((bare, inside, handed_back), said_here) = serve.run(|| {
+            let carried = carry().unwrap();
+            flag.store(true, Ordering::SeqCst);
+            elsewhere(carried)
+        });
+
+        // A thread of its own serves nothing until it enters what was carried.
+        assert_eq!(bare, (None, false, None));
+        let scope = Scope {
+            session: SessionId::new("main"),
+            call: Some("1".to_owned()),
+        };
+        assert_eq!(inside, (Some(scope), true, Some(64)));
+        // The wait was said on the other thread, and is not this one's until it is said here.
+        assert_eq!(handed_back, ["ci/done"]);
+        assert_eq!(said_here, Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_stop_of_an_outer_call_is_carried_with_the_inner_one() {
+        let flag = Arc::new(AtomicBool::new(true));
+        let outer = Serve::session(SessionId::new("main"))
+            .call("1")
+            .stopped_by(flag);
+
+        let (carried, _) = outer.run(|| within(SessionId::new("main"), "2".into(), carry).0);
+        let (stopped, _) = carried.unwrap().enter(stopping);
+
+        assert!(stopped);
+        assert_eq!(current(), None);
     }
 
     #[test]
