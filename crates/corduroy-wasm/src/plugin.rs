@@ -26,7 +26,7 @@ use bindings::corduroy::plugin::{
     service, session, state, tools, types,
 };
 use host::{HostState, Lent, Loader};
-use instance::{Blueprint, Instance};
+use instance::{Blueprint, Heard, Instance};
 use world::Admits;
 
 /// The package every host interface belongs to, as an import names it.
@@ -478,7 +478,6 @@ fn link_error(error: &wasmtime::Error) -> PluginError {
     PluginError::new(format!("{error:#}"))
 }
 
-/// Hand an event to a plugin's `on-event`, unless the plugin raised it itself.
 /// `spec` with what an add-on said about its tool by name. A name this host does not know,
 /// or a value it cannot read, is passed over: a later world says more there.
 fn said(spec: ToolSpec, more: &[types::NamedValue]) -> ToolSpec {
@@ -496,6 +495,8 @@ fn said(spec: ToolSpec, more: &[types::NamedValue]) -> ToolSpec {
     spec.result(tokens, keep)
 }
 
+/// Hand an event to a plugin's `on-event`, unless the plugin raised it itself. A plugin in
+/// a call hears it when the call returns.
 fn deliver(instance: &Instance, event: &Event) {
     if event.source == Source::Plugin(instance.name().to_owned()) {
         return;
@@ -517,22 +518,11 @@ fn deliver(instance: &Instance, event: &Event) {
         drop(instance.events().emit(stopped));
         return;
     }
-    let cause = event.id;
-    let session = event.session.clone();
-    let event = host::event_of(event);
-    // A trap is already on the event stream as `plugin/trapped`; a listener has nobody to
-    // return it to.
-    let handle = || {
-        drop(instance.call_caused(Some(cause), |plugin, store| {
-            plugin.call_on_event(store, &event)
-        }));
-    };
-    // An event of a session is handled for that session: the plugin can ask which it is,
-    // and what it raises belongs to it.
-    match session {
-        Some(session) => drop(corduroy_core::call::Serve::session(session).run(handle)),
-        None => handle(),
-    }
+    instance.hear(Heard {
+        cause: event.id,
+        session: event.session.clone(),
+        event: host::event_of(event),
+    });
 }
 
 struct WasmTool {
